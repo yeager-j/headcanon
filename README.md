@@ -92,7 +92,31 @@ The server binding derives one bounded SHA-256 cache tag per axis,
 `createNextMutationExecutor` finalizes accepted stamps with `updateTag`, one
 shared-event invalidation publication, and server `refresh()`. The separately
 named external-commit helpers preserve the Server Action versus Route Handler
-context distinction.
+context distinction. Each binding requires an application-owned failure
+reporter; publication rejection and timeout are recorded there without changing
+the accepted outcome.
+
+## Ably invalidations
+
+`@workspace/headcanon/ably/server` turns one accepted stamp into a singleton
+message per axis through an application-supplied Ably REST client. Server and
+client share the deployment-scoped SHA-256 channel derivation from
+`@workspace/headcanon/ably/channels`; payload parsing admits only `eventId`,
+`axis`, and a valid revision.
+
+`@workspace/headcanon/ably/client` aggregates every mounted root's observed
+axes, requests one exact subscribe-only capability through Ably `authorize()`,
+and attaches new channels only after authorization succeeds. Axis-set changes
+and recovered connections enter `reauthorizing`; authorization, attachment, or
+connection failure enters `unavailable`. A successful attachment or connection
+recovery requests one coalesced refresh to close the delivery gap.
+
+Viewer policy and token issuance remain application-owned. The application's
+auth callback must derive permission from trusted viewer and tenant context; it
+must not grant an axis merely because the browser requested its channel. The
+128-axis contract fixture measures a 14,081-byte capability JSON claim under the
+`production` namespace, so adopters can choose native Ably Tokens when a JWT or
+header representation would be impractical.
 
 ## Contract fixtures
 
@@ -131,6 +155,3 @@ The real-Postgres contract suite runs when `HEADCANON_TEST_DATABASE_URL` or
 `DATABASE_URL` is available. It creates a unique schema, proves receipt/domain
 atomicity, concurrent deduplication, savepoint rejection, attempt-local stamps,
 and SQLSTATE serialization retry, then drops the schema.
-
-Concrete realtime adapters and application integration belong to later
-Headcanon milestones.

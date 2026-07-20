@@ -41,10 +41,14 @@ export {
   type ReadableStampAccumulator,
   type StampAccumulator,
 } from "./authority"
-export type {
-  AxisInvalidation,
-  InvalidationAdapter,
-  InvalidationPublisher,
-  InvalidationStatus,
-  InvalidationSubscription,
+export {
+  axisInvalidation,
+  type AxisInvalidationValidationError,
+  type AxisInvalidation,
+  type InvalidationAdapter,
+  type InvalidationPublicationFailure,
+  type InvalidationPublicationFailureReporter,
+  type InvalidationPublisher,
+  type InvalidationStatus,
+  type InvalidationSubscription,
 } from "./invalidation"

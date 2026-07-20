@@ -8,11 +8,13 @@ import {
   axisId,
   defineMutation,
   defineProtocol,
+  revision,
   revisionVector,
   type AcceptedStamp,
   type InvalidationPublisher,
   type MutationAuthorityAdapter,
 } from "../index"
+import { createInMemoryMutationAuthority } from "../testing"
 import {
   announceExternalCommit,
   axisCacheTag,
@@ -108,7 +110,11 @@ describe("Next commit finalization", () => {
       events.push("refresh")
     })
 
-    await finalizeExternalActionCommit(accepted, recordingPublisher(events))
+    await finalizeExternalActionCommit(
+      accepted,
+      recordingPublisher(events),
+      vi.fn()
+    )
 
     expect(events.slice(0, 2)).toEqual([
       `update:${axisCacheTag(first)}`,
@@ -121,7 +127,7 @@ describe("Next commit finalization", () => {
   })
 
   it("uses immediate revalidation outside a Server Action and never refreshes", async () => {
-    await announceExternalCommit(accepted, { publish: vi.fn() })
+    await announceExternalCommit(accepted, { publish: vi.fn() }, vi.fn())
 
     expect(nextCache.revalidateTag.mock.calls).toEqual([
       [axisCacheTag(first), { expire: 0 }],
@@ -132,23 +138,50 @@ describe("Next commit finalization", () => {
   })
 
   it("keeps publication failure advisory and still refreshes the invoking route", async () => {
+    const reportFailure = vi.fn()
+    const error = new Error("realtime unavailable")
     await expect(
-      finalizeExternalActionCommit(accepted, {
-        publish: async () => {
-          throw new Error("realtime unavailable")
+      finalizeExternalActionCommit(
+        accepted,
+        {
+          publish: async () => {
+            throw error
+          },
         },
-      })
+        reportFailure
+      )
     ).resolves.toBeUndefined()
 
     expect(nextCache.updateTag).toHaveBeenCalledTimes(2)
     expect(nextCache.refresh).toHaveBeenCalledOnce()
+    expect(reportFailure).toHaveBeenCalledExactlyOnceWith({
+      kind: "rejected",
+      eventId: expect.any(String),
+      stamp: accepted,
+      error,
+    })
+
+    await expect(
+      finalizeExternalActionCommit(
+        accepted,
+        { publish: async () => Promise.reject(error) },
+        () => {
+          throw new Error("diagnostics unavailable")
+        }
+      )
+    ).resolves.toBeUndefined()
   })
 
   it("bounds stalled advisory publication after refreshing the route", async () => {
     vi.useFakeTimers()
-    const finalization = finalizeExternalActionCommit(accepted, {
-      publish: () => new Promise<void>(() => undefined),
-    })
+    const reportFailure = vi.fn()
+    const finalization = finalizeExternalActionCommit(
+      accepted,
+      {
+        publish: () => new Promise<void>(() => undefined),
+      },
+      reportFailure
+    )
     const settled = vi.fn()
     void finalization.then(settled)
 
@@ -161,6 +194,11 @@ describe("Next commit finalization", () => {
 
     await expect(finalization).resolves.toBeUndefined()
     expect(settled).toHaveBeenCalledOnce()
+    expect(reportFailure).toHaveBeenCalledExactlyOnceWith({
+      kind: "timed-out",
+      eventId: expect.any(String),
+      stamp: accepted,
+    })
   })
 })
 
@@ -211,6 +249,7 @@ describe("Next mutation executor", () => {
         "next.increment": () => ok(undefined),
       },
       invalidations,
+      reportInvalidationFailure: vi.fn(),
     })
 
     const result = await execute(
@@ -228,5 +267,46 @@ describe("Next mutation executor", () => {
     )
     expect(invalidations.publish).toHaveBeenCalledOnce()
     expect(nextCache.refresh).toHaveBeenCalledOnce()
+  })
+
+  it("repeats finalization from the recorded stamp on duplicate delivery", async () => {
+    const authority = createInMemoryMutationAuthority<
+      number,
+      string,
+      Rejection
+    >({ initialState: 0, scope: (actor) => actor })
+    const invalidations = { publish: vi.fn() }
+    const counterAxis = axisId("counter/value")
+    const execute = createNextMutationExecutor({
+      protocol,
+      authority,
+      handlers: {
+        "next.increment": ({ tx, args, stamp }) => {
+          const next = tx.read() + args.amount
+          const stampedRevision = revision(next)
+          if (!stampedRevision.ok) throw new Error("Invalid counter revision")
+          tx.write(next)
+          stamp.record(counterAxis, stampedRevision.value)
+          return ok(undefined)
+        },
+      },
+      invalidations,
+      reportInvalidationFailure: vi.fn(),
+    })
+    const envelope = {
+      protocol: protocol.id,
+      mutationId: "73da9d18-9796-44b6-8bc1-066d9ca24fbb",
+      invocation: increment({ amount: 1 }),
+    }
+
+    const first = await execute(envelope, "actor")
+    const duplicate = await execute(envelope, "actor")
+
+    expect(authority.read()).toBe(1)
+    expect(duplicate).toEqual(first)
+    expect(invalidations.publish).toHaveBeenCalledTimes(2)
+    expect(invalidations.publish.mock.calls[0]?.[1]).toEqual(
+      invalidations.publish.mock.calls[1]?.[1]
+    )
   })
 })

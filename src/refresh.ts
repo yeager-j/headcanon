@@ -153,7 +153,11 @@ export function useIncorporation<State>(
   const graceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scheduledRefreshRef = useRef(false)
-  const startRefreshRef = useRef<() => void>(() => undefined)
+  const scheduledGapRefreshRef = useRef(false)
+  const pendingGapRefreshRef = useRef(false)
+  const startRefreshRef = useRef<(closeSubscriptionGap?: boolean) => void>(
+    () => undefined
+  )
   const [refreshState, setRefreshState] = useState(CURRENT_REFRESH_STATE)
   const [invalidationStatus, setInvalidationStatus] =
     useState<InvalidationStatus>(invalidations?.initialStatus ?? "disabled")
@@ -191,14 +195,21 @@ export function useIncorporation<State>(
     clearRetryTimer()
   }, [clearRetryTimer])
 
-  const scheduleRefresh = useCallback(() => {
-    if (activeRefreshRef.current || scheduledRefreshRef.current) return
+  const scheduleRefresh = useCallback((closeSubscriptionGap = false) => {
+    if (closeSubscriptionGap) scheduledGapRefreshRef.current = true
+    if (activeRefreshRef.current) {
+      if (closeSubscriptionGap) pendingGapRefreshRef.current = true
+      return
+    }
+    if (scheduledRefreshRef.current) return
 
     scheduledRefreshRef.current = true
     setRefreshState({ freshness: "refreshing", stallReason: null })
     queueMicrotask(() => {
       scheduledRefreshRef.current = false
-      if (mountedRef.current) startRefreshRef.current()
+      const closesGap = scheduledGapRefreshRef.current
+      scheduledGapRefreshRef.current = false
+      if (mountedRef.current) startRefreshRef.current(closesGap)
     })
   }, [])
 
@@ -210,6 +221,12 @@ export function useIncorporation<State>(
       activeRefreshRef.current = false
       activeCompletionRef.current = null
       requestedCanonRef.current = null
+
+      if (pendingGapRefreshRef.current) {
+        pendingGapRefreshRef.current = false
+        scheduleRefresh(true)
+        return
+      }
 
       if (isCovered()) {
         attemptsRef.current = 0
@@ -237,46 +254,53 @@ export function useIncorporation<State>(
         startRefreshRef.current()
       }, UNCOVERED_REFRESH_RETRY_MS)
     },
-    [isCovered, requirements]
+    [isCovered, requirements, scheduleRefresh]
   )
 
-  const startRefresh = useCallback(() => {
-    if (activeRefreshRef.current || isCovered() || !mountedRef.current) {
-      if (isCovered()) setRefreshState(CURRENT_REFRESH_STATE)
-      return
-    }
-
-    clearGraceTimer()
-    clearRetryTimer()
-    activeRefreshRef.current = true
-    activeCompletionRef.current = "canon"
-    requestedCanonRef.current = canonRef.current
-    attemptsRef.current += 1
-    setRefreshState({ freshness: "refreshing", stallReason: null })
-
-    // React 19 entangles isPending across overlapping async Actions. The held
-    // optimistic Action would therefore hide this transition's settled edge.
-    // A returned Promise owns completion; a void carrier completes when it
-    // delivers the next canon through this hook's input.
-    startRefreshTransition(async () => {
-      let completion: void | Promise<void>
-      try {
-        completion = refreshRef.current.request()
-      } catch {
-        completeRefresh(true)
+  const startRefresh = useCallback(
+    (closeSubscriptionGap = false) => {
+      if (activeRefreshRef.current) {
+        if (closeSubscriptionGap) pendingGapRefreshRef.current = true
+        return
+      }
+      if ((!closeSubscriptionGap && isCovered()) || !mountedRef.current) {
+        if (isCovered()) setRefreshState(CURRENT_REFRESH_STATE)
         return
       }
 
-      if (completion === undefined) return
-      activeCompletionRef.current = "request"
-      try {
-        await completion
-        completeRefresh(false)
-      } catch {
-        completeRefresh(true)
-      }
-    })
-  }, [clearGraceTimer, clearRetryTimer, completeRefresh, isCovered])
+      clearGraceTimer()
+      clearRetryTimer()
+      activeRefreshRef.current = true
+      activeCompletionRef.current = "canon"
+      requestedCanonRef.current = canonRef.current
+      attemptsRef.current += 1
+      setRefreshState({ freshness: "refreshing", stallReason: null })
+
+      // React 19 entangles isPending across overlapping async Actions. The held
+      // optimistic Action would therefore hide this transition's settled edge.
+      // A returned Promise owns completion; a void carrier completes when it
+      // delivers the next canon through this hook's input.
+      startRefreshTransition(async () => {
+        let completion: void | Promise<void>
+        try {
+          completion = refreshRef.current.request()
+        } catch {
+          completeRefresh(true)
+          return
+        }
+
+        if (completion === undefined) return
+        activeCompletionRef.current = "request"
+        try {
+          await completion
+          completeRefresh(false)
+        } catch {
+          completeRefresh(true)
+        }
+      })
+    },
+    [clearGraceTimer, clearRetryTimer, completeRefresh, isCovered]
+  )
   startRefreshRef.current = startRefresh
 
   const beginAcceptanceRefresh = useCallback(() => {
@@ -377,8 +401,9 @@ export function useIncorporation<State>(
       axes: observedAxes,
       onInvalidation: observeInvalidation,
       onStatusChange: setInvalidationStatus,
+      onSubscriptionGap: () => scheduleRefresh(true),
     })
-  }, [invalidations, observeInvalidation, observedAxes])
+  }, [invalidations, observeInvalidation, observedAxes, scheduleRefresh])
 
   useEffect(() => {
     if (

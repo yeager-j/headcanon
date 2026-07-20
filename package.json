@@ -14,6 +14,9 @@
   "sideEffects": false,
   "exports": {
     ".": "./src/index.ts",
+    "./ably/channels": "./src/ably/channels.ts",
+    "./ably/client": "./src/ably/client.ts",
+    "./ably/server": "./src/ably/server.ts",
     "./drizzle": "./src/drizzle.ts",
     "./next/client": "./src/next/client.ts",
     "./next/server": "./src/next/server.ts",
@@ -26,6 +29,7 @@
     "canonicalize": "^3.0.0"
   },
   "peerDependencies": {
+    "ably": "^2.22.1",
     "drizzle-orm": "^0.45.2",
     "next": "^16.1.6",
     "react": "^19.2.4"
@@ -37,6 +41,7 @@
     "@types/react-dom": "^19.2.3",
     "@workspace/eslint-config": "*",
     "@workspace/typescript-config": "*",
+    "ably": "^2.22.1",
     "eslint": "^9.39.2",
     "jsdom": "^29.1.1",
     "pg": "^8.22.0",

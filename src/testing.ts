@@ -918,6 +918,7 @@ export interface InvalidationContractFixture {
   readonly adapter: InvalidationAdapter
   readonly publisher: InvalidationPublisher
   readonly published: () => readonly AxisInvalidation[]
+  readonly settled: () => Promise<void>
 }
 
 export interface InvalidationContractHarness {
@@ -935,6 +936,7 @@ export function createInMemoryInvalidationContractHarness(): InvalidationContrac
         adapter: invalidations,
         publisher: invalidations,
         published: () => invalidations.published,
+        settled: async () => undefined,
       }
     },
   }
@@ -997,6 +999,7 @@ export function verifyInvalidationContract(
         onInvalidation: unrelated,
         onStatusChange: vi.fn(),
       })
+      await fixture.settled()
 
       await fixture.publisher.publish(
         "shared-event",
@@ -1059,6 +1062,9 @@ export function verifyInvalidationContract(
         }) => useIncorporation(canon, refresh, fixture.adapter),
         { initialProps: { canon: invalidationCanon(0, 0) } }
       )
+      await fixture.settled()
+      await flushMicrotasks()
+      request.mockClear()
 
       await act(async () => {
         await fixture.publisher.publish(
@@ -1095,6 +1101,9 @@ export function verifyInvalidationContract(
       const rendered = renderHook(() =>
         useIncorporation(invalidationCanon(0, 0), refresh, fixture.adapter)
       )
+      await fixture.settled()
+      await flushMicrotasks()
+      request.mockClear()
 
       await act(async () => {
         await fixture.publisher.publish(
@@ -1123,6 +1132,9 @@ export function verifyInvalidationContract(
       const rendered = renderHook(() =>
         useIncorporation(invalidationCanon(0, 0), refresh, fixture.adapter)
       )
+      await fixture.settled()
+      await flushMicrotasks()
+      request.mockClear()
       const ownStamp = invalidationStamp({ [INVALIDATION_AXIS_A]: 1 })
 
       act(() => rendered.result.current.recordAcceptance("own-write", ownStamp))

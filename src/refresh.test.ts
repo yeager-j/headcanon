@@ -378,6 +378,29 @@ describe("createObservedRoot", () => {
     expect(request).not.toHaveBeenCalled()
   })
 
+  it("coalesces post-attachment gap recovery even when canon appears current", async () => {
+    const invalidations = controlledInvalidations()
+    const request = vi.fn(async () => undefined)
+    const adapter: RefreshAdapter = { acceptanceGraceMs: 0, request }
+    function useRefresh() {
+      return adapter
+    }
+    const useObserved = createObservedRoot({
+      refresh: useRefresh,
+      invalidations: invalidations.adapter,
+    })
+    const rendered = renderHook(() => useObserved({ canon: canon(7, 2) }))
+
+    act(() => {
+      invalidations.subscriptions[0]?.onSubscriptionGap?.()
+      invalidations.subscriptions[0]?.onSubscriptionGap?.()
+    })
+    await flushMicrotasks()
+
+    expect(request).toHaveBeenCalledOnce()
+    expect(rendered.result.current.status.freshness).toBe("current")
+  })
+
   it("tracks unrestricted axis IDs without dependency-key collisions", () => {
     const invalidations = controlledInvalidations()
     const adapter: RefreshAdapter = {

@@ -6,7 +6,10 @@ import {
   type MutationAuthorityAdapter,
   type MutationHandlers,
 } from "../authority"
-import type { InvalidationPublisher } from "../invalidation"
+import type {
+  InvalidationPublicationFailureReporter,
+  InvalidationPublisher,
+} from "../invalidation"
 import type { AnyMutationDefinition, ProtocolDefinition } from "../protocol"
 import {
   axisId,
@@ -43,22 +46,52 @@ export function tagVersionedBase<
 
 type ExpireAxis = (tag: string) => void
 
+function recordPublicationFailure(
+  reportFailure: InvalidationPublicationFailureReporter,
+  failure: Parameters<InvalidationPublicationFailureReporter>[0]
+): void {
+  try {
+    reportFailure(failure)
+  } catch {
+    // Diagnostics remain advisory just like the publication they observe.
+  }
+}
+
 async function publishInvalidation(
   stamp: AcceptedStamp,
-  invalidations: InvalidationPublisher
+  invalidations: InvalidationPublisher,
+  reportFailure: InvalidationPublicationFailureReporter
 ): Promise<void> {
+  const eventId = randomUUID()
   let timeout: ReturnType<typeof setTimeout> | undefined
-  const timedOut = new Promise<void>((resolve) => {
-    timeout = setTimeout(resolve, INVALIDATION_PUBLICATION_TIMEOUT_MS)
+  const timedOut = new Promise<"timed-out">((resolve) => {
+    timeout = setTimeout(
+      () => resolve("timed-out"),
+      INVALIDATION_PUBLICATION_TIMEOUT_MS
+    )
   })
 
   try {
-    await Promise.race([
-      Promise.resolve().then(() => invalidations.publish(randomUUID(), stamp)),
+    const outcome = await Promise.race([
+      Promise.resolve()
+        .then(() => invalidations.publish(eventId, stamp))
+        .then(() => "published" as const),
       timedOut,
     ])
-  } catch {
-    // Realtime publication is advisory; cache expiry remains authoritative.
+    if (outcome === "timed-out") {
+      recordPublicationFailure(reportFailure, {
+        kind: "timed-out",
+        eventId,
+        stamp,
+      })
+    }
+  } catch (error) {
+    recordPublicationFailure(reportFailure, {
+      kind: "rejected",
+      eventId,
+      stamp,
+      error,
+    })
   } finally {
     clearTimeout(timeout)
   }
@@ -68,6 +101,7 @@ async function finalizeStamp(
   stamp: AcceptedStamp,
   invalidations: InvalidationPublisher,
   expireAxis: ExpireAxis,
+  reportFailure: InvalidationPublicationFailureReporter,
   refreshRoute?: () => void
 ): Promise<void> {
   for (const rawAxis of Object.keys(stamp.revisions)) {
@@ -75,24 +109,29 @@ async function finalizeStamp(
   }
 
   refreshRoute?.()
-  await publishInvalidation(stamp, invalidations)
+  await publishInvalidation(stamp, invalidations, reportFailure)
 }
 
 /** Finalizes a non-protocol commit made inside a Server Action. */
 export function finalizeExternalActionCommit(
   stamp: AcceptedStamp,
-  invalidations: InvalidationPublisher
+  invalidations: InvalidationPublisher,
+  reportFailure: InvalidationPublicationFailureReporter
 ): Promise<void> {
-  return finalizeStamp(stamp, invalidations, updateTag, refresh)
+  return finalizeStamp(stamp, invalidations, updateTag, reportFailure, refresh)
 }
 
 /** Finalizes a non-protocol commit without an invoking route to refresh. */
 export function announceExternalCommit(
   stamp: AcceptedStamp,
-  invalidations: InvalidationPublisher
+  invalidations: InvalidationPublisher,
+  reportFailure: InvalidationPublicationFailureReporter
 ): Promise<void> {
-  return finalizeStamp(stamp, invalidations, (tag) =>
-    revalidateTag(tag, { expire: 0 })
+  return finalizeStamp(
+    stamp,
+    invalidations,
+    (tag) => revalidateTag(tag, { expire: 0 }),
+    reportFailure
   )
 }
 
@@ -110,6 +149,7 @@ export function createNextMutationExecutor<
   readonly authority: MutationAuthorityAdapter<Transaction, Actor, Rejection>
   readonly handlers: MutationHandlers<Protocol, Transaction, Actor, Rejection>
   readonly invalidations: InvalidationPublisher
+  readonly reportInvalidationFailure: InvalidationPublicationFailureReporter
 }) {
   const execute = createMutationExecutor({
     protocol: options.protocol,
@@ -123,7 +163,8 @@ export function createNextMutationExecutor<
 
     await finalizeExternalActionCommit(
       outcome.value.stamp,
-      options.invalidations
+      options.invalidations,
+      options.reportInvalidationFailure
     )
     return outcome
   }
