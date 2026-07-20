@@ -46,6 +46,32 @@ const reset = defineMutation({
   },
 })
 
+const append = defineMutation({
+  name: "text.append",
+  args: amountSchema,
+  predict(state: string, args) {
+    return ok(state + args.amount)
+  },
+})
+
+function rejectInvalidProtocolsAtCompileTime() {
+  function helper() {
+    return undefined
+  }
+
+  defineProtocol({
+    id: "test.invalid.v1",
+    // @ts-expect-error — protocol entries must be mutation definitions.
+    mutations: [helper],
+  })
+  defineProtocol({
+    id: "test.mixed-state.v1",
+    // @ts-expect-error — every mutation in one root shares its state type.
+    mutations: [increment, append],
+  })
+}
+void rejectInvalidProtocolsAtCompileTime
+
 describe("defineMutation", () => {
   it("returns a typed invocation factory with its protocol metadata", () => {
     const invocation = increment({ amount: 2 })
@@ -106,5 +132,18 @@ describe("defineProtocol", () => {
         mutations: [increment, duplicate],
       })
     ).toThrowError("Duplicate mutation name: counter.increment")
+  })
+
+  it("rejects malformed mutation functions at the protocol boundary", () => {
+    function helper() {
+      return undefined
+    }
+
+    expect(() =>
+      defineProtocol({
+        id: "test.invalid.v1",
+        mutations: [helper as unknown as typeof increment],
+      })
+    ).toThrowError("Invalid mutation definition: helper")
   })
 })

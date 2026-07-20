@@ -21,6 +21,12 @@ import type {
   ProtocolInvocation,
 } from "./protocol"
 import {
+  useIncorporation,
+  type IncorporationStatus,
+  type InvalidationAdapter,
+  type RefreshAdapter,
+} from "./refresh"
+import {
   covers,
   type AcceptedStamp,
   type Canon,
@@ -61,11 +67,18 @@ export interface PredictedRoot<State, Invocation, Error> {
     invocation: Invocation
   ) => Result<MutationReceipt<Error>, Error>
   readonly retryDelivery: () => void
+  readonly retryRefresh: () => void
   readonly status: {
     readonly pending: number
     readonly delivery: "idle" | "sending" | "uncertain"
-  }
+  } & IncorporationStatus
   readonly conflicts: readonly ReplayConflict<Invocation, Error>[]
+}
+
+export interface ObservedRoot<State> {
+  readonly value: State
+  readonly retryRefresh: () => void
+  readonly status: IncorporationStatus
 }
 
 type MutationOf<Protocol> =
@@ -104,10 +117,17 @@ export interface PredictedRootOptions<
   readonly send: (
     envelope: MutationEnvelope<ProtocolInvocation<Protocol>>
   ) => Promise<Result<AcceptedStamp, ErrorOf<Protocol>>>
+  readonly refresh: () => RefreshAdapter
+  readonly invalidations?: InvalidationAdapter
 }
 
 export interface PredictedRootInput<State> {
   readonly canon: Canon<State>
+}
+
+export interface ObservedRootOptions {
+  readonly refresh: () => RefreshAdapter
+  readonly invalidations?: InvalidationAdapter
 }
 
 interface Deferred<Value> {
@@ -233,6 +253,15 @@ export function createPredictedRoot<
       (revision: number) => revision + 1,
       0
     )
+    const useRefresh = options.refresh
+    const refresh = useRefresh()
+    const incorporation = useIncorporation(
+      canon,
+      refresh,
+      options.invalidations
+    )
+    const recordAcceptance = incorporation.recordAcceptance
+    const removeAcceptance = incorporation.removeAcceptance
 
     const releaseAction = useCallback(
       (entry: LedgerEntry<Invocation, Error>) => entry.releaseAction.resolve(),
@@ -337,6 +366,7 @@ export function createPredictedRoot<
             entry.accepted.resolve(ok(outcome.value))
             removeFromQueue(queueRef.current, entry.envelope.mutationId)
             if (activeTokenRef.current) {
+              recordAcceptance(entry.envelope.mutationId, outcome.value)
               setAcceptedById((current) => {
                 const next = new Map(current)
                 next.set(entry.envelope.mutationId, outcome.value)
@@ -350,7 +380,7 @@ export function createPredictedRoot<
 
         if (activeTokenRef.current) renderCoordinator()
       },
-      [settleDomainRejection]
+      [recordAcceptance, settleDomainRejection]
     )
 
     const reconcileRefusals = useCallback(() => {
@@ -407,12 +437,13 @@ export function createPredictedRoot<
 
         entry.canonized.resolve(ok(undefined))
         releaseAction(entry)
+        removeAcceptance(entry.envelope.mutationId)
         ledgerRef.current.delete(entry.envelope.mutationId)
         changed = true
       }
 
       return changed
-    }, [canon, releaseAction])
+    }, [canon, releaseAction, removeAcceptance])
 
     const pruneReducerMetadata = useCallback(() => {
       const replayedIds = new Set(frame.replayedMutationIds)
@@ -537,6 +568,7 @@ export function createPredictedRoot<
       value: frame.value,
       mutate,
       retryDelivery,
+      retryRefresh: incorporation.retryRefresh,
       status: {
         pending: ledgerRef.current.size,
         delivery:
@@ -545,8 +577,42 @@ export function createPredictedRoot<
             : headDelivery === "sending" || headDelivery === "queued"
               ? "sending"
               : "idle",
+        ...incorporation.status,
       },
       conflicts: conflictsRef.current,
     }
   }
 }
+
+export function createObservedRoot(options: ObservedRootOptions) {
+  return function useObservedRoot<State>({
+    canon,
+  }: PredictedRootInput<State>): ObservedRoot<State> {
+    const useRefresh = options.refresh
+    const refresh = useRefresh()
+    const incorporation = useIncorporation(
+      canon,
+      refresh,
+      options.invalidations
+    )
+
+    return {
+      value: canon.value,
+      retryRefresh: incorporation.retryRefresh,
+      status: incorporation.status,
+    }
+  }
+}
+
+export {
+  useRouterRefresh,
+  useSnapshotRefresh,
+  type AxisInvalidation,
+  type FreshnessStatus,
+  type IncorporationStatus,
+  type InvalidationAdapter,
+  type InvalidationSubscription,
+  type InvalidationStatus,
+  type RefreshAdapter,
+  type RefreshStallReason,
+} from "./refresh"

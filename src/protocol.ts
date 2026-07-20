@@ -34,7 +34,27 @@ export interface MutationDefinition<
 export interface AnyMutationDefinition {
   (...args: never[]): unknown
   readonly name: string
+  readonly args: StandardSchemaV1
+  readonly predict: (...args: never[]) => Result<unknown, unknown>
 }
+
+type MutationState<Mutation extends AnyMutationDefinition> = Parameters<
+  Mutation["predict"]
+>[0]
+
+type MutationForState<State> = AnyMutationDefinition & {
+  readonly predict: (state: State, ...args: never[]) => Result<State, unknown>
+}
+
+type OneStateMutations<Mutations extends readonly AnyMutationDefinition[]> =
+  Mutations extends readonly [
+    infer First extends AnyMutationDefinition,
+    ...infer Rest extends readonly AnyMutationDefinition[],
+  ]
+    ? Rest[number] extends MutationForState<MutationState<First>>
+      ? unknown
+      : never
+    : unknown
 
 /** Extracts the serializable invocation produced by a mutation definition. */
 export type InvocationOf<Mutation> = Mutation extends (
@@ -120,7 +140,7 @@ export function defineProtocol<
   const Mutations extends readonly AnyMutationDefinition[],
 >(definition: {
   readonly id: Id
-  readonly mutations: Mutations
+  readonly mutations: Mutations & OneStateMutations<Mutations>
 }): ProtocolDefinition<Id, Mutations> {
   const mutations = Object.freeze([
     ...definition.mutations,
@@ -131,6 +151,9 @@ export function defineProtocol<
   >
 
   for (const mutation of mutations) {
+    if (mutation.args === undefined || typeof mutation.predict !== "function") {
+      throw new Error(`Invalid mutation definition: ${mutation.name}`)
+    }
     if (Object.hasOwn(mutationsByName, mutation.name)) {
       throw new Error(`Duplicate mutation name: ${mutation.name}`)
     }

@@ -33,8 +33,9 @@ mounted prediction lifecycle without introducing another projected-state store.
 
 ## React predicted root
 
-`createPredictedRoot` binds a protocol and delivery function once, then returns a
-hook that accepts the latest complete `Canon<State>`. Its reducer-form
+`createPredictedRoot` binds a protocol, delivery function, refresh carrier, and
+optional invalidation adapter once, then returns a hook that accepts the latest
+complete `Canon<State>`. Its reducer-form
 `useOptimistic` projection accumulates pending intent, rebases over newer canons,
 and treats an accepted mutation as identity as soon as canon covers its complete
 revision vector.
@@ -49,6 +50,21 @@ When delivery becomes uncertain, `retryDelivery()` redelivers the queue head
 with the exact same envelope and mutation ID. Automatic reconnect policy remains
 outside the React core.
 
+Accepted mutations remain predicted while the carrier catches up. Router-carried
+canons receive 250 ms for the Server Action's RSC payload before the package
+requests `router.refresh()`; snapshot carriers refetch immediately. A dedicated
+refresh transition coalesces requests and retries one uncovered refresh after one
+second. Two completed uncovered attempts produce a typed `behind`,
+`missing-axis`, or `refresh-error` stall while leaving accepted predictions
+mounted. `retryRefresh()` and genuinely fresher invalidations reset that budget.
+Promise-returning adapters complete from their promise; void carriers such as
+`router.refresh()` consume an attempt only when the root receives the next canon.
+
+`createObservedRoot` is the watch-only specialization. It exposes the canonical
+value, freshness and invalidation status, and `retryRefresh()` without a mutation
+surface. Predicted and observed roots share the same subscriptions, monotonic
+invalidation comparison, refresh coalescing, and stall state machine.
+
 Calls made in the same event synchronously pre-check against the same rendered
 projection. If later same-tick intent becomes invalid only after an earlier
 prediction, it is jossed during reducer replay and is never delivered. Headcanon
@@ -60,5 +76,7 @@ binding lands, callers must not pass a raw Server Action whose throws may includ
 Next navigation control flow; an ordinary throw at this seam is deliberately
 classified as uncertain delivery.
 
-Refresh coordination, invalidation adapters, server execution, receipt storage,
-and application integration belong to later Headcanon milestones.
+Authority execution, receipt storage, concrete realtime adapters, and application
+integration belong to later Headcanon milestones. The `@workspace/headcanon/testing`
+entry exports `verifyRefreshContract` so router-shaped and snapshot-shaped
+carriers can run the package's shared refresh contract.

@@ -18,6 +18,7 @@ import {
 } from "./index"
 import {
   createPredictedRoot,
+  useSnapshotRefresh,
   type MutationEnvelope,
   type MutationReceipt,
 } from "./react"
@@ -57,6 +58,11 @@ const counterProtocol = defineProtocol({
 type CounterInvocation = ReturnType<typeof add>
 
 const counterAxis = axisId("counter/value")
+const noRefresh = () => undefined
+
+function useNoRefresh() {
+  return useSnapshotRefresh(noRefresh)
+}
 
 function vector(revision: number) {
   const parsed = revisionVector({ [counterAxis]: revision })
@@ -94,6 +100,7 @@ function setup(initialCanon = canon(0, 0)) {
   const useCounterPredictions = createPredictedRoot({
     protocol: counterProtocol,
     send: controlled.send,
+    refresh: useNoRefresh,
   })
   const rendered = renderHook(
     ({ currentCanon }: { currentCanon: Canon<number> }) =>
@@ -258,6 +265,7 @@ describe("createPredictedRoot", () => {
         new Promise<Result<AcceptedStamp, CounterError>>((resolve) => {
           resolveDelivery = resolve
         }),
+      refresh: useNoRefresh,
     })
     const { result, rerender } = renderHook(
       ({ currentCanon }: { currentCanon: Canon<number> }) =>
@@ -379,6 +387,7 @@ describe("createPredictedRoot", () => {
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
       send: controlled.send,
+      refresh: useNoRefresh,
     })
     const wrapper = ({ children }: { readonly children: ReactNode }) =>
       createElement(StrictMode, null, children)
