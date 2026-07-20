@@ -1,6 +1,5 @@
 "use client"
 
-import { useRouter } from "next/navigation"
 import {
   useCallback,
   useEffect,
@@ -26,7 +25,6 @@ import {
   type RevisionVector,
 } from "./revisions"
 
-export const ROUTER_ACCEPTANCE_GRACE_MS = 250
 export const SNAPSHOT_ACCEPTANCE_GRACE_MS = 0
 export const UNCOVERED_REFRESH_RETRY_MS = 1_000
 
@@ -114,18 +112,6 @@ function missingAxes(
   return Object.keys(requirements)
     .map(axisId)
     .filter((axis) => canon.revisions[axis] === undefined)
-}
-
-export function useRouterRefresh(): RefreshAdapter {
-  const router = useRouter()
-
-  return useMemo(
-    () => ({
-      acceptanceGraceMs: ROUTER_ACCEPTANCE_GRACE_MS,
-      request: () => router.refresh(),
-    }),
-    [router]
-  )
 }
 
 export function useSnapshotRefresh(

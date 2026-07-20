@@ -3,10 +3,11 @@
 > headcanon — optimistic mutations for Next.js: believe your writes until canon
 > says otherwise.
 
-`@workspace/headcanon` provides a framework-independent protocol entry and a
-client-only React entry for optimistic mutations. Protocol definitions remain
-shareable between browser and server code; `@workspace/headcanon/react` owns the
-mounted prediction lifecycle without introducing another projected-state store.
+`@workspace/headcanon` provides a framework-independent protocol entry, a
+client-only React entry, and explicit Next client/server bindings for optimistic
+mutations. Protocol definitions remain shareable between browser and server
+code; `@workspace/headcanon/react` owns the mounted prediction lifecycle without
+introducing another projected-state store.
 
 ## Protocol core
 
@@ -80,10 +81,18 @@ prediction, it is jossed during reducer replay and is never delivered. Headcanon
 does not maintain the synchronous shadow projection that would be required to
 turn that case into an immediate local refusal.
 
-The `send` seam receives framework-classified delivery. Until the Next client
-binding lands, callers must not pass a raw Server Action whose throws may include
-Next navigation control flow; an ordinary throw at this seam is deliberately
-classified as uncertain delivery.
+Use `createNextPredictedRoot` from `@workspace/headcanon/next/client` when a raw
+Server Action may throw Next navigation or authorization control flow. The
+binding runs `unstable_rethrow` before ordinary thrown requests become uncertain
+delivery. The same entry owns `useRouterRefresh`; snapshot refresh remains in
+`@workspace/headcanon/react`.
+
+The server binding derives one bounded SHA-256 cache tag per axis,
+`tagVersionedBase` fails closed above Next's 128-tag ceiling, and
+`createNextMutationExecutor` finalizes accepted stamps with `updateTag`, one
+shared-event invalidation publication, and server `refresh()`. The separately
+named external-commit helpers preserve the Server Action versus Route Handler
+context distinction.
 
 ## Contract fixtures
 
@@ -98,5 +107,5 @@ singleton per-axis entries and follows subscription lifetimes.
 router-shaped, and snapshot-shaped adapters supply harnesses and run the same
 behavioral contracts rather than duplicating synchronization assertions.
 
-Postgres receipt storage, concrete realtime adapters, Next finalization, and
-application integration belong to later Headcanon milestones.
+Postgres receipt storage, concrete realtime adapters, and application
+integration belong to later Headcanon milestones.

@@ -37,6 +37,7 @@ import {
 export type MutationLifecycleError<Error> =
   | { readonly kind: "domain"; readonly error: Error }
   | { readonly kind: "replay-refused"; readonly error: Error }
+  | { readonly kind: "delivery-cancelled" }
   | {
       readonly kind: "root-unmounted"
       readonly outcome: "unknown" | "accepted"
@@ -128,20 +129,28 @@ export interface ObservedRootOptions {
 interface Deferred<Value> {
   readonly promise: Promise<Value>
   readonly settled: boolean
+  reject(reason: unknown): void
   resolve(value: Value): void
 }
 
 function createDeferred<Value>(): Deferred<Value> {
   let resolvePromise: (value: Value) => void = () => undefined
+  let rejectPromise: (reason: unknown) => void = () => undefined
   let settled = false
-  const promise = new Promise<Value>((resolve) => {
+  const promise = new Promise<Value>((resolve, reject) => {
     resolvePromise = resolve
+    rejectPromise = reject
   })
 
   return {
     promise,
     get settled() {
       return settled
+    },
+    reject(reason) {
+      if (settled) return
+      settled = true
+      rejectPromise(reason)
     },
     resolve(value) {
       if (settled) return
@@ -217,6 +226,22 @@ export function createPredictedRoot<
     readonly AnyMutationDefinition[]
   >,
 >(options: PredictedRootOptions<Protocol>) {
+  return createPredictedRootWithDeliveryErrorClassifier(
+    options,
+    () => undefined
+  )
+}
+
+/** @internal Framework bindings use this to preserve control-flow throws. */
+export function createPredictedRootWithDeliveryErrorClassifier<
+  const Protocol extends ProtocolDefinition<
+    string,
+    readonly AnyMutationDefinition[]
+  >,
+>(
+  options: PredictedRootOptions<Protocol>,
+  classifyDeliveryError: (error: unknown) => void
+) {
   type State = StateOf<Protocol>
   type Invocation = ProtocolInvocation<Protocol>
   type Error = ErrorOf<Protocol>
@@ -369,7 +394,23 @@ export function createPredictedRoot<
               })
             }
           }
-        } catch {
+        } catch (error) {
+          try {
+            classifyDeliveryError(error)
+          } catch (controlFlow) {
+            if (entry.delivery === "sending") {
+              const lifecycleError = { kind: "delivery-cancelled" } as const
+              entry.delivery = "cancelled"
+              entry.accepted.resolve(err(lifecycleError))
+              entry.canonized.resolve(err(lifecycleError))
+              removeFromQueue(queueRef.current, entry.envelope.mutationId)
+              ledgerRef.current.delete(entry.envelope.mutationId)
+              entry.releaseAction.reject(controlFlow)
+            }
+            if (activeTokenRef.current) renderCoordinator()
+            return
+          }
+
           if (entry.delivery === "sending") entry.delivery = "uncertain"
         }
 
@@ -600,7 +641,6 @@ export function createObservedRoot(options: ObservedRootOptions) {
 }
 
 export {
-  useRouterRefresh,
   useSnapshotRefresh,
   type AxisInvalidation,
   type FreshnessStatus,

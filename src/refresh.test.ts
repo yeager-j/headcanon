@@ -19,7 +19,6 @@ import {
 import {
   createObservedRoot,
   createPredictedRoot,
-  useRouterRefresh,
   useSnapshotRefresh,
   type AxisInvalidation,
   type InvalidationAdapter,
@@ -28,12 +27,6 @@ import {
   type RefreshAdapter,
 } from "./react"
 import { verifyRefreshContract } from "./testing"
-
-const routerRefresh = vi.hoisted(() => vi.fn())
-
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ refresh: routerRefresh }),
-}))
 
 type TestError = { readonly code: "refused" }
 type AddArgs = { readonly amount: number }
@@ -137,18 +130,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
-  routerRefresh.mockReset()
 })
 
 describe("refresh adapters", () => {
-  it("declares 250 ms grace for router-carried canons", () => {
-    const { result } = renderHook(() => useRouterRefresh())
-
-    expect(result.current.acceptanceGraceMs).toBe(250)
-    act(() => result.current.request())
-    expect(routerRefresh).toHaveBeenCalledOnce()
-  })
-
   it("declares zero grace and awaits snapshot refetch", async () => {
     const refetch = vi.fn(async () => undefined)
     const { result } = renderHook(() => useSnapshotRefresh(refetch))

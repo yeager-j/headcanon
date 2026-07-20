@@ -7,7 +7,11 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url))
 const ENTRY = join(ROOT, "src/index.ts")
-const CLIENT_ENTRIES = [ENTRY, join(ROOT, "src/react.ts")]
+const CLIENT_ENTRIES = [
+  ENTRY,
+  join(ROOT, "src/react.ts"),
+  join(ROOT, "src/next/client.ts"),
+]
 const BUILT_INS = new Set(
   builtinModules.flatMap((specifier) => [specifier, `node:${specifier}`])
 )
