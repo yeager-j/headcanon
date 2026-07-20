@@ -35,6 +35,17 @@ export interface InvalidationAdapter {
   subscribe(subscription: InvalidationSubscription): () => void
 }
 
+/** Declares that a root intentionally has no push-invalidation transport. */
+export function createNoRealtimeInvalidationAdapter(): InvalidationAdapter {
+  return {
+    initialStatus: "disabled",
+    subscribe(subscription) {
+      subscription.onStatusChange("disabled")
+      return () => undefined
+    },
+  }
+}
+
 /** Fans one committed vector out as singleton axis invalidation entries. */
 export interface InvalidationPublisher {
   publish(eventId: string, stamp: AcceptedStamp): void | Promise<void>

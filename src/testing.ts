@@ -15,16 +15,18 @@ import {
   type MutationTerminalOutcome,
   type StampAccumulator,
 } from "./authority"
-import type {
-  AxisInvalidation,
-  InvalidationAdapter,
-  InvalidationPublisher,
-  InvalidationStatus,
-  InvalidationSubscription,
+import {
+  createNoRealtimeInvalidationAdapter,
+  type AxisInvalidation,
+  type InvalidationAdapter,
+  type InvalidationPublisher,
+  type InvalidationStatus,
+  type InvalidationSubscription,
 } from "./invalidation"
 import { defineMutation, defineProtocol } from "./protocol"
 import {
   useIncorporation,
+  withPollingFallback,
   type IncorporationStatus,
   type RefreshAdapter,
 } from "./refresh"
@@ -1146,6 +1148,146 @@ export function verifyInvalidationContract(
       expect(rendered.result.current.status.freshness).toBe("grace")
       expect(request).not.toHaveBeenCalled()
       rendered.unmount()
+    })
+  })
+}
+
+export function verifyPollingFallbackContract(): void {
+  describe("polling fallback contract", () => {
+    let visibility: DocumentVisibilityState
+    let originalVisibility: PropertyDescriptor | undefined
+
+    const setVisibility = (next: DocumentVisibilityState) => {
+      visibility = next
+      document.dispatchEvent(new Event("visibilitychange"))
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      visibility = "visible"
+      originalVisibility = Object.getOwnPropertyDescriptor(
+        document,
+        "visibilityState"
+      )
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => visibility,
+      })
+    })
+
+    afterEach(() => {
+      if (originalVisibility) {
+        Object.defineProperty(document, "visibilityState", originalVisibility)
+      } else {
+        Reflect.deleteProperty(document, "visibilityState")
+      }
+      vi.useRealTimers()
+    })
+
+    it("reports polling and serializes refreshes while the primary is unavailable", async () => {
+      const primary = createInMemoryInvalidationAdapter()
+      primary.setStatus("unavailable")
+      const invalidations = withPollingFallback(primary, { intervalMs: 100 })
+      const completions: Array<() => void> = []
+      const request = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            completions.push(resolve)
+          })
+      )
+      const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+      const rendered = renderHook(() =>
+        useIncorporation(contractCanon(0), refresh, invalidations)
+      )
+
+      expect(rendered.result.current.status.invalidations).toBe("polling")
+      await advance(400)
+      expect(request).toHaveBeenCalledTimes(1)
+
+      act(() => completions.shift()?.())
+      await flushMicrotasks()
+      expect(request).toHaveBeenCalledTimes(2)
+
+      await advance(400)
+      act(() => primary.setStatus("active"))
+      act(() => completions.shift()?.())
+      await flushMicrotasks()
+      expect(request).toHaveBeenCalledTimes(2)
+      rendered.unmount()
+    })
+
+    it("pauses while hidden and refreshes immediately when visibility resumes", async () => {
+      const primary = createInMemoryInvalidationAdapter()
+      primary.setStatus("unavailable")
+      setVisibility("hidden")
+      const request = vi.fn(async () => undefined)
+      const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+      const rendered = renderHook(() =>
+        useIncorporation(
+          contractCanon(0),
+          refresh,
+          withPollingFallback(primary, { intervalMs: 100 })
+        )
+      )
+
+      await advance(500)
+      expect(request).not.toHaveBeenCalled()
+
+      act(() => setVisibility("visible"))
+      await flushMicrotasks()
+      expect(request).toHaveBeenCalledTimes(1)
+
+      await advance(100)
+      expect(request).toHaveBeenCalledTimes(2)
+
+      act(() => setVisibility("hidden"))
+      await advance(500)
+      expect(request).toHaveBeenCalledTimes(2)
+      rendered.unmount()
+    })
+
+    it("polls during initial reauthorization and stops when the primary recovers", async () => {
+      const primary = createInMemoryInvalidationAdapter()
+      primary.setStatus("reauthorizing")
+      const request = vi.fn(async () => undefined)
+      const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+      const rendered = renderHook(() =>
+        useIncorporation(
+          contractCanon(0),
+          refresh,
+          withPollingFallback(primary, { intervalMs: 100 })
+        )
+      )
+
+      expect(rendered.result.current.status.invalidations).toBe("polling")
+      await advance(100)
+      expect(request).toHaveBeenCalledTimes(1)
+
+      act(() => primary.setStatus("active"))
+      expect(rendered.result.current.status.invalidations).toBe("active")
+      await advance(500)
+      expect(request).toHaveBeenCalledTimes(1)
+      rendered.unmount()
+    })
+
+    it("supports intentional no-realtime roots and cancels on unmount", async () => {
+      const request = vi.fn(async () => undefined)
+      const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+      const invalidations = withPollingFallback(
+        createNoRealtimeInvalidationAdapter(),
+        { intervalMs: 100 }
+      )
+      const rendered = renderHook(() =>
+        useIncorporation(contractCanon(0), refresh, invalidations)
+      )
+
+      expect(rendered.result.current.status.invalidations).toBe("polling")
+      rendered.unmount()
+      await advance(500)
+      act(() => setVisibility("hidden"))
+      act(() => setVisibility("visible"))
+      await flushMicrotasks()
+      expect(request).not.toHaveBeenCalled()
     })
   })
 }

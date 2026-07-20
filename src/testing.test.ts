@@ -17,12 +17,14 @@ import {
   MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE,
   verifyInvalidationContract,
   verifyMutationAuthorityContract,
+  verifyPollingFallbackContract,
 } from "./testing"
 
 verifyMutationAuthorityContract(
   createInMemoryMutationAuthorityContractHarness()
 )
 verifyInvalidationContract(createInMemoryInvalidationContractHarness())
+verifyPollingFallbackContract()
 
 describe("mutation executor registration", () => {
   it("fails at construction when the closed registry is incomplete", () => {

@@ -14,6 +14,7 @@ import type {
   AxisInvalidation,
   InvalidationAdapter,
   InvalidationStatus,
+  InvalidationSubscription,
 } from "./invalidation"
 import {
   axisId,
@@ -33,6 +34,116 @@ export interface RefreshAdapter {
   request(): void | Promise<void>
 }
 
+export interface PollingFallbackOptions {
+  readonly intervalMs: number
+  readonly pauseWhenHidden?: boolean
+}
+
+function needsPollingFallback(status: InvalidationStatus): boolean {
+  return (
+    status === "disabled" ||
+    status === "reauthorizing" ||
+    status === "unavailable"
+  )
+}
+
+function pollingStatus(status: InvalidationStatus): InvalidationStatus {
+  return needsPollingFallback(status) ? "polling" : status
+}
+
+/**
+ * Preserves bounded liveness through the subscribed root's existing refresh
+ * path whenever its primary invalidation transport is unavailable.
+ */
+export function withPollingFallback(
+  primary: InvalidationAdapter,
+  options: PollingFallbackOptions
+): InvalidationAdapter {
+  if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
+    throw new Error("Polling fallback intervalMs must be positive")
+  }
+
+  const pauseWhenHidden = options.pauseWhenHidden ?? true
+
+  return {
+    get initialStatus() {
+      return pollingStatus(primary.initialStatus)
+    },
+    subscribe(subscription) {
+      let polling = needsPollingFallback(primary.initialStatus)
+      let stopped = false
+      let interval: ReturnType<typeof setInterval> | null = null
+
+      const hidden = () =>
+        pauseWhenHidden &&
+        typeof document !== "undefined" &&
+        document.visibilityState === "hidden"
+
+      const stopInterval = () => {
+        if (interval === null) return
+        clearInterval(interval)
+        interval = null
+      }
+
+      const requestRefresh = () => {
+        if (!stopped && polling && !hidden()) {
+          subscription.onSubscriptionGap?.()
+        }
+      }
+
+      const startInterval = () => {
+        if (stopped || !polling || hidden() || interval !== null) return
+        interval = setInterval(requestRefresh, options.intervalMs)
+      }
+
+      const reconcileInterval = () => {
+        if (polling) startInterval()
+        else stopInterval()
+      }
+
+      const onStatusChange: InvalidationSubscription["onStatusChange"] = (
+        status
+      ) => {
+        if (status === "active") polling = false
+        else if (needsPollingFallback(status)) polling = true
+
+        reconcileInterval()
+        subscription.onStatusChange(polling ? "polling" : status)
+      }
+
+      const onVisibilityChange = () => {
+        if (hidden()) {
+          stopInterval()
+          return
+        }
+
+        requestRefresh()
+        startInterval()
+      }
+
+      const stopPrimary = primary.subscribe({
+        ...subscription,
+        onStatusChange,
+      })
+      reconcileInterval()
+
+      if (pauseWhenHidden && typeof document !== "undefined") {
+        document.addEventListener("visibilitychange", onVisibilityChange)
+      }
+
+      return () => {
+        if (stopped) return
+        stopped = true
+        stopInterval()
+        if (pauseWhenHidden && typeof document !== "undefined") {
+          document.removeEventListener("visibilitychange", onVisibilityChange)
+        }
+        stopPrimary()
+      }
+    },
+  }
+}
+
 export type RefreshStallReason = "behind" | "missing-axis" | "refresh-error"
 
 export type FreshnessStatus = "current" | "grace" | "refreshing" | "stalled"
@@ -44,6 +155,7 @@ export interface IncorporationStatus {
   readonly stallReason: RefreshStallReason | null
 }
 
+export { createNoRealtimeInvalidationAdapter } from "./invalidation"
 export type {
   AxisInvalidation,
   InvalidationAdapter,
@@ -386,6 +498,13 @@ export function useIncorporation<State>(
     scheduleRefresh()
   }, [clearGraceTimer, isCovered, resetAttemptBudget, scheduleRefresh])
 
+  const updateInvalidationStatus = useCallback((status: InvalidationStatus) => {
+    // Recovery supersedes queued fallback ticks. A real attachment-gap signal
+    // follows the active status and schedules its own authoritative refresh.
+    if (status === "active") pendingGapRefreshRef.current = false
+    setInvalidationStatus(status)
+  }, [])
+
   const rawObservedAxes = Object.keys(canon.revisions).sort()
   const observedAxesKey = JSON.stringify(rawObservedAxes)
   const observedAxes = useMemo(
@@ -400,10 +519,16 @@ export function useIncorporation<State>(
     return invalidations.subscribe({
       axes: observedAxes,
       onInvalidation: observeInvalidation,
-      onStatusChange: setInvalidationStatus,
+      onStatusChange: updateInvalidationStatus,
       onSubscriptionGap: () => scheduleRefresh(true),
     })
-  }, [invalidations, observeInvalidation, observedAxes, scheduleRefresh])
+  }, [
+    invalidations,
+    observeInvalidation,
+    observedAxes,
+    scheduleRefresh,
+    updateInvalidationStatus,
+  ])
 
   useEffect(() => {
     if (

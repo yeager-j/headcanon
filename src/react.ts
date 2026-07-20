@@ -641,7 +641,9 @@ export function createObservedRoot(options: ObservedRootOptions) {
 }
 
 export {
+  createNoRealtimeInvalidationAdapter,
   useSnapshotRefresh,
+  withPollingFallback,
   type AxisInvalidation,
   type FreshnessStatus,
   type IncorporationStatus,
@@ -649,6 +651,7 @@ export {
   type InvalidationPublisher,
   type InvalidationSubscription,
   type InvalidationStatus,
+  type PollingFallbackOptions,
   type RefreshAdapter,
   type RefreshStallReason,
 } from "./refresh"

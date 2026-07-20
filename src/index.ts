@@ -43,6 +43,7 @@ export {
 } from "./authority"
 export {
   axisInvalidation,
+  createNoRealtimeInvalidationAdapter,
   type AxisInvalidationValidationError,
   type AxisInvalidation,
   type InvalidationAdapter,
