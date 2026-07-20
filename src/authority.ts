@@ -12,7 +12,13 @@ import type {
   MutationInvocation,
   ProtocolDefinition,
 } from "./protocol"
-import type { AcceptedStamp, AxisId, Revision } from "./revisions"
+import {
+  acceptedStamp,
+  revision,
+  type AcceptedStamp,
+  type AxisId,
+  type Revision,
+} from "./revisions"
 
 /** The transport envelope admitted by a mutation authority executor. */
 export interface MutationEnvelope<Invocation> {
@@ -24,6 +30,36 @@ export interface MutationEnvelope<Invocation> {
 /** The attempt-local authority for constructing a complete accepted vector. */
 export interface StampAccumulator {
   record(axis: AxisId, revision: Revision): void
+}
+
+export interface ReadableStampAccumulator extends StampAccumulator {
+  accepted(): AcceptedStamp
+}
+
+/** Creates one isolated revision vector for a single authority attempt. */
+export function createStampAccumulator(): ReadableStampAccumulator {
+  const revisions = new Map<AxisId, Revision>()
+
+  return {
+    record(axis, nextRevision) {
+      const parsedRevision = revision(nextRevision)
+      if (!parsedRevision.ok) {
+        throw new Error(`Invalid stamped revision for axis: ${axis}`)
+      }
+      const current = revisions.get(axis)
+      if (current !== undefined && parsedRevision.value < current) {
+        throw new Error(`Revision regressed while stamping axis: ${axis}`)
+      }
+      revisions.set(axis, parsedRevision.value)
+    },
+    accepted() {
+      const vector = Object.create(null) as Record<AxisId, Revision>
+      for (const [axis, stampedRevision] of revisions) {
+        vector[axis] = stampedRevision
+      }
+      return acceptedStamp(Object.freeze(vector))
+    },
+  }
 }
 
 /** Context supplied to one rerunnable authority handler attempt. */
@@ -80,6 +116,7 @@ export type MutationAuthorityAdapterError =
 export interface MutationAuthorityRequest<Actor> {
   readonly actor: Actor
   readonly mutationId: string
+  readonly protocol: string
   readonly canonical: CanonicalInvocation
 }
 
@@ -299,6 +336,7 @@ export function createMutationExecutor<
       {
         actor,
         mutationId: parsedEnvelope.value.mutationId,
+        protocol: options.protocol.id,
         canonical: prepared.value.canonical,
       },
       (tx, stamp) =>

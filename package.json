@@ -14,6 +14,7 @@
   "sideEffects": false,
   "exports": {
     ".": "./src/index.ts",
+    "./drizzle": "./src/drizzle.ts",
     "./next/client": "./src/next/client.ts",
     "./next/server": "./src/next/server.ts",
     "./react": "./src/react.ts",
@@ -25,17 +26,20 @@
     "canonicalize": "^3.0.0"
   },
   "peerDependencies": {
+    "drizzle-orm": "^0.45.2",
     "next": "^16.1.6",
     "react": "^19.2.4"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.2",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "@workspace/eslint-config": "*",
     "@workspace/typescript-config": "*",
     "eslint": "^9.39.2",
     "jsdom": "^29.1.1",
+    "pg": "^8.22.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "typescript": "^6.0.3",

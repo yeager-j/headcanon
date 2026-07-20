@@ -6,6 +6,7 @@ import { err, ok, type Result } from "@workspace/result"
 
 import {
   createMutationExecutor,
+  createStampAccumulator,
   type MutationAuthorityAdapter,
   type MutationAuthorityAdapterError,
   type MutationAuthorityRequest,
@@ -30,7 +31,6 @@ import {
 import {
   acceptedStamp,
   axisId,
-  revision,
   revisionVector,
   type AcceptedStamp,
   type AxisId,
@@ -85,33 +85,6 @@ interface PendingExecution<Rejection> {
 
 function receiptKey(scope: string, mutationId: string): string {
   return JSON.stringify([scope, mutationId])
-}
-
-function createStampAccumulator(): StampAccumulator & {
-  accepted(): AcceptedStamp
-} {
-  const revisions = new Map<AxisId, Revision>()
-
-  return {
-    record(axis, nextRevision) {
-      const parsedRevision = revision(nextRevision)
-      if (!parsedRevision.ok) {
-        throw new Error(`Invalid stamped revision for axis: ${axis}`)
-      }
-      const current = revisions.get(axis)
-      if (current !== undefined && parsedRevision.value < current) {
-        throw new Error(`Revision regressed while stamping axis: ${axis}`)
-      }
-      revisions.set(axis, parsedRevision.value)
-    },
-    accepted() {
-      const vector = Object.create(null) as Record<AxisId, Revision>
-      for (const [axis, stampedRevision] of revisions) {
-        vector[axis] = stampedRevision
-      }
-      return acceptedStamp(Object.freeze(vector))
-    },
-  }
 }
 
 /**

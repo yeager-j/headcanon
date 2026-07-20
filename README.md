@@ -107,5 +107,30 @@ singleton per-axis entries and follows subscription lifetimes.
 router-shaped, and snapshot-shaped adapters supply harnesses and run the same
 behavioral contracts rather than duplicating synchronization assertions.
 
-Postgres receipt storage, concrete realtime adapters, and application
-integration belong to later Headcanon milestones.
+## Drizzle/Postgres authority
+
+`@workspace/headcanon/drizzle` exports `headcanonMutationReceipts` and
+`createDrizzleMutationAuthority`. Include the receipt table in the adopter's
+Drizzle schema so its normal migration workflow owns deployment. The equivalent
+baseline SQL is checked in at
+`drizzle/0000_headcanon_mutation_receipts.sql` for migration review and fixtures.
+
+The adapter requires an interactive Postgres Drizzle client: for Neon, use the
+WebSocket `Pool` integration rather than the HTTP query client. It acquires a
+transaction-scoped receipt identity lock before application work, runs each
+handler in a nested Drizzle transaction/savepoint, and retries bounded
+contention. Expected rejections must cross the receipt boundary through the
+caller's `parseRejection`; malformed stored outcomes fail closed.
+
+Guarded application writes call `throwMutationContention()` when their
+compare-and-swap affects no row. That aborts the outer attempt, discards its
+domain writes and stamp, and reruns the complete handler from current state.
+Unexpected exceptions still propagate without a receipt.
+
+The real-Postgres contract suite runs when `HEADCANON_TEST_DATABASE_URL` or
+`DATABASE_URL` is available. It creates a unique schema, proves receipt/domain
+atomicity, concurrent deduplication, savepoint rejection, attempt-local stamps,
+and SQLSTATE serialization retry, then drops the schema.
+
+Concrete realtime adapters and application integration belong to later
+Headcanon milestones.

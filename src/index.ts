@@ -27,6 +27,7 @@ export {
   type CanonicalInvocationError,
 } from "./canonical-invocation"
 export {
+  createStampAccumulator,
   createMutationExecutor,
   type MutationAuthorityAdapter,
   type MutationAuthorityAdapterError,
@@ -37,6 +38,7 @@ export {
   type MutationHandlerContext,
   type MutationHandlers,
   type MutationTerminalOutcome,
+  type ReadableStampAccumulator,
   type StampAccumulator,
 } from "./authority"
 export type {
