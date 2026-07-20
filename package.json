@@ -13,17 +13,27 @@
   },
   "sideEffects": false,
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./react": "./src/react.ts"
   },
   "dependencies": {
     "@standard-schema/spec": "^1.1.0",
     "@workspace/result": "*",
     "canonicalize": "^3.0.0"
   },
+  "peerDependencies": {
+    "react": "^19.2.4"
+  },
   "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "^19.2.3",
     "@workspace/eslint-config": "*",
     "@workspace/typescript-config": "*",
     "eslint": "^9.39.2",
+    "jsdom": "^29.1.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
   }

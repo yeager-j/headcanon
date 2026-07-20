@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url))
 const ENTRY = join(ROOT, "src/index.ts")
+const CLIENT_ENTRIES = [ENTRY, join(ROOT, "src/react.ts")]
 const BUILT_INS = new Set(
   builtinModules.flatMap((specifier) => [specifier, `node:${specifier}`])
 )
@@ -162,15 +163,19 @@ export function scanEntryGraph(entry = ENTRY) {
   return violations
 }
 
+export function scanClientEntries(entries = CLIENT_ENTRIES) {
+  return entries.flatMap((entry) => scanEntryGraph(entry))
+}
+
 function run() {
-  const violations = scanEntryGraph()
+  const violations = scanClientEntries()
 
   if (violations.length === 0) {
-    console.log("✓ headcanon shared entry is client-bundle safe.")
+    console.log("✓ headcanon client entries are bundle-safe.")
     return
   }
 
-  console.error("✖ headcanon shared entry dependency violations:\n")
+  console.error("✖ headcanon client entry dependency violations:\n")
   for (const violation of violations) {
     console.error(
       `  ${violation.file}:${violation.line}  ${violation.specifier ?? violation.rule}\n    └─ ${violation.rule}`

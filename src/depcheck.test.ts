@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 // @ts-expect-error — depcheck.mjs is a plain JS gate script with no declarations.
-import { scanEntryGraph, scanSource } from "../depcheck.mjs"
+import * as depcheck from "../depcheck.mjs"
 
 describe("headcanon shared-entry dependency gate", () => {
   it.each([
@@ -13,7 +13,7 @@ describe("headcanon shared-entry dependency gate", () => {
     ['import "server-only"', "server-only"],
     ['export { run } from "next/server"', "next/server"],
   ])("rejects a forbidden shared dependency", (source, specifier) => {
-    expect(scanSource("src/index.ts", source)).toEqual([
+    expect(depcheck.scanSource("src/index.ts", source)).toEqual([
       expect.objectContaining({
         file: "src/index.ts",
         specifier,
@@ -24,7 +24,7 @@ describe("headcanon shared-entry dependency gate", () => {
 
   it("rejects server directives and secret-bearing environment access", () => {
     expect(
-      scanSource(
+      depcheck.scanSource(
         "src/server-handler.ts",
         `'use server'\nconst secret = process.env.AUTH_SECRET`
       )
@@ -34,7 +34,11 @@ describe("headcanon shared-entry dependency gate", () => {
     ])
   })
 
-  it("keeps the real shared entry graph client-bundle safe", () => {
-    expect(scanEntryGraph()).toEqual([])
+  it("keeps the real client entry graphs bundle-safe", () => {
+    expect(depcheck.scanClientEntries()).toEqual([])
+  })
+
+  it("keeps the shared entry independently framework-free", () => {
+    expect(depcheck.scanEntryGraph()).toEqual([])
   })
 })
