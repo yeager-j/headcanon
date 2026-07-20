@@ -34,6 +34,25 @@ describe("headcanon shared-entry dependency gate", () => {
     ])
   })
 
+  it.each([
+    ['import type { ReactNode } from "react"', "react"],
+    [
+      'export type { AppRouterInstance } from "next/navigation"',
+      "next/navigation",
+    ],
+  ])(
+    "rejects a client framework dependency from the shared graph",
+    (source, specifier) => {
+      expect(depcheck.scanSource("src/index.ts", source, true)).toEqual([
+        expect.objectContaining({
+          file: "src/index.ts",
+          specifier,
+          rule: "framework dependency in shared graph",
+        }),
+      ])
+    }
+  )
+
   it("keeps the real client entry graphs bundle-safe", () => {
     expect(depcheck.scanClientEntries()).toEqual([])
   })

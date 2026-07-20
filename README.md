@@ -26,6 +26,15 @@ mounted prediction lifecycle without introducing another projected-state store.
   and invocation into RFC 8785 canonical JSON, exact UTF-8 bytes, and a lowercase
   SHA-256 fingerprint. It rejects values outside the supported JSON domain before
   canonicalization and isolates valid input from inherited `toJSON` behavior.
+- **Authority execution.** `createMutationExecutor` strictly admits envelopes,
+  reparses arguments, computes receipt identity, and dispatches through an
+  exhaustive handler registry. The authority adapter owns receipt scope,
+  transactional attempts, contention retry, and attempt-local stamp lifetimes;
+  handlers receive only their transaction, parsed arguments, trusted actor, and
+  stamp accumulator.
+- **Invalidation vocabulary.** The framework-independent entry defines singleton
+  axis invalidations, subscribers, and publishers without pulling React or Next
+  into the protocol graph.
 - **Shared-entry safety.** The dependency gate walks everything reachable from the
   protocol and React client entries and rejects Node built-ins, server-only
   modules, database and server-framework dependencies, and environment or secret
@@ -76,7 +85,18 @@ binding lands, callers must not pass a raw Server Action whose throws may includ
 Next navigation control flow; an ordinary throw at this seam is deliberately
 classified as uncertain delivery.
 
-Authority execution, receipt storage, concrete realtime adapters, and application
-integration belong to later Headcanon milestones. The `@workspace/headcanon/testing`
-entry exports `verifyRefreshContract` so router-shaped and snapshot-shaped
-carriers can run the package's shared refresh contract.
+## Contract fixtures
+
+The `@workspace/headcanon/testing` entry ships in-memory authority and
+invalidation adapters. The authority provides isolated transactional state,
+receipt deduplication, collision detection, terminal-rejection savepoints, and
+controllable contention reruns. The invalidation bus fans accepted vectors into
+singleton per-axis entries and follows subscription lifetimes.
+
+`verifyMutationAuthorityContract`, `verifyInvalidationContract`, and
+`verifyRefreshContract` are reusable black-box suites. Production Drizzle, Ably,
+router-shaped, and snapshot-shaped adapters supply harnesses and run the same
+behavioral contracts rather than duplicating synchronization assertions.
+
+Postgres receipt storage, concrete realtime adapters, Next finalization, and
+application integration belong to later Headcanon milestones.

@@ -11,6 +11,11 @@ import {
   useTransition,
 } from "react"
 
+import type {
+  AxisInvalidation,
+  InvalidationAdapter,
+  InvalidationStatus,
+} from "./invalidation"
 import {
   axisId,
   covers,
@@ -34,36 +39,20 @@ export type RefreshStallReason = "behind" | "missing-axis" | "refresh-error"
 
 export type FreshnessStatus = "current" | "grace" | "refreshing" | "stalled"
 
-export interface AxisInvalidation {
-  readonly eventId: string
-  readonly axis: AxisId
-  readonly revision: Revision
-}
-
-export type InvalidationStatus =
-  | "disabled"
-  | "active"
-  | "reauthorizing"
-  | "polling"
-  | "unavailable"
-
-export interface InvalidationSubscription {
-  readonly axes: readonly AxisId[]
-  readonly onInvalidation: (invalidation: AxisInvalidation) => void
-  readonly onStatusChange: (status: InvalidationStatus) => void
-}
-
-export interface InvalidationAdapter {
-  readonly initialStatus: InvalidationStatus
-  subscribe(subscription: InvalidationSubscription): () => void
-}
-
 export interface IncorporationStatus {
   readonly freshness: FreshnessStatus
   readonly invalidations: InvalidationStatus
   readonly missingAxes: readonly AxisId[]
   readonly stallReason: RefreshStallReason | null
 }
+
+export type {
+  AxisInvalidation,
+  InvalidationAdapter,
+  InvalidationPublisher,
+  InvalidationStatus,
+  InvalidationSubscription,
+} from "./invalidation"
 
 interface RefreshState {
   readonly freshness: FreshnessStatus

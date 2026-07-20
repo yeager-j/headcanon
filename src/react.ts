@@ -13,6 +13,7 @@ import {
 
 import { err, ok, type Result } from "@workspace/result"
 
+import type { MutationEnvelope } from "./authority"
 import type {
   AnyMutationDefinition,
   MutationDefinition,
@@ -32,12 +33,6 @@ import {
   type Canon,
   type RevisionVector,
 } from "./revisions"
-
-export interface MutationEnvelope<Invocation> {
-  readonly protocol: string
-  readonly mutationId: string
-  readonly invocation: Invocation
-}
 
 export type MutationLifecycleError<Error> =
   | { readonly kind: "domain"; readonly error: Error }
@@ -611,8 +606,10 @@ export {
   type FreshnessStatus,
   type IncorporationStatus,
   type InvalidationAdapter,
+  type InvalidationPublisher,
   type InvalidationSubscription,
   type InvalidationStatus,
   type RefreshAdapter,
   type RefreshStallReason,
 } from "./refresh"
+export type { MutationEnvelope } from "./authority"

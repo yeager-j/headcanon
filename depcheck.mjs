@@ -28,6 +28,7 @@ const SERVER_DEPENDENCY_PREFIXES = [
   "prisma",
   "server-only",
 ]
+const CLIENT_FRAMEWORK_PREFIXES = ["next", "react", "react-dom"]
 const IMPORT_PATTERNS = [
   /^[ \t]*(?:import|export)\b[^"';]*?\bfrom\s*["']([^"']+)["']/gm,
   /^[ \t]*import\s*["']([^"']+)["']/gm,
@@ -70,7 +71,13 @@ function forbiddenSpecifier(specifier) {
   )
 }
 
-export function scanSource(file, source) {
+function clientFrameworkSpecifier(specifier) {
+  return CLIENT_FRAMEWORK_PREFIXES.some(
+    (prefix) => specifier === prefix || specifier.startsWith(`${prefix}/`)
+  )
+}
+
+export function scanSource(file, source, frameworkFree = false) {
   const violations = []
   const scanned = blankComments(source)
 
@@ -97,6 +104,17 @@ export function scanSource(file, source) {
         specifier,
         rule: "server dependency in client graph",
       })
+    } else if (
+      frameworkFree &&
+      specifier &&
+      clientFrameworkSpecifier(specifier)
+    ) {
+      violations.push({
+        file,
+        line,
+        specifier,
+        rule: "framework dependency in shared graph",
+      })
     }
   }
 
@@ -120,6 +138,7 @@ function resolveRelativeImport(importer, specifier) {
 }
 
 export function scanEntryGraph(entry = ENTRY) {
+  const frameworkFree = resolve(entry) === ENTRY
   const pending = [entry]
   const visited = new Set()
   const violations = []
@@ -131,7 +150,7 @@ export function scanEntryGraph(entry = ENTRY) {
     visited.add(file)
     const source = readFileSync(file, "utf8")
     const displayPath = relative(ROOT, file).split("\\").join("/")
-    violations.push(...scanSource(displayPath, source))
+    violations.push(...scanSource(displayPath, source, frameworkFree))
 
     for (const { specifier } of importSpecifiers(source)) {
       if (!specifier?.startsWith(".")) continue

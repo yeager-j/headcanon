@@ -19,6 +19,11 @@ export interface CanonicalInvocation {
   readonly sha256: string
 }
 
+export interface PreparedCanonicalInvocation<Name extends string, Args> {
+  readonly canonical: CanonicalInvocation
+  readonly invocation: MutationInvocation<Name, Args>
+}
+
 /** A fail-closed input or hashing failure while preparing receipt identity. */
 export type CanonicalInvocationError =
   | {
@@ -207,15 +212,21 @@ function toHex(bytes: Uint8Array): string {
  * RFC 8785 canonicalization or SHA-256 hashing runs. Invalid values therefore
  * cannot reach receipt lookup under a lossy or runtime-specific representation.
  */
-export async function canonicalInvocation<Name extends string, Args>(
+export async function prepareCanonicalInvocation<Name extends string, Args>(
   protocolId: string,
   invocation: MutationInvocation<Name, Args>
-): Promise<Result<CanonicalInvocation, CanonicalInvocationError>> {
+): Promise<
+  Result<PreparedCanonicalInvocation<Name, Args>, CanonicalInvocationError>
+> {
   const envelope = { protocol: protocolId, invocation }
   const validationError = validateJsonValue(envelope, [], new WeakSet())
   if (validationError) return err(validationError)
 
-  const json = canonicalize(isolateFromInheritedToJson(envelope))
+  const isolatedEnvelope = isolateFromInheritedToJson(envelope) as {
+    readonly protocol: string
+    readonly invocation: MutationInvocation<Name, Args>
+  }
+  const json = canonicalize(isolatedEnvelope)
   if (json === undefined) {
     throw new Error("Validated canonical invocation did not serialize")
   }
@@ -225,8 +236,23 @@ export async function canonicalInvocation<Name extends string, Args>(
 
   try {
     const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes)
-    return ok({ json, bytes, sha256: toHex(new Uint8Array(digest)) })
+    return ok({
+      canonical: {
+        json,
+        bytes,
+        sha256: toHex(new Uint8Array(digest)),
+      },
+      invocation: isolatedEnvelope.invocation,
+    })
   } catch {
     return err({ code: "hash-failed" })
   }
+}
+
+export async function canonicalInvocation<Name extends string, Args>(
+  protocolId: string,
+  invocation: MutationInvocation<Name, Args>
+): Promise<Result<CanonicalInvocation, CanonicalInvocationError>> {
+  const prepared = await prepareCanonicalInvocation(protocolId, invocation)
+  return prepared.ok ? ok(prepared.value.canonical) : prepared
 }
