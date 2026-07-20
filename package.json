@@ -1,0 +1,30 @@
+{
+  "name": "@workspace/headcanon",
+  "version": "0.0.0",
+  "description": "Optimistic mutations for Next.js: believe your writes until canon says otherwise.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "lint": "eslint",
+    "format": "eslint --fix \"**/*.{ts,mjs}\" && prettier --write \"**/*.{ts,mjs,md,json}\"",
+    "typecheck": "tsc --noEmit",
+    "depcheck": "node depcheck.mjs",
+    "test": "vitest run"
+  },
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@standard-schema/spec": "^1.1.0",
+    "@workspace/result": "*",
+    "canonicalize": "^3.0.0"
+  },
+  "devDependencies": {
+    "@workspace/eslint-config": "*",
+    "@workspace/typescript-config": "*",
+    "eslint": "^9.39.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}

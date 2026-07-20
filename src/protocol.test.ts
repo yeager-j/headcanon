@@ -1,0 +1,110 @@
+import type { StandardSchemaV1 } from "@standard-schema/spec"
+import { describe, expect, expectTypeOf, it } from "vitest"
+
+import { ok } from "@workspace/result"
+
+import {
+  defineMutation,
+  defineProtocol,
+  type MutationInvocation,
+  type ProtocolInvocation,
+} from "./index"
+
+type AmountArgs = { readonly amount: number }
+
+const amountSchema: StandardSchemaV1<unknown, AmountArgs> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon-test",
+    validate(value) {
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "amount" in value &&
+        typeof value.amount === "number"
+      ) {
+        return { value: { amount: value.amount } }
+      }
+      return { issues: [{ message: "Expected an amount" }] }
+    },
+  },
+}
+
+const increment = defineMutation({
+  name: "counter.increment",
+  args: amountSchema,
+  predict(state: number, args) {
+    return ok(state + args.amount)
+  },
+})
+
+const reset = defineMutation({
+  name: "counter.reset",
+  args: amountSchema,
+  predict(_state: number, args) {
+    return ok(args.amount)
+  },
+})
+
+describe("defineMutation", () => {
+  it("returns a typed invocation factory with its protocol metadata", () => {
+    const invocation = increment({ amount: 2 })
+
+    expect(invocation).toEqual({
+      name: "counter.increment",
+      args: { amount: 2 },
+    })
+    expect(increment.name).toBe("counter.increment")
+    expect(increment.args).toBe(amountSchema)
+    expect(increment.predict(3, invocation.args)).toEqual({
+      ok: true,
+      value: 5,
+    })
+
+    expectTypeOf(invocation).toEqualTypeOf<
+      MutationInvocation<"counter.increment", AmountArgs>
+    >()
+    expectTypeOf(increment.name).toEqualTypeOf<"counter.increment">()
+  })
+
+  it("rejects incorrect invocation arguments at compile time", () => {
+    // @ts-expect-error — the schema's inferred output requires a numeric amount.
+    increment({ amount: "2" })
+  })
+})
+
+describe("defineProtocol", () => {
+  it("registers each stable mutation name once", () => {
+    const protocol = defineProtocol({
+      id: "test.counter.v1",
+      mutations: [increment, reset],
+    })
+
+    expect(protocol.id).toBe("test.counter.v1")
+    expect(protocol.mutationsByName["counter.increment"]).toBe(increment)
+    expect(protocol.mutationsByName["counter.reset"]).toBe(reset)
+    expect(Object.isFrozen(protocol.mutationsByName)).toBe(true)
+
+    expectTypeOf<ProtocolInvocation<typeof protocol>>().toEqualTypeOf<
+      | MutationInvocation<"counter.increment", AmountArgs>
+      | MutationInvocation<"counter.reset", AmountArgs>
+    >()
+  })
+
+  it("rejects duplicate stable names", () => {
+    const duplicate = defineMutation({
+      name: "counter.increment",
+      args: amountSchema,
+      predict(state: number) {
+        return ok(state)
+      },
+    })
+
+    expect(() =>
+      defineProtocol({
+        id: "test.counter.v1",
+        mutations: [increment, duplicate],
+      })
+    ).toThrowError("Duplicate mutation name: counter.increment")
+  })
+})
