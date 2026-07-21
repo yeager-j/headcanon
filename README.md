@@ -15,6 +15,12 @@ introducing another projected-state store.
   `Canon<State>`, and `AcceptedStamp` model independently advancing streams of
   authoritative state. Their constructors reject malformed external values with
   typed `Result` failures.
+- **Canon construction.** `defineCanon({ value, revisions })` brands a loader's
+  axis-namespace keys and raw revision integers into a validated, frozen
+  `Canon<State>` for the uncached read path — the counterpart of
+  `tagVersionedBase` for `"use cache"` loaders. It throws on an invalid revision
+  vector, since a loader emitting a malformed coordinate is a data-integrity
+  fault rather than an expected boundary.
 - **Coverage.** `covers(canon, stamp)` applies the product order: canon covers an
   accepted stamp only when every stamped axis exists at the accepted revision or
   later. Lifecycle code can use that fact to determine when a headcanon has been
@@ -133,11 +139,19 @@ behavioral contracts rather than duplicating synchronization assertions.
 
 ## Drizzle/Postgres authority
 
-`@workspace/headcanon/drizzle` exports `headcanonMutationReceipts` and
-`createDrizzleMutationAuthority`. Include the receipt table in the adopter's
-Drizzle schema so its normal migration workflow owns deployment. The equivalent
-baseline SQL is checked in at
-`drizzle/0000_headcanon_mutation_receipts.sql` for migration review and fixtures.
+`@workspace/headcanon/drizzle` exports `createDrizzleMutationAuthority`,
+`throwMutationContention`, and the `DrizzleHandlerTx` helper type. The receipt
+table itself is published from the dependency-minimal
+`@workspace/headcanon/drizzle-schema` entry (drizzle-orm only), so an adopter can
+add it to their Drizzle schema — and let `drizzle-kit` scan it — without the
+executor graph being pulled into schema tooling. Include the table in the
+adopter's schema so its normal migration workflow owns deployment; the equivalent
+baseline SQL is checked in at `drizzle/0000_headcanon_mutation_receipts.sql` for
+migration review and fixtures.
+
+Handlers infer their context when defined inline in the executor's `handlers`
+map. When a handler is hoisted into its own function, name its transaction with
+`DrizzleHandlerTx<typeof db>` rather than hand-deriving it from the client type.
 
 The adapter requires an interactive Postgres Drizzle client: for Neon, use the
 WebSocket `Pool` integration rather than the HTTP query client. It acquires a

@@ -4,6 +4,7 @@ import {
   acceptedStamp,
   axisId,
   covers,
+  defineCanon,
   revision,
   revisionVector,
   type Canon,
@@ -138,5 +139,39 @@ describe("covers", () => {
         acceptedStamp(vector({ [vitals]: 3, [inventory]: 2 }))
       )
     ).toBe(true)
+  })
+})
+
+describe("defineCanon", () => {
+  const vitals = axisId("entity/1/vitals")
+  const inventory = axisId("entity/1/inventory")
+
+  it("brands raw revision integers into an immutable canon", () => {
+    const canon = defineCanon({
+      value: { hp: 4 },
+      revisions: { [vitals]: 3, [inventory]: 0 },
+    })
+
+    expect(canon.value).toEqual({ hp: 4 })
+    expect(canon.revisions).toEqual({ [vitals]: 3, [inventory]: 0 })
+    expect(Object.isFrozen(canon)).toBe(true)
+    expect(Object.isFrozen(canon.revisions)).toBe(true)
+    // The branded vector is usable everywhere a RevisionVector is expected.
+    expect(covers(canon, acceptedStamp(vector({ [vitals]: 3 })))).toBe(true)
+  })
+
+  it("accepts an empty revision vector", () => {
+    expect(defineCanon({ value: null, revisions: {} }).revisions).toEqual({})
+  })
+
+  it.each([
+    [-1, "negative"],
+    [1.5, "fractional"],
+    [Number.NaN, "non-finite"],
+    [Number.MAX_SAFE_INTEGER + 1, "unsafe-integer"],
+  ])("throws on an invalid revision (%s)", (bad, reason) => {
+    expect(() =>
+      defineCanon({ value: null, revisions: { [vitals]: bad } })
+    ).toThrow(new RegExp(`${vitals}.*${reason}`))
   })
 })

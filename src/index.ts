@@ -2,6 +2,7 @@ export {
   acceptedStamp,
   axisId,
   covers,
+  defineCanon,
   revision,
   revisionVector,
   type AcceptedStamp,

@@ -1,13 +1,5 @@
 import { and, eq, sql } from "drizzle-orm"
 import {
-  char,
-  index,
-  jsonb,
-  pgTable,
-  primaryKey,
-  text,
-  timestamp,
-  uuid,
   type PgDatabase,
   type PgQueryResultHKT,
   type PgTransaction,
@@ -23,44 +15,16 @@ import {
   type MutationAuthorityRequest,
   type MutationTerminalOutcome,
 } from "./authority"
+import {
+  headcanonMutationReceipts,
+  type StoredMutationTerminalOutcome,
+} from "./receipt-table"
 import { acceptedStamp, revisionVector } from "./revisions"
 
-type StoredMutationTerminalOutcome =
-  | {
-      readonly kind: "accepted"
-      readonly stamp: { readonly revisions: unknown }
-    }
-  | { readonly kind: "rejected"; readonly error: unknown }
-
-/** Durable authority outcomes keyed by trusted actor scope and mutation UUID. */
-export const headcanonMutationReceipts = pgTable(
-  "headcanon_mutation_receipts",
-  {
-    actorScope: text("actor_scope").notNull(),
-    mutationId: uuid("mutation_id").notNull(),
-    protocol: text("protocol").notNull(),
-    canonicalInvocation: text("canonical_invocation").notNull(),
-    canonicalFingerprint: char("canonical_fingerprint", {
-      length: 64,
-    }).notNull(),
-    terminalOutcome: jsonb("terminal_outcome")
-      .$type<StoredMutationTerminalOutcome>()
-      .notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .defaultNow()
-      .notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .defaultNow()
-      .notNull(),
-  },
-  (receipt) => [
-    primaryKey({ columns: [receipt.actorScope, receipt.mutationId] }),
-    index("headcanon_mutation_receipts_fingerprint_idx").on(
-      receipt.canonicalFingerprint
-    ),
-    index("headcanon_mutation_receipts_created_at_idx").on(receipt.createdAt),
-  ]
-)
+// The receipt table is defined in `./receipt-table` (drizzle-orm only, so schema
+// tooling never loads the executor graph) and published from the dedicated
+// `./drizzle-schema` entry. This adapter imports it for its own queries; it does
+// not re-export it, so the table has exactly one public home (UNN-673).
 
 /** Transaction control flow for a guarded write that lost a race. */
 export class MutationContentionError extends Error {
@@ -79,6 +43,17 @@ export type DrizzleMutationTransaction<
   QueryResult extends PgQueryResultHKT,
   Schema extends Record<string, unknown>,
 > = PgTransaction<QueryResult, Schema, ExtractTablesWithRelations<Schema>>
+
+/**
+ * The transaction a mutation handler runs inside, derived from the adopter's own
+ * Drizzle database type. A handler defined inline in `createNextMutationExecutor`'s
+ * `handlers` map already infers its context; name this only when hoisting a
+ * handler into its own function, e.g.
+ * `MutationHandlerContext<DrizzleHandlerTx<typeof db>, Args, Actor>`.
+ */
+export type DrizzleHandlerTx<
+  DB extends PgDatabase<PgQueryResultHKT, Record<string, unknown>>,
+> = Parameters<Parameters<DB["transaction"]>[0]>[0]
 
 export interface DrizzleMutationAuthorityOptions<
   QueryResult extends PgQueryResultHKT,

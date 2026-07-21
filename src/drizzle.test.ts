@@ -10,9 +10,9 @@ import { err, ok } from "@workspace/result"
 import { createMutationExecutor } from "./authority"
 import {
   createDrizzleMutationAuthority,
-  headcanonMutationReceipts,
   throwMutationContention,
 } from "./drizzle"
+import { headcanonMutationReceipts } from "./receipt-table"
 import { revision } from "./revisions"
 import {
   MUTATION_AUTHORITY_CONTRACT_ACTOR,

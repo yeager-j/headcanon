@@ -129,6 +129,35 @@ export const acceptedStamp = (revisions: RevisionVector): AcceptedStamp =>
   Object.freeze({ revisions })
 
 /**
+ * Constructs a validated {@link Canon} for the uncached loader path.
+ *
+ * The application supplies axis-namespace keys and raw revision integers; this
+ * parses them into an immutable {@link RevisionVector} (the parse-don't-validate
+ * seam) and **throws** on an invalid coordinate — a loader-side data-integrity
+ * failure, not an expected boundary. It is the uncached counterpart of
+ * `tagVersionedBase`, which likewise throws; a `"use cache"` loader tags the
+ * same shape instead. Both accept any `{ value, revisions }`.
+ */
+export function defineCanon<State>(input: {
+  readonly value: State
+  readonly revisions: Record<AxisId, number>
+}): Canon<State> {
+  const revisions = revisionVector(input.revisions)
+  if (!revisions.ok) {
+    const { error } = revisions
+    const location =
+      "axis" in error
+        ? ` at axis ${JSON.stringify(error.axis)} (${error.reason})`
+        : ` (${error.reason})`
+    throw new Error(
+      `defineCanon received an invalid revision vector: ${error.code}${location}`
+    )
+  }
+
+  return Object.freeze({ value: input.value, revisions: revisions.value })
+}
+
+/**
  * Returns whether canon covers every coordinate in an accepted stamp.
  *
  * Coverage is the product order over axis revisions. Missing or behind axes do

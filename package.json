@@ -18,6 +18,7 @@
     "./ably/client": "./src/ably/client.ts",
     "./ably/server": "./src/ably/server.ts",
     "./drizzle": "./src/drizzle.ts",
+    "./drizzle-schema": "./src/receipt-table.ts",
     "./next/client": "./src/next/client.ts",
     "./next/server": "./src/next/server.ts",
     "./react": "./src/react.ts",
