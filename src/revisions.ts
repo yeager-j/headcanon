@@ -112,16 +112,53 @@ export function revisionVector(
     })
   }
 
-  const revisions = Object.create(null) as Record<AxisId, Revision>
+  const revisions = {} as Record<AxisId, Revision>
   for (const [rawAxis, rawRevision] of Object.entries(value)) {
     const parsedRevision = revision(rawRevision)
     if (!parsedRevision.ok) {
       return err({ ...parsedRevision.error, axis: rawAxis })
     }
-    revisions[axisId(rawAxis)] = parsedRevision.value
+    defineCoordinate(revisions, axisId(rawAxis), parsedRevision.value)
   }
 
   return ok(Object.freeze(revisions))
+}
+
+/**
+ * Writes one coordinate as an own data property.
+ *
+ * A revision vector is a **plain** object, not a null-prototype one, because it
+ * crosses the RSC boundary as part of a canon and React refuses to serialize
+ * null-prototype objects to Client Components. That costs the two protections a
+ * null prototype gave a map with application-supplied keys, so both are restored
+ * explicitly: `defineProperty` (never assignment) so an axis literally named
+ * `__proto__` becomes an own key instead of invoking the prototype setter, and
+ * {@link revisionAt} for every read so an axis named `toString` reads as absent
+ * instead of inheriting `Object.prototype`'s member.
+ */
+export function defineCoordinate(
+  vector: Record<AxisId, Revision>,
+  axis: AxisId,
+  value: Revision
+): void {
+  Object.defineProperty(vector, axis, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  })
+}
+
+/**
+ * Reads one coordinate, treating inherited members as absent — the only safe
+ * way to index a vector whose keys are application-supplied axis strings. See
+ * {@link defineCoordinate} for why the vector is not null-prototype.
+ */
+export function revisionAt(
+  vector: RevisionVector,
+  axis: AxisId
+): Revision | undefined {
+  return Object.hasOwn(vector, axis) ? vector[axis] : undefined
 }
 
 /** Wraps a validated revision vector as the atomic result of acceptance. */
@@ -169,8 +206,8 @@ export function covers<State>(
 ): boolean {
   for (const rawAxis of Object.keys(stamp.revisions)) {
     const axis = axisId(rawAxis)
-    const acceptedRevision = stamp.revisions[axis]
-    const canonRevision = canon.revisions[axis]
+    const acceptedRevision = revisionAt(stamp.revisions, axis)
+    const canonRevision = revisionAt(canon.revisions, axis)
 
     if (
       acceptedRevision === undefined ||

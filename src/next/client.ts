@@ -21,7 +21,8 @@ export function rethrowNextControlFlow(error: unknown): void {
 export function createNextPredictedRoot<
   const Protocol extends ProtocolDefinition<
     string,
-    readonly AnyMutationDefinition[]
+    readonly AnyMutationDefinition[],
+    unknown
   >,
 >(options: PredictedRootOptions<Protocol>) {
   return createPredictedRootWithDeliveryErrorClassifier(

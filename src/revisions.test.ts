@@ -6,6 +6,7 @@ import {
   covers,
   defineCanon,
   revision,
+  revisionAt,
   revisionVector,
   type Canon,
   type RevisionVector,
@@ -173,5 +174,62 @@ describe("defineCanon", () => {
     expect(() =>
       defineCanon({ value: null, revisions: { [vitals]: bad } })
     ).toThrow(new RegExp(`${vitals}.*${reason}`))
+  })
+})
+
+describe("revision vectors cross the RSC boundary safely", () => {
+  // A canon is carried to Client Components as an RSC prop and an accepted
+  // stamp rides a Server Action response, so React's serializer sees both. It
+  // rejects null-prototype objects ("Only plain objects ... can be passed to
+  // Client Components"), which is why the vector is plain — and why the two
+  // protections a null prototype used to give are restored explicitly.
+  it("produces plain, serializable objects", () => {
+    const canon = defineCanon({
+      value: { hp: 3 },
+      revisions: { [axisId("entity/1/vitals")]: 4 },
+    })
+
+    expect(Object.getPrototypeOf(canon.revisions)).toBe(Object.prototype)
+    // The exact predicate React's serializer applies to a candidate prop.
+    expect(
+      Object.getPrototypeOf(canon.revisions) === Object.prototype ||
+        Object.getPrototypeOf(canon.revisions) === null
+    ).toBe(true)
+    expect(JSON.parse(JSON.stringify(canon.revisions))).toEqual({
+      "entity/1/vitals": 4,
+    })
+  })
+
+  it("stores a __proto__ axis as an own key without moving the prototype", () => {
+    // Parsed, not a literal: `{ __proto__: 7 }` sets the prototype instead of
+    // creating an own key, while `JSON.parse` creates the own property — which
+    // is also how such a key would really arrive (a wire payload).
+    const hostile = vector(
+      JSON.parse('{"__proto__": 7, "entity/1/vitals": 2}') as Record<
+        string,
+        unknown
+      >
+    )
+
+    expect(Object.getPrototypeOf(hostile)).toBe(Object.prototype)
+    expect(Object.hasOwn(hostile, "__proto__")).toBe(true)
+    expect(revisionAt(hostile, axisId("__proto__"))).toBe(7)
+  })
+
+  it("reads an inherited member as an absent axis", () => {
+    const empty = vector({})
+
+    // Plain-object indexing would hand back Object.prototype.toString here.
+    expect(revisionAt(empty, axisId("toString"))).toBeUndefined()
+    expect(revisionAt(empty, axisId("constructor"))).toBeUndefined()
+  })
+
+  it("does not treat an inherited member as coverage", () => {
+    const canon: Canon<null> = { value: null, revisions: vector({}) }
+    const stamp = acceptedStamp(vector({ toString: 1 }))
+
+    // With a raw `canon.revisions[axis]` lookup this returns true: the
+    // inherited function is `!== undefined` and compares as NaN-ish nonsense.
+    expect(covers(canon, stamp)).toBe(false)
   })
 })

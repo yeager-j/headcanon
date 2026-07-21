@@ -139,7 +139,8 @@ export function announceExternalCommit(
 export function createNextMutationExecutor<
   const Protocol extends ProtocolDefinition<
     string,
-    readonly AnyMutationDefinition[]
+    readonly AnyMutationDefinition[],
+    unknown
   >,
   Transaction,
   Actor,

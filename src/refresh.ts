@@ -19,6 +19,8 @@ import type {
 import {
   axisId,
   covers,
+  defineCoordinate,
+  revisionAt,
   type AcceptedStamp,
   type AxisId,
   type Canon,
@@ -197,21 +199,22 @@ function revisionsFrom(
   observed: ReadonlyMap<AxisId, Revision>,
   canon: Canon<unknown>
 ): RevisionVector {
-  const revisions = Object.create(null) as Record<AxisId, Revision>
+  const revisions = {} as Record<AxisId, Revision>
 
   for (const stamp of accepted.values()) {
     for (const [rawAxis, revision] of Object.entries(stamp.revisions)) {
       const axis = axisId(rawAxis)
-      const current = revisions[axis]
+      const current = revisionAt(revisions, axis)
       if (current === undefined || revision > current)
-        revisions[axis] = revision
+        defineCoordinate(revisions, axis, revision)
     }
   }
 
   for (const [axis, revision] of observed) {
-    if (canon.revisions[axis] === undefined) continue
-    const current = revisions[axis]
-    if (current === undefined || revision > current) revisions[axis] = revision
+    if (revisionAt(canon.revisions, axis) === undefined) continue
+    const current = revisionAt(revisions, axis)
+    if (current === undefined || revision > current)
+      defineCoordinate(revisions, axis, revision)
   }
 
   return revisions
@@ -223,7 +226,7 @@ function missingAxes(
 ): readonly AxisId[] {
   return Object.keys(requirements)
     .map(axisId)
-    .filter((axis) => canon.revisions[axis] === undefined)
+    .filter((axis) => revisionAt(canon.revisions, axis) === undefined)
 }
 
 export function useSnapshotRefresh(
@@ -462,7 +465,10 @@ export function useIncorporation<State>(
 
   const observeInvalidation = useCallback(
     (invalidation: AxisInvalidation) => {
-      const canonRevision = canonRef.current.revisions[invalidation.axis]
+      const canonRevision = revisionAt(
+        canonRef.current.revisions,
+        invalidation.axis
+      )
       if (
         canonRevision === undefined ||
         invalidation.revision <= canonRevision

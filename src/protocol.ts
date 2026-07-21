@@ -76,20 +76,50 @@ export type MutationRegistry<
   >
 }
 
+/**
+ * A type-level declaration of the client-visible rejections a protocol's
+ * authority may return beyond what its predictors can refuse locally —
+ * "authority behavior is allowed to be stricter than client prediction" made
+ * explicit instead of forcing predictors to annotate errors they never
+ * produce. Carries no runtime data; `rejections<T>()` mints it.
+ */
+export interface ProtocolRejections<Rejection> {
+  readonly __rejection?: Rejection
+}
+
+/** Declares a protocol's client-visible authority rejection union. */
+export function rejections<Rejection>(): ProtocolRejections<Rejection> {
+  return Object.freeze({})
+}
+
 /** A stable protocol ID and its immutable, uniquely named mutation registry. */
 export interface ProtocolDefinition<
   Id extends string,
   Mutations extends readonly AnyMutationDefinition[],
+  Rejection = never,
 > {
   readonly id: Id
   readonly mutations: Mutations
   readonly mutationsByName: MutationRegistry<Mutations>
+  /** Phantom carrier for the declared authority rejections — always present so
+   *  `RejectionOf` infers exactly (`never` when nothing was declared). */
+  readonly rejections: ProtocolRejections<Rejection>
 }
 
 /** The union of every invocation admitted by a protocol definition. */
 export type ProtocolInvocation<Protocol> =
-  Protocol extends ProtocolDefinition<string, infer Mutations>
+  Protocol extends ProtocolDefinition<string, infer Mutations, unknown>
     ? InvocationOf<Mutations[number]>
+    : never
+
+/** The declared client-visible authority rejections of a protocol. */
+export type ProtocolRejectionOf<Protocol> =
+  Protocol extends ProtocolDefinition<
+    string,
+    readonly AnyMutationDefinition[],
+    infer Rejection
+  >
+    ? Rejection
     : never
 
 /**
@@ -138,10 +168,15 @@ export function defineMutation<
 export function defineProtocol<
   const Id extends string,
   const Mutations extends readonly AnyMutationDefinition[],
+  Rejection = never,
 >(definition: {
   readonly id: Id
   readonly mutations: Mutations & OneStateMutations<Mutations>
-}): ProtocolDefinition<Id, Mutations> {
+  /** The client-visible authority rejections beyond predictor refusals —
+   *  see {@link rejections}. Omitted, the authority is declared no stricter
+   *  than prediction. */
+  readonly rejections?: ProtocolRejections<Rejection>
+}): ProtocolDefinition<Id, Mutations, Rejection> {
   const mutations = Object.freeze([
     ...definition.mutations,
   ]) as unknown as Mutations
@@ -166,5 +201,6 @@ export function defineProtocol<
     mutationsByName: Object.freeze(
       mutationsByName
     ) as MutationRegistry<Mutations>,
+    rejections: definition.rejections ?? rejections<Rejection>(),
   })
 }
