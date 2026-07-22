@@ -77,6 +77,21 @@ export type MutationTerminalOutcome<Rejection> =
   | { readonly kind: "rejected"; readonly error: Rejection }
   | { readonly kind: "denied" }
 
+declare const protocolIdentity: unique symbol
+
+/**
+ * Phantom protocol identity for a generated executor's outcome. A generated
+ * Server Action admits `unknown` envelopes, so its parameter carries no
+ * protocol evidence, and an app wrapper preserves only the return type —
+ * without this tag, two protocols with compatible refusal unions would let a
+ * client bind the wrong generated action and only fail at runtime. The
+ * property is optional and never present at runtime; it exists purely so
+ * structural assignability compares protocol ids.
+ */
+export type ProtocolIdentity<ProtocolId extends string> = {
+  readonly [protocolIdentity]?: ProtocolId
+}
+
 export type MutationAuthorityAdapterError =
   | { readonly code: "mutation-id-reused"; readonly mutationId: string }
   | { readonly code: "contention"; readonly mutationId: string }

@@ -12,6 +12,7 @@ import {
   type MutationAuthorityAdapter,
   type MutationExecutorError,
   type MutationTerminalOutcome,
+  type ProtocolIdentity,
   type StampAccumulator,
 } from "../authority"
 import type {
@@ -277,6 +278,45 @@ export function bindMutation<
   return Object.freeze({ mutation, command })
 }
 
+/**
+ * UNN-688 spike: an application-scoped command definer. The application
+ * decides its actor, preflight, and transaction types once — where its
+ * authority context is created — and every command literal is then fully
+ * contextually typed with only mutation, projection, and evidence left to
+ * infer. `defineMutationCommand(mutation, command)` produces the same frozen
+ * binding as `bindMutation` and preserves its wrong-definition negative
+ * typecheck; if adopted, it replaces `bindMutation` rather than joining it.
+ */
+export function createMutationCommandDefiner<Actor, Preflight, Transaction>() {
+  return function defineMutationCommand<
+    const Mutation extends MutationWithRefusal,
+    Projection,
+    Evidence,
+  >(
+    mutation: Mutation,
+    command: MutationCommand<
+      NoInfer<Mutation>,
+      Actor,
+      Preflight,
+      Transaction,
+      Projection,
+      Evidence
+    >
+  ): MutationBinding<
+    Mutation,
+    MutationCommand<
+      Mutation,
+      Actor,
+      Preflight,
+      Transaction,
+      Projection,
+      Evidence
+    >
+  > {
+    return Object.freeze({ mutation, command })
+  }
+}
+
 type AnyMutationBinding = MutationBinding<MutationWithRefusal>
 
 type BoundMutation<Commands extends readonly AnyMutationBinding[]> =
@@ -432,13 +472,18 @@ export function createNextMutationAction<
     ])
   )
 
+  // The phantom ProtocolIdentity pairs this generated action with its
+  // protocol at the type level: the envelope parameter is `unknown` (strict
+  // admission) and app wrappers preserve only the return type, so the tag is
+  // what stops a client binding a refusal-compatible foreign action.
   return async (
     envelope: unknown
   ): Promise<
     Result<
       Exclude<Terminal, { readonly kind: "denied" }>,
       MutationExecutorError
-    >
+    > &
+      ProtocolIdentity<Protocol["id"]>
   > => {
     const actor = await options.actor()
     const prepared = await prepareMutationRequest(options.protocol, envelope)

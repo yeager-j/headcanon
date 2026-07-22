@@ -201,6 +201,13 @@ export interface PredictedRootInput<State> {
   readonly canon: Canon<State>
 }
 
+/** The mounted hook a predicted-root factory returns for one protocol. */
+export type PredictedRootHook<
+  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
+> = (
+  input: PredictedRootInput<StateOf<Protocol>>
+) => ProtocolPredictedRoot<Protocol>
+
 export interface ObservedRootOptions {
   readonly refresh: () => RefreshAdapter
   readonly invalidations?: InvalidationAdapter

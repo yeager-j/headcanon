@@ -39,6 +39,7 @@ export {
   type MutationEnvelope,
   type MutationExecutorError,
   type MutationTerminalOutcome,
+  type ProtocolIdentity,
   type ReadableStampAccumulator,
   type StampAccumulator,
 } from "./authority"
