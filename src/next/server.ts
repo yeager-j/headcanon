@@ -474,8 +474,8 @@ export function createNextMutationAction<
 
   // The phantom ProtocolIdentity pairs this generated action with its
   // protocol at the type level: the envelope parameter is `unknown` (strict
-  // admission) and app wrappers preserve only the return type, so the tag is
-  // what stops a client binding a refusal-compatible foreign action.
+  // admission), so it provides no protocol evidence. The tag stops a client
+  // binding a refusal-compatible foreign action.
   return async (
     envelope: unknown
   ): Promise<

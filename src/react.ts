@@ -201,7 +201,10 @@ export interface PredictedRootInput<State> {
   readonly canon: Canon<State>
 }
 
-/** The mounted hook a predicted-root factory returns for one protocol. */
+/**
+ * The public hook type returned by a predicted-root factory. Its protocol fixes
+ * the canon state, invocation union, and correlated mutation error types.
+ */
 export type PredictedRootHook<
   Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
 > = (

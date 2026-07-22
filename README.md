@@ -9,6 +9,126 @@ mutations. Protocol definitions remain shareable between browser and server
 code; `@workspace/headcanon/react` owns the mounted prediction lifecycle without
 introducing another projected-state store.
 
+## One complete path
+
+Everything below is one feature: a rename that the UI believes instantly and
+canon confirms.
+
+### 1. Define the mutation and protocol once
+
+Keep this definition client-safe and share it between browser and server.
+
+```ts
+// domain/notes/protocol.ts
+import { defineMutation, defineProtocol } from "@workspace/headcanon"
+
+export const renameNote = defineMutation({
+  name: "notes.rename",
+  args: renameArgsSchema, // any Standard Schema parser, such as Zod
+  predict: (state: NotesState, args) => ok(applyRename(state, args)),
+  refusal: renameRefusalSchema, // structured and preserved in receipts
+})
+
+export const notesProtocol = defineProtocol({
+  id: "myapp.notes.v1",
+  mutations: [renameNote],
+})
+```
+
+### 2. Bind the server command and export the generated Server Action
+
+```ts
+// lib/actions/notes/apply.ts
+"use server"
+
+import { createDrizzleMutationAuthority } from "@workspace/headcanon/drizzle"
+import {
+  bindMutation,
+  createNextMutationAction,
+} from "@workspace/headcanon/next/server"
+
+export const applyNotesMutationAction = createNextMutationAction({
+  protocol: notesProtocol,
+  actor: requireActor, // derive the trusted actor; it never rides the wire
+  authority: createDrizzleMutationAuthority({
+    db,
+    scope: (actor) => actor.userId,
+  }),
+  commands: [bindMutation(renameNote, renameNoteCommand)], // screen / admit / execute / repeat-safe finalizeAccepted
+  invalidations: notesInvalidationPublisher,
+  reportInvalidationFailure,
+})
+```
+
+### 3. Create the client predicted root from the action
+
+```ts
+// domain/notes/use-note-predictions.ts
+"use client"
+
+import { createNextPredictedRoot } from "@workspace/headcanon/next/client"
+
+export const useNotePredictions = createNextPredictedRoot({
+  protocol: notesProtocol,
+  action: applyNotesMutationAction,
+  invalidations: axisInvalidations, // omit when this client has no realtime
+})
+```
+
+### 4. Mount the root over the route's canon and mutate
+
+```tsx
+function NoteTitle({ canon }: { canon: Canon<NotesState> }) {
+  const { value, mutate } = useNotePredictions({ canon })
+
+  const rename = (title: string) => {
+    const result = mutate(renameNote({ noteId: value.focused, title }))
+    if (!result.ok) {
+      toast.error(copyFor(result.error)) // refused by the local predictor
+      return
+    }
+    return result.value
+  }
+
+  // `value` shows a successful rename immediately. The server validates the
+  // same intent against authoritative state before committing it.
+}
+```
+
+### 5. Await only the milestones the caller needs
+
+```ts
+const receipt = rename("Chapter Two")
+if (!receipt) return
+
+const accepted = await receipt.accepted // authority committed an AcceptedStamp
+const canonized = await receipt.canonized // this canon now covers that stamp
+```
+
+That configuration supplies one ordered delivery queue with durable mutation
+identity; ambiguous-delivery recovery that redelivers the exact envelope;
+receipt-deduplicated, contention-retried transactional execution; structured
+refusals recovered from duplicate receipts; per-axis cache-tag expiry, route
+refresh, and realtime invalidation derived from each accepted stamp; rebase of
+pending intent over newer canon; and typed `accepted` and `canonized`
+milestones.
+
+### Conventions, not guesses
+
+Headcanon owns conventions only at framework seams it can determine safely. A
+generated Next Server Action uses the standard sender adapter; a Next RSC root
+uses the App Router refresh carrier with a 250 ms acceptance grace; omitting
+client invalidations means no realtime; and the Drizzle and Ably entries expose
+their standard adapters. The explicit `send` and `refresh` form remains public
+for snapshot carriers, tests, and unusual delivery adapters.
+
+Headcanon never infers application-owned facts: actor identity; screening,
+admission, in-transaction authorization, or other authority policy; mutation
+semantics and refusal vocabularies; storage axes or guarded version writes;
+projection dependencies; storage scope or home; redaction; or external-commit
+context. Those decisions stay explicit at the boundary that has enough trusted
+context to enforce them.
+
 ## Protocol core
 
 - **Revision vectors.** `AxisId`, branded `Revision` values, `RevisionVector`,

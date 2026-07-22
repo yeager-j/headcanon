@@ -187,8 +187,6 @@ describe("Next client binding", () => {
   })
 })
 
-// UNN-688 spike: the `action`-based golden path.
-
 const refusalSchema: StandardSchemaV1<unknown, TestError> = {
   "~standard": {
     version: 1,

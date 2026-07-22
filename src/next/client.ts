@@ -43,9 +43,9 @@ type ProtocolMutation<Protocol> =
 /**
  * The Server Action `createNextMutationAction` generates for one protocol.
  * The outcome carries a phantom {@link ProtocolIdentity}: a generated action
- * admits `unknown` envelopes and app wrappers preserve only the return type,
- * so the identity tag is what makes binding the wrong protocol's action a
- * local type error even when two protocols share a refusal shape.
+ * admits `unknown` envelopes, so its parameter cannot distinguish protocols.
+ * The identity tag makes binding the wrong protocol's action a local type
+ * error even when two protocols share a refusal shape.
  */
 export type NextMutationAction<
   Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
@@ -78,7 +78,14 @@ export interface NextActionPredictedRootOptions<
   readonly invalidations?: PredictedRootOptions<Protocol>["invalidations"]
 }
 
-/** Binds a predicted root to Next's thrown Server Action control flow. */
+/**
+ * Creates a predicted-root hook for a Next.js App Router surface.
+ *
+ * The action form is the standard path: it supplies the normal sender adapter
+ * and defaults refresh to the App Router carrier. The explicit `send` and
+ * `refresh` form remains available for snapshot carriers, tests, and unusual
+ * delivery adapters.
+ */
 export function createNextPredictedRoot<
   const Protocol extends ProtocolDefinition<
     string,
@@ -118,7 +125,7 @@ export function createNextPredictedRoot<
   )
 }
 
-/** Watch-only sibling: defaults the App Router refresh carrier the same way. */
+/** Options for an App Router observed root with no mutation surface. */
 export interface NextObservedRootOptions {
   readonly refresh?: () => RefreshAdapter
   readonly invalidations?: ObservedRootOptions["invalidations"]
@@ -132,7 +139,11 @@ export function createNextObservedRoot(options: NextObservedRootOptions = {}) {
   })
 }
 
-/** Adapts the generated Server Action to a predicted root's delivery seam. */
+/**
+ * Adapts a generated Server Action to the explicit predicted-root delivery
+ * seam. Prefer the `action` form of {@link createNextPredictedRoot} for the
+ * standard App Router carrier.
+ */
 export function createNextMutationSender<
   const Protocol extends ProtocolDefinition<
     string,
