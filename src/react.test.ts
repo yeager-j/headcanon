@@ -15,6 +15,7 @@ import {
   revisionVector,
   type AcceptedStamp,
   type Canon,
+  type MutationContext,
 } from "./index"
 import {
   createPredictedRoot,
@@ -139,7 +140,7 @@ describe("createPredictedRoot", () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it("locally refuses without allocating an ID or starting delivery", () => {
+  it("locally refuses after allocating an ID without recording or delivering it", () => {
     const randomUUID = vi.spyOn(globalThis.crypto, "randomUUID")
     const { result, send } = setup()
 
@@ -149,10 +150,55 @@ describe("createPredictedRoot", () => {
     })
 
     expect(outcome).toEqual(err({ code: "prediction-refused" }))
-    expect(randomUUID).not.toHaveBeenCalled()
+    expect(randomUUID).toHaveBeenCalledTimes(1)
     expect(send).not.toHaveBeenCalled()
     expect(result.current.value).toBe(0)
     expect(result.current.status.pending).toBe(0)
+  })
+
+  it("shares one immutable envelope identity across initial prediction and replay", () => {
+    const contexts: MutationContext[] = []
+    const identityAware = defineMutation({
+      name: "counter.identity-aware",
+      args: counterArgsSchema,
+      predict(state: number, args, context) {
+        contexts.push(context)
+        return ok(state + args.amount)
+      },
+    })
+    const protocol = defineProtocol({
+      id: "test.counter.identity.v1",
+      mutations: [identityAware],
+    })
+    const send = vi.fn(
+      async (_envelope: MutationEnvelope<ReturnType<typeof identityAware>>) =>
+        ok(stamp(1))
+    )
+    const usePredictions = createPredictedRoot({
+      protocol,
+      send,
+      refresh: useNoRefresh,
+    })
+    const { result, rerender } = renderHook(
+      ({ currentCanon }: { currentCanon: Canon<number> }) =>
+        usePredictions({ canon: currentCanon }),
+      { initialProps: { currentCanon: canon(0, 0) } }
+    )
+
+    let receipt!: MutationReceipt<never>
+    act(() => {
+      const outcome = result.current.mutate(identityAware({ amount: 1 }))
+      if (!outcome.ok) throw new Error("unexpected local refusal")
+      receipt = outcome.value
+    })
+    rerender({ currentCanon: canon(10, 0) })
+
+    expect(contexts.length).toBeGreaterThanOrEqual(2)
+    expect(contexts.every(Object.isFrozen)).toBe(true)
+    expect(contexts.map(({ mutationId }) => mutationId)).toEqual(
+      contexts.map(() => receipt.id)
+    )
+    expect(send.mock.calls[0]?.[0].mutationId).toBe(receipt.id)
   })
 
   it("cancels a dependent same-tick refusal during replay", async () => {

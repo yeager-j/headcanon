@@ -105,7 +105,9 @@ describe("defineMutation", () => {
     })
     expect(increment.name).toBe("counter.increment")
     expect(increment.args).toBe(amountSchema)
-    expect(increment.predict(3, invocation.args)).toEqual({
+    expect(
+      increment.predict(3, invocation.args, { mutationId: "mutation-1" })
+    ).toEqual({
       ok: true,
       value: 5,
     })

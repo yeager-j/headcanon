@@ -358,7 +358,8 @@ describe("Next mutation action", () => {
         options.lifecycle?.push(`admit:${tx.read()}`)
         return allowMutation({ observed: tx.read() })
       },
-      execute({ tx, args, stamp }) {
+      execute({ tx, args, stamp, mutationId }) {
+        options.lifecycle?.push(`execute:${mutationId}`)
         if (args.amount < 0) return refuseMutation({ code: "refused" } as const)
         const next = tx.read() + args.amount
         tx.write(next)
@@ -396,7 +397,13 @@ describe("Next mutation action", () => {
 
     await action(authority, command({ lifecycle }))(envelope)
 
-    expect(lifecycle).toEqual(["screen:0", "admit:0", "admit:10"])
+    expect(lifecycle).toEqual([
+      "screen:0",
+      "admit:0",
+      `execute:${envelope.mutationId}`,
+      "admit:10",
+      `execute:${envelope.mutationId}`,
+    ])
     expect(authority.read()).toBe(11)
     expect(authority.attemptCount("actor", envelope.mutationId)).toBe(2)
   })

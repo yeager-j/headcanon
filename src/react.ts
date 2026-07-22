@@ -17,6 +17,7 @@ import type { MutationEnvelope } from "./authority"
 import type {
   AnyMutationDefinition,
   InvocationOf,
+  MutationContext,
   MutationDefinition,
   MutationErrorOf,
   MutationInvocation,
@@ -287,8 +288,7 @@ interface LedgerEntry<Invocation, Error> {
 }
 
 interface OptimisticUpdate<Invocation> {
-  readonly mutationId: string
-  readonly invocation: Invocation
+  readonly envelope: MutationEnvelope<Invocation>
 }
 
 interface ReplayRefusal<Error> {
@@ -312,7 +312,15 @@ interface ReplayFrame<State, Error> {
 }
 
 interface RuntimeMutation<State, Error> {
-  readonly predict: (state: State, args: unknown) => Result<State, Error>
+  readonly predict: (
+    state: State,
+    args: unknown,
+    context: MutationContext
+  ) => Result<State, Error>
+}
+
+function mutationContext(mutationId: string): MutationContext {
+  return Object.freeze({ mutationId })
 }
 
 function freezeEnvelope<Invocation>(
@@ -439,19 +447,25 @@ export function createPredictedRootWithDeliveryErrorClassifier<
         // optimistic queue, and how long a settled update stays replayed is
         // React's timing, not a package contract. Deciding "one application
         // per ID" here makes every downstream fact independent of that.
-        if (frame.replayedMutationIds.includes(update.mutationId)) return frame
+        if (frame.replayedMutationIds.includes(update.envelope.mutationId)) {
+          return frame
+        }
 
         const replayedFrame = {
           ...frame,
           replayedMutationIds: [
             ...frame.replayedMutationIds,
-            update.mutationId,
+            update.envelope.mutationId,
           ],
         }
-        if (frame.refusedIds.has(update.mutationId)) return replayedFrame
-        if (frame.pausedIds.has(update.mutationId)) return replayedFrame
+        if (frame.refusedIds.has(update.envelope.mutationId)) {
+          return replayedFrame
+        }
+        if (frame.pausedIds.has(update.envelope.mutationId)) {
+          return replayedFrame
+        }
 
-        const acceptedStamp = frame.acceptedById.get(update.mutationId)
+        const acceptedStamp = frame.acceptedById.get(update.envelope.mutationId)
         if (
           acceptedStamp &&
           covers({ revisions: frame.revisions }, acceptedStamp)
@@ -459,9 +473,10 @@ export function createPredictedRootWithDeliveryErrorClassifier<
           return replayedFrame
         }
 
-        const predicted = mutationFor(update.invocation).predict(
+        const predicted = mutationFor(update.envelope.invocation).predict(
           frame.value,
-          runtimeInvocation(update.invocation).args
+          runtimeInvocation(update.envelope.invocation).args,
+          mutationContext(update.envelope.mutationId)
         )
         if (predicted.ok) {
           return { ...replayedFrame, value: predicted.value }
@@ -469,7 +484,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
 
         if (
           frame.refusals.some(
-            (refusal) => refusal.mutationId === update.mutationId
+            (refusal) => refusal.mutationId === update.envelope.mutationId
           )
         ) {
           return replayedFrame
@@ -479,7 +494,10 @@ export function createPredictedRootWithDeliveryErrorClassifier<
           ...replayedFrame,
           refusals: [
             ...frame.refusals,
-            { mutationId: update.mutationId, error: predicted.error },
+            {
+              mutationId: update.envelope.mutationId,
+              error: predicted.error,
+            },
           ],
         }
       },
@@ -784,8 +802,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
         entry.releaseAction = createDeferred()
         startTransition(async () => {
           addOptimistic({
-            mutationId: entry.envelope.mutationId,
-            invocation: entry.envelope.invocation,
+            envelope: entry.envelope,
           })
           renderCoordinator()
           await entry.releaseAction.promise
@@ -796,15 +813,21 @@ export function createPredictedRootWithDeliveryErrorClassifier<
 
     const mutate = useCallback(
       (invocation: Invocation): Result<MutationReceipt<Error>, Error> => {
+        const mutationId = globalThis.crypto.randomUUID()
+        const envelope = freezeEnvelope(
+          options.protocol.id,
+          mutationId,
+          invocation
+        )
         const predicted = mutationFor(invocation).predict(
           frame.value,
-          runtimeInvocation(invocation).args
+          runtimeInvocation(envelope.invocation).args,
+          mutationContext(envelope.mutationId)
         )
         if (!predicted.ok) return err(predicted.error)
 
-        const mutationId = globalThis.crypto.randomUUID()
         const entry: LedgerEntry<Invocation, Error> = {
-          envelope: freezeEnvelope(options.protocol.id, mutationId, invocation),
+          envelope,
           accepted: createDeferred(),
           canonized: createDeferred(),
           releaseAction: createDeferred(),

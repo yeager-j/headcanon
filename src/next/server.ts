@@ -230,6 +230,8 @@ export interface MutationCommand<
     readonly args: MutationArgs<Mutation>
     readonly evidence: Evidence
     readonly stamp: StampAccumulator
+    /** The package-owned identity parsed from the invocation envelope. */
+    readonly mutationId: string
   }) =>
     | MutationCommandDecision<MutationRefusalOf<Mutation>>
     | Promise<MutationCommandDecision<MutationRefusalOf<Mutation>>>
@@ -374,6 +376,7 @@ type RuntimeCommand<Actor, Preflight, Transaction, Refusal> = {
     readonly args: unknown
     readonly evidence: unknown
     readonly stamp: StampAccumulator
+    readonly mutationId: string
   }) =>
     | MutationCommandDecision<Refusal>
     | Promise<MutationCommandDecision<Refusal>>
@@ -535,6 +538,7 @@ export function createNextMutationAction<
           args: attemptArgs,
           evidence: admitted.evidence,
           stamp,
+          mutationId: prepared.value.mutationId,
         })
         if (decision.kind === "accepted") return ok(undefined)
         return err(

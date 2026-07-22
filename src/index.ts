@@ -21,6 +21,7 @@ export {
   type MutationDefinition,
   type MutationErrorOf,
   type MutationInvocation,
+  type MutationContext,
   type MutationRefusalOf,
   type ProtocolDefinition,
   type ProtocolInvocation,

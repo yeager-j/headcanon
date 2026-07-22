@@ -14,6 +14,11 @@ type RefusalOfSchema<Schema> = Schema extends StandardSchemaV1
   ? StandardSchemaV1.InferOutput<Schema>
   : never
 
+/** Package-owned identity shared by prediction replay and authority execution. */
+export interface MutationContext {
+  readonly mutationId: string
+}
+
 /**
  * A mutation's shared protocol definition and callable invocation factory.
  *
@@ -38,7 +43,8 @@ export type MutationDefinition<
   readonly args: Schema
   readonly predict: (
     state: State,
-    args: StandardSchemaV1.InferOutput<Schema>
+    args: StandardSchemaV1.InferOutput<Schema>,
+    context: MutationContext
   ) => Result<State, PredictionError>
 } & (RefusalSchema extends StandardSchemaV1
   ? { readonly refusal: RefusalSchema }
@@ -142,7 +148,8 @@ export function defineMutation<
   readonly refusal?: RefusalSchema
   readonly predict: (
     state: State,
-    args: StandardSchemaV1.InferOutput<Schema>
+    args: StandardSchemaV1.InferOutput<Schema>,
+    context: MutationContext
   ) => Result<State, PredictionError>
 }): MutationDefinition<Name, Schema, State, PredictionError, RefusalSchema> {
   const invoke = (args: StandardSchemaV1.InferOutput<Schema>) =>
