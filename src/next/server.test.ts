@@ -1,7 +1,7 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { ok, type Result } from "@workspace/result"
+import { err, ok, type Result } from "@workspace/result"
 
 import {
   acceptedStamp,
@@ -14,14 +14,23 @@ import {
   type InvalidationPublisher,
   type MutationAuthorityAdapter,
 } from "../index"
-import { createInMemoryMutationAuthority } from "../testing"
 import {
+  createInMemoryMutationAuthority,
+  type InMemoryTransaction,
+} from "../testing"
+import {
+  acceptMutation,
+  allowMutation,
   announceExternalCommit,
   axisCacheTag,
-  createNextMutationExecutor,
+  bindMutation,
+  createNextMutationAction,
+  denyMutation,
   finalizeExternalActionCommit,
   MAX_VERSIONED_BASE_AXES,
+  refuseMutation,
   tagVersionedBase,
+  type MutationCommand,
 } from "./server"
 
 const nextCache = vi.hoisted(() => ({
@@ -30,8 +39,14 @@ const nextCache = vi.hoisted(() => ({
   revalidateTag: vi.fn(),
   updateTag: vi.fn(),
 }))
+const forbidden = vi.hoisted(() =>
+  vi.fn(() => {
+    throw new Error("forbidden")
+  })
+)
 
 vi.mock("next/cache", () => nextCache)
+vi.mock("next/navigation", () => ({ forbidden }))
 
 function stamp(entries: Record<string, number>): AcceptedStamp {
   const revisions = revisionVector(entries)
@@ -215,9 +230,28 @@ const incrementSchema: StandardSchemaV1<unknown, IncrementArgs> = {
   },
 }
 
+const rejectionSchema: StandardSchemaV1<unknown, Rejection> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon-next-server-test",
+    validate(value) {
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "code" in value &&
+        value.code === "refused"
+      ) {
+        return { value: { code: "refused" as const } }
+      }
+      return { issues: [{ message: "Expected a refusal" }] }
+    },
+  },
+}
+
 const increment = defineMutation({
   name: "next.increment",
   args: incrementSchema,
+  refusal: rejectionSchema,
   predict(state: number, args): Result<number, Rejection> {
     return ok(state + args.amount)
   },
@@ -227,86 +261,327 @@ const protocol = defineProtocol({
   mutations: [increment],
 })
 
-describe("Next mutation executor", () => {
-  it("finalizes an accepted authority outcome before returning it", async () => {
-    const accepted = stamp({ "counter/value": 2 })
-    const authority: MutationAuthorityAdapter<
-      Record<string, never>,
+type CounterTx = InMemoryTransaction<number>
+type CounterAuthority = MutationAuthorityAdapter<
+  CounterTx,
+  string,
+  unknown,
+  CounterTx
+> & { readonly preflight: CounterTx }
+
+const stringSchema: StandardSchemaV1<unknown, { readonly value: string }> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon-next-server-test",
+    validate(value) {
+      return { value: value as { readonly value: string } }
+    },
+  },
+}
+
+const _rename = defineMutation({
+  name: "next.rename",
+  args: stringSchema,
+  refusal: rejectionSchema,
+  predict(state: number) {
+    return ok(state)
+  },
+})
+
+const wrongArgsCommand: MutationCommand<
+  typeof _rename,
+  string,
+  CounterTx,
+  CounterTx,
+  undefined
+> = {
+  admit: ({ args }) => {
+    void args.value
+    return allowMutation(undefined)
+  },
+  execute: ({ args }) => {
+    void args.value
+    return acceptMutation()
+  },
+}
+
+function rejectMismatchedBindingsAtCompileTime() {
+  // @ts-expect-error — the command accepts next.rename args, not increment args.
+  bindMutation(increment, wrongArgsCommand)
+}
+void rejectMismatchedBindingsAtCompileTime
+
+describe("Next mutation action", () => {
+  type IncrementCommand = MutationCommand<
+    typeof increment,
+    string,
+    CounterTx,
+    CounterTx,
+    { readonly observed: number }
+  >
+  type IncrementAfterAccepted = NonNullable<IncrementCommand["afterAccepted"]>
+
+  function createAuthority() {
+    const authority = createInMemoryMutationAuthority<number, string, unknown>({
+      initialState: 0,
+      scope: (actor) => actor,
+    })
+    return Object.assign(authority, {
+      preflight: {
+        read: () => authority.read(),
+        write: (next: number) => authority.replace(next),
+      } satisfies CounterTx,
+    })
+  }
+
+  function command(
+    options: {
+      readonly admissions?: string[]
+      readonly afterAccepted?: IncrementAfterAccepted
+      readonly deny?: boolean
+    } = {}
+  ): IncrementCommand {
+    return {
+      admit({ executor }: { readonly executor: CounterTx }) {
+        options.admissions?.push(`admit:${executor.read()}`)
+        return options.deny
+          ? denyMutation()
+          : allowMutation({ observed: executor.read() })
+      },
+      execute({ tx, args, stamp }) {
+        if (args.amount < 0) return refuseMutation({ code: "refused" } as const)
+        const next = tx.read() + args.amount
+        tx.write(next)
+        const parsed = revision(next)
+        if (!parsed.ok) throw new Error("Invalid counter revision")
+        stamp.record(axisId("counter/value"), parsed.value)
+        return acceptMutation()
+      },
+      afterAccepted: options.afterAccepted,
+    } satisfies MutationCommand<
+      typeof increment,
       string,
-      Rejection
-    > = {
-      async execute(_request, run) {
-        const handled = await run({}, { record: vi.fn() })
-        if (!handled.ok) throw new Error("Unexpected handler rejection")
-        return ok({ kind: "accepted", stamp: accepted })
-      },
-    }
-    const invalidations = { publish: vi.fn() }
-    const execute = createNextMutationExecutor({
+      CounterTx,
+      CounterTx,
+      { readonly observed: number }
+    >
+  }
+
+  function action(
+    authority: CounterAuthority,
+    registered: IncrementCommand = command()
+  ) {
+    return createNextMutationAction({
       protocol,
+      actor: () => "actor",
       authority,
-      handlers: {
-        "next.increment": () => ok(undefined),
-      },
-      invalidations,
+      commands: [bindMutation(increment, registered)],
+      invalidations: { publish: vi.fn() },
       reportInvalidationFailure: vi.fn(),
     })
+  }
 
-    const result = await execute(
-      {
-        protocol: protocol.id,
-        mutationId: "d1501828-4d5e-4d7b-b79b-98c5e2576dde",
-        invocation: increment({ amount: 1 }),
-      },
-      "actor"
-    )
+  const envelope = {
+    protocol: protocol.id,
+    mutationId: "83da9d18-9796-44b6-8bc1-066d9ca24fbb",
+    invocation: increment({ amount: 1 }),
+  }
 
-    expect(result).toEqual(ok({ kind: "accepted", stamp: accepted }))
-    expect(nextCache.updateTag).toHaveBeenCalledWith(
-      axisCacheTag(axisId("counter/value"))
-    )
-    expect(invalidations.publish).toHaveBeenCalledOnce()
-    expect(nextCache.refresh).toHaveBeenCalledOnce()
+  it("runs admission before receipt ownership and on every contention attempt", async () => {
+    const authority = createAuthority()
+    const admissions: string[] = []
+    authority.contendNext((current) => current + 10)
+
+    await action(authority, command({ admissions }))(envelope)
+
+    expect(admissions).toEqual(["admit:0", "admit:0", "admit:10"])
+    expect(authority.read()).toBe(11)
+    expect(authority.attemptCount("actor", envelope.mutationId)).toBe(2)
   })
 
-  it("repeats finalization from the recorded stamp on duplicate delivery", async () => {
-    const authority = createInMemoryMutationAuthority<
-      number,
-      string,
-      Rejection
-    >({ initialState: 0, scope: (actor) => actor })
-    const invalidations = { publish: vi.fn() }
-    const counterAxis = axisId("counter/value")
-    const execute = createNextMutationExecutor({
-      protocol,
-      authority,
-      handlers: {
-        "next.increment": ({ tx, args, stamp }) => {
-          const next = tx.read() + args.amount
-          const stampedRevision = revision(next)
-          if (!stampedRevision.ok) throw new Error("Invalid counter revision")
-          tx.write(next)
-          stamp.record(counterAxis, stampedRevision.value)
-          return ok(undefined)
-        },
+  it("claims no receipt when preflight admission denies", async () => {
+    const authority = createAuthority()
+
+    await expect(
+      action(authority, command({ deny: true }))(envelope)
+    ).rejects.toThrow("forbidden")
+
+    expect(authority.receiptCount()).toBe(0)
+  })
+
+  it("never runs admission for a malformed or unknown envelope", async () => {
+    const authority = createAuthority()
+    const admissions: string[] = []
+    const execute = action(authority, command({ admissions }))
+
+    await expect(execute({ bad: true })).resolves.toEqual(
+      err({ code: "invalid-envelope", reason: "unexpected-fields" })
+    )
+    await expect(
+      execute({
+        ...envelope,
+        invocation: { name: "next.unknown", args: { amount: 1 } },
+      })
+    ).resolves.toEqual(
+      err({ code: "invalid-envelope", reason: "unknown-mutation" })
+    )
+
+    expect(admissions).toEqual([])
+    expect(authority.receiptCount()).toBe(0)
+  })
+
+  it("records transaction-time denial privately and recovers it on redelivery", async () => {
+    const authority = createAuthority()
+    let transactionAdmissions = 0
+    const registered = {
+      admit({ executor }) {
+        if (executor === authority.preflight) {
+          return allowMutation({ observed: executor.read() })
+        }
+        transactionAdmissions += 1
+        return denyMutation()
       },
-      invalidations,
-      reportInvalidationFailure: vi.fn(),
-    })
-    const envelope = {
-      protocol: protocol.id,
-      mutationId: "73da9d18-9796-44b6-8bc1-066d9ca24fbb",
-      invocation: increment({ amount: 1 }),
+      execute: () => acceptMutation(),
+    } satisfies MutationCommand<
+      typeof increment,
+      string,
+      CounterTx,
+      CounterTx,
+      { readonly observed: number }
+    >
+    const execute = action(authority, registered)
+
+    await expect(execute(envelope)).rejects.toThrow("forbidden")
+    await expect(execute(envelope)).rejects.toThrow("forbidden")
+
+    expect(authority.receiptCount()).toBe(1)
+    expect(authority.read()).toBe(0)
+    expect(transactionAdmissions).toBe(1)
+  })
+
+  it("preserves a structured refusal across same-ID recovery", async () => {
+    const authority = createAuthority()
+    const execute = action(authority)
+    const refusedEnvelope = {
+      ...envelope,
+      invocation: increment({ amount: -1 }),
     }
 
-    const first = await execute(envelope, "actor")
-    const duplicate = await execute(envelope, "actor")
+    const first = await execute(refusedEnvelope)
+    const duplicate = await execute(refusedEnvelope)
 
-    expect(authority.read()).toBe(1)
+    expect(first).toEqual(ok({ kind: "rejected", error: { code: "refused" } }))
     expect(duplicate).toEqual(first)
-    expect(invalidations.publish).toHaveBeenCalledTimes(2)
-    expect(invalidations.publish.mock.calls[0]?.[1]).toEqual(
-      invalidations.publish.mock.calls[1]?.[1]
+    expect(authority.receiptCount()).toBe(1)
+  })
+
+  it("reruns afterAccepted for duplicate accepted recovery", async () => {
+    const authority = createAuthority()
+    const afterAccepted = vi.fn()
+    const execute = action(authority, command({ afterAccepted }))
+
+    const first = await execute(envelope)
+    const duplicate = await execute(envelope)
+
+    expect(duplicate).toEqual(first)
+    expect(afterAccepted).toHaveBeenCalledTimes(2)
+    expect(authority.read()).toBe(1)
+  })
+
+  it("accepts a three-axis command without another interface field", async () => {
+    const authority = createAuthority()
+    const registered: IncrementCommand = {
+      admit: ({ executor }) => allowMutation({ observed: executor.read() }),
+      execute: ({ tx, args, stamp }) => {
+        tx.write(tx.read() + args.amount)
+        for (const [name, value] of [
+          ["counter/first", 1],
+          ["counter/second", 2],
+          ["counter/third", 3],
+        ] as const) {
+          const parsed = revision(value)
+          if (!parsed.ok) throw new Error("Invalid test revision")
+          stamp.record(axisId(name), parsed.value)
+        }
+        return acceptMutation()
+      },
+    }
+
+    const result = await action(authority, registered)(envelope)
+
+    expect(result).toEqual(
+      ok({
+        kind: "accepted",
+        stamp: {
+          revisions: {
+            "counter/first": 1,
+            "counter/second": 2,
+            "counter/third": 3,
+          },
+        },
+      })
     )
+  })
+
+  it("does not run afterAccepted for a public refusal", async () => {
+    const authority = createAuthority()
+    const afterAccepted = vi.fn()
+    const execute = action(authority, command({ afterAccepted }))
+
+    await execute({ ...envelope, invocation: increment({ amount: -1 }) })
+
+    expect(afterAccepted).not.toHaveBeenCalled()
+  })
+
+  it("fails closed when the authority presents a corrupt stored refusal", async () => {
+    const preflight: CounterTx = { read: () => 0, write: vi.fn() }
+    const authority: MutationAuthorityAdapter<
+      CounterTx,
+      string,
+      unknown,
+      CounterTx
+    > & { readonly preflight: CounterTx } = {
+      preflight,
+      async execute(request) {
+        request.parseRejection?.({ code: "corrupt" })
+        throw new Error("corrupt refusal was admitted")
+      },
+    }
+
+    await expect(action(authority)(envelope)).rejects.toThrow(
+      "Invalid stored mutation refusal"
+    )
+  })
+
+  it("rejects duplicate command registration at construction", () => {
+    const authority = createAuthority()
+    const registered = command()
+
+    expect(() =>
+      createNextMutationAction({
+        protocol,
+        actor: () => "actor",
+        authority,
+        commands: [
+          bindMutation(increment, registered),
+          bindMutation(increment, registered),
+        ],
+        invalidations: { publish: vi.fn() },
+        reportInvalidationFailure: vi.fn(),
+      })
+    ).toThrow("Duplicate mutation binding: next.increment")
+  })
+
+  it("rejects missing command registration at construction", () => {
+    expect(() =>
+      createNextMutationAction({
+        protocol,
+        actor: () => "actor",
+        authority: createAuthority(),
+        commands: [] as never,
+        invalidations: { publish: vi.fn() },
+        reportInvalidationFailure: vi.fn(),
+      })
+    ).toThrow("Incomplete mutation bindings: missing [next.increment]")
   })
 })

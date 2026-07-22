@@ -3,10 +3,16 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import type { Result } from "@workspace/result"
 
 /** Serializable intent produced by a named mutation's invocation factory. */
-export interface MutationInvocation<Name extends string, Args> {
+export interface MutationInvocation<Name extends string, Args, Error = never> {
   readonly name: Name
   readonly args: Args
+  /** Type-only carrier for the invocation's correlated public error. */
+  readonly __error?: Error
 }
+
+type RefusalOfSchema<Schema> = Schema extends StandardSchemaV1
+  ? StandardSchemaV1.InferOutput<Schema>
+  : never
 
 /**
  * A mutation's shared protocol definition and callable invocation factory.
@@ -14,22 +20,29 @@ export interface MutationInvocation<Name extends string, Args> {
  * The schema is parsed again at the authority. `predict` must be pure and
  * deterministic because later canons replay the same invocation through it.
  */
-export interface MutationDefinition<
+export type MutationDefinition<
   Name extends string,
   Schema extends StandardSchemaV1,
   State,
   PredictionError,
-> {
+  RefusalSchema extends StandardSchemaV1 | undefined = undefined,
+> = {
   (
     args: StandardSchemaV1.InferOutput<Schema>
-  ): MutationInvocation<Name, StandardSchemaV1.InferOutput<Schema>>
+  ): MutationInvocation<
+    Name,
+    StandardSchemaV1.InferOutput<Schema>,
+    PredictionError | RefusalOfSchema<RefusalSchema>
+  >
   readonly name: Name
   readonly args: Schema
   readonly predict: (
     state: State,
     args: StandardSchemaV1.InferOutput<Schema>
   ) => Result<State, PredictionError>
-}
+} & (RefusalSchema extends StandardSchemaV1
+  ? { readonly refusal: RefusalSchema }
+  : { readonly refusal?: undefined })
 
 export interface AnyMutationDefinition {
   (...args: never[]): unknown
@@ -63,6 +76,23 @@ export type InvocationOf<Mutation> = Mutation extends (
   ? Invocation
   : never
 
+/** Extracts the public authority refusal admitted by a mutation's codec. */
+export type MutationRefusalOf<Mutation> = Mutation extends {
+  readonly refusal: infer Schema extends StandardSchemaV1
+}
+  ? StandardSchemaV1.InferOutput<Schema>
+  : never
+
+/** Extracts the predictor plus authority refusal correlated to a mutation. */
+export type MutationErrorOf<Mutation> =
+  InvocationOf<Mutation> extends MutationInvocation<
+    string,
+    unknown,
+    infer Error
+  >
+    ? Error
+    : never
+
 type MutationName<Mutation> = Mutation extends { readonly name: infer Name }
   ? Name & string
   : never
@@ -76,50 +106,20 @@ export type MutationRegistry<
   >
 }
 
-/**
- * A type-level declaration of the client-visible rejections a protocol's
- * authority may return beyond what its predictors can refuse locally —
- * "authority behavior is allowed to be stricter than client prediction" made
- * explicit instead of forcing predictors to annotate errors they never
- * produce. Carries no runtime data; `rejections<T>()` mints it.
- */
-export interface ProtocolRejections<Rejection> {
-  readonly __rejection?: Rejection
-}
-
-/** Declares a protocol's client-visible authority rejection union. */
-export function rejections<Rejection>(): ProtocolRejections<Rejection> {
-  return Object.freeze({})
-}
-
 /** A stable protocol ID and its immutable, uniquely named mutation registry. */
 export interface ProtocolDefinition<
   Id extends string,
   Mutations extends readonly AnyMutationDefinition[],
-  Rejection = never,
 > {
   readonly id: Id
   readonly mutations: Mutations
   readonly mutationsByName: MutationRegistry<Mutations>
-  /** Phantom carrier for the declared authority rejections — always present so
-   *  `RejectionOf` infers exactly (`never` when nothing was declared). */
-  readonly rejections: ProtocolRejections<Rejection>
 }
 
 /** The union of every invocation admitted by a protocol definition. */
 export type ProtocolInvocation<Protocol> =
-  Protocol extends ProtocolDefinition<string, infer Mutations, unknown>
+  Protocol extends ProtocolDefinition<string, infer Mutations>
     ? InvocationOf<Mutations[number]>
-    : never
-
-/** The declared client-visible authority rejections of a protocol. */
-export type ProtocolRejectionOf<Protocol> =
-  Protocol extends ProtocolDefinition<
-    string,
-    readonly AnyMutationDefinition[],
-    infer Rejection
-  >
-    ? Rejection
     : never
 
 /**
@@ -134,20 +134,26 @@ export function defineMutation<
   Schema extends StandardSchemaV1,
   State,
   PredictionError,
+  RefusalSchema extends StandardSchemaV1 | undefined = undefined,
 >(definition: {
   readonly name: Name
   readonly args: Schema
+  /** Runtime codec for authority refusals which may cross the receipt boundary. */
+  readonly refusal?: RefusalSchema
   readonly predict: (
     state: State,
     args: StandardSchemaV1.InferOutput<Schema>
   ) => Result<State, PredictionError>
-}): MutationDefinition<Name, Schema, State, PredictionError> {
+}): MutationDefinition<Name, Schema, State, PredictionError, RefusalSchema> {
   const invoke = (args: StandardSchemaV1.InferOutput<Schema>) =>
     Object.freeze({ name: definition.name, args })
 
   Object.defineProperties(invoke, {
     name: { value: definition.name, enumerable: true },
     args: { value: definition.args, enumerable: true },
+    ...(definition.refusal === undefined
+      ? {}
+      : { refusal: { value: definition.refusal, enumerable: true } }),
     predict: { value: definition.predict, enumerable: true },
   })
 
@@ -155,7 +161,8 @@ export function defineMutation<
     Name,
     Schema,
     State,
-    PredictionError
+    PredictionError,
+    RefusalSchema
   >
 }
 
@@ -168,15 +175,10 @@ export function defineMutation<
 export function defineProtocol<
   const Id extends string,
   const Mutations extends readonly AnyMutationDefinition[],
-  Rejection = never,
 >(definition: {
   readonly id: Id
   readonly mutations: Mutations & OneStateMutations<Mutations>
-  /** The client-visible authority rejections beyond predictor refusals —
-   *  see {@link rejections}. Omitted, the authority is declared no stricter
-   *  than prediction. */
-  readonly rejections?: ProtocolRejections<Rejection>
-}): ProtocolDefinition<Id, Mutations, Rejection> {
+}): ProtocolDefinition<Id, Mutations> {
   const mutations = Object.freeze([
     ...definition.mutations,
   ]) as unknown as Mutations
@@ -201,6 +203,5 @@ export function defineProtocol<
     mutationsByName: Object.freeze(
       mutationsByName
     ) as MutationRegistry<Mutations>,
-    rejections: definition.rejections ?? rejections<Rejection>(),
   })
 }

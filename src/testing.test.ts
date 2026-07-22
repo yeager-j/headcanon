@@ -1,12 +1,7 @@
 // @vitest-environment jsdom
 
-import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { describe, expect, it } from "vitest"
 
-import { ok } from "@workspace/result"
-
-import { createMutationExecutor } from "./authority"
-import { defineMutation, defineProtocol } from "./protocol"
 import { acceptedStamp, axisId, covers, revisionVector } from "./revisions"
 import {
   assertMutationAuthorityContractAccumulation,
@@ -25,35 +20,6 @@ verifyMutationAuthorityContract(
 )
 verifyInvalidationContract(createInMemoryInvalidationContractHarness())
 verifyPollingFallbackContract()
-
-describe("mutation executor registration", () => {
-  it("fails at construction when the closed registry is incomplete", () => {
-    const args: StandardSchemaV1<unknown, Record<string, never>> = {
-      "~standard": {
-        version: 1,
-        vendor: "headcanon-testing",
-        validate: () => ({ value: {} }),
-      },
-    }
-    const mutation = defineMutation({
-      name: "testing.complete",
-      args,
-      predict: (state: number) => ok(state),
-    })
-    const protocol = defineProtocol({
-      id: "headcanon.testing.complete.v1",
-      mutations: [mutation],
-    })
-
-    expect(() =>
-      createMutationExecutor({
-        protocol,
-        authority: {} as never,
-        handlers: {} as never,
-      })
-    ).toThrow("missing [testing.complete]")
-  })
-})
 
 describe("contract negative controls", () => {
   const first = axisId("negative-control/first")

@@ -16,11 +16,13 @@ import { err, ok, type Result } from "@workspace/result"
 import type { MutationEnvelope } from "./authority"
 import type {
   AnyMutationDefinition,
+  InvocationOf,
   MutationDefinition,
+  MutationErrorOf,
   MutationInvocation,
+  MutationRefusalOf,
   ProtocolDefinition,
   ProtocolInvocation,
-  ProtocolRejectionOf,
 } from "./protocol"
 import {
   useIncorporation,
@@ -79,7 +81,7 @@ export interface ObservedRoot<State> {
 }
 
 type MutationOf<Protocol> =
-  Protocol extends ProtocolDefinition<string, infer Mutations, unknown>
+  Protocol extends ProtocolDefinition<string, infer Mutations>
     ? Mutations[number]
     : never
 
@@ -95,28 +97,60 @@ type StateOf<Protocol> =
         string,
         infer _Schema,
         infer State,
-        infer _Error
+        infer _Error,
+        infer _Refusal
       >
       ? State
       : never
     : never
 
-// A protocol's client error union: what any predictor can refuse locally plus
-// the authority rejections the protocol declares (`rejections<T>()`), so a
-// stricter authority never forces a predictor to annotate errors it cannot
-// return.
+// A protocol's internal ledger error union: predictor errors plus per-mutation
+// receipt refusals. The public mutate call below correlates this union back to
+// the selected invocation.
 type ErrorOf<Protocol> =
   | (MutationOf<Protocol> extends infer Mutation
       ? Mutation extends MutationDefinition<
           string,
           infer _Schema,
           infer _State,
-          infer Error
+          infer Error,
+          infer _Refusal
         >
         ? Error
         : never
       : never)
-  | ProtocolRejectionOf<Protocol>
+  | MutationRefusalOf<MutationOf<Protocol>>
+
+type MutationForInvocation<Protocol, Invocation> =
+  MutationOf<Protocol> extends infer Mutation
+    ? Mutation extends AnyMutationDefinition
+      ? Invocation extends InvocationOf<Mutation>
+        ? Mutation
+        : never
+      : never
+    : never
+
+type ErrorForInvocation<Protocol, Invocation> = MutationErrorOf<
+  MutationForInvocation<Protocol, Invocation>
+>
+
+export type ProtocolPredictedRoot<
+  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
+> = Omit<
+  PredictedRoot<
+    StateOf<Protocol>,
+    ProtocolInvocation<Protocol>,
+    ErrorOf<Protocol>
+  >,
+  "mutate"
+> & {
+  readonly mutate: <Invocation extends ProtocolInvocation<Protocol>>(
+    invocation: Invocation
+  ) => Result<
+    MutationReceipt<ErrorForInvocation<Protocol, Invocation>>,
+    ErrorForInvocation<Protocol, Invocation>
+  >
+}
 
 /**
  * The `send` adapter throws this when the authority reported **no terminal
@@ -139,11 +173,7 @@ export class RetryableDeliveryError extends Error {
 const DELIVERY_RETRY_DELAYS_MS = [300, 1000, 3000] as const
 
 export interface PredictedRootOptions<
-  Protocol extends ProtocolDefinition<
-    string,
-    readonly AnyMutationDefinition[],
-    unknown
-  >,
+  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
 > {
   readonly protocol: Protocol
   /**
@@ -297,8 +327,7 @@ function removeFromQueue(queue: string[], mutationId: string): void {
 export function createPredictedRoot<
   const Protocol extends ProtocolDefinition<
     string,
-    readonly AnyMutationDefinition[],
-    unknown
+    readonly AnyMutationDefinition[]
   >,
 >(options: PredictedRootOptions<Protocol>) {
   return createPredictedRootWithDeliveryErrorClassifier(
@@ -311,8 +340,7 @@ export function createPredictedRoot<
 export function createPredictedRootWithDeliveryErrorClassifier<
   const Protocol extends ProtocolDefinition<
     string,
-    readonly AnyMutationDefinition[],
-    unknown
+    readonly AnyMutationDefinition[]
   >,
 >(
   options: PredictedRootOptions<Protocol>,
@@ -334,7 +362,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
 
   return function usePredictedRoot({
     canon,
-  }: PredictedRootInput<State>): PredictedRoot<State, Invocation, Error> {
+  }: PredictedRootInput<State>): ProtocolPredictedRoot<Protocol> {
     const ledgerRef = useRef(new Map<string, LedgerEntry<Invocation, Error>>())
     const queueRef = useRef<string[]>([])
     const conflictsRef = useRef<ReplayConflict<Invocation, Error>[]>([])
@@ -831,7 +859,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
 
     return {
       value: frame.value,
-      mutate,
+      mutate: mutate as ProtocolPredictedRoot<Protocol>["mutate"],
       retryDelivery,
       retryRefresh: incorporation.retryRefresh,
       status: {

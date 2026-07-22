@@ -65,66 +65,27 @@ export function createStampAccumulator(): ReadableStampAccumulator {
   }
 }
 
-/** Context supplied to one rerunnable authority handler attempt. */
-export interface MutationHandlerContext<Transaction, Args, Actor> {
-  readonly tx: Transaction
-  readonly args: Args
-  readonly actor: Actor
-  readonly stamp: StampAccumulator
-}
-
-export type MutationHandler<Transaction, Args, Actor, Rejection> = (
-  context: MutationHandlerContext<Transaction, Args, Actor>
-) => Result<void, Rejection> | Promise<Result<void, Rejection>>
-
-type MutationsOf<Protocol> =
-  Protocol extends ProtocolDefinition<string, infer Mutations, unknown>
-    ? Mutations[number]
-    : never
-
-type MutationName<Mutation> = Mutation extends { readonly name: infer Name }
-  ? Name & string
-  : never
-
-type MutationArgs<Mutation> = Mutation extends {
-  readonly args: infer Schema extends StandardSchemaV1
-}
-  ? StandardSchemaV1.InferOutput<Schema>
-  : never
-
-/** Exhaustive handler registration for one protocol's closed mutation set. */
-export type MutationHandlers<
-  Protocol extends ProtocolDefinition<
-    string,
-    readonly AnyMutationDefinition[],
-    unknown
-  >,
-  Transaction,
-  Actor,
-  Rejection,
-> = {
-  readonly [Name in MutationName<MutationsOf<Protocol>>]: MutationHandler<
-    Transaction,
-    MutationArgs<Extract<MutationsOf<Protocol>, { readonly name: Name }>>,
-    Actor,
-    Rejection
-  >
-}
+/** A command attempt either exposes a public refusal or records a private denial. */
+export type MutationAttemptFailure<Rejection> =
+  | { readonly kind: "refused"; readonly error: Rejection }
+  | { readonly kind: "denied" }
 
 /** A terminal outcome which is safe to record and reproduce on redelivery. */
 export type MutationTerminalOutcome<Rejection> =
   | { readonly kind: "accepted"; readonly stamp: AcceptedStamp }
   | { readonly kind: "rejected"; readonly error: Rejection }
+  | { readonly kind: "denied" }
 
 export type MutationAuthorityAdapterError =
   | { readonly code: "mutation-id-reused"; readonly mutationId: string }
   | { readonly code: "contention"; readonly mutationId: string }
 
-export interface MutationAuthorityRequest<Actor> {
+export interface MutationAuthorityRequest<Actor, Rejection = unknown> {
   readonly actor: Actor
   readonly mutationId: string
   readonly protocol: string
   readonly canonical: CanonicalInvocation
+  readonly parseRejection?: (value: unknown) => Rejection
 }
 
 /**
@@ -134,13 +95,20 @@ export interface MutationAuthorityRequest<Actor> {
  * transactional effects and its stamp accumulator whenever an attempt rolls
  * back.
  */
-export interface MutationAuthorityAdapter<Transaction, Actor, Rejection> {
+export interface MutationAuthorityAdapter<
+  Transaction,
+  Actor,
+  Rejection,
+  Preflight = Transaction,
+> {
+  /** Executor used for fail-closed admission before a receipt is claimed. */
+  readonly preflight?: Preflight
   execute(
-    request: MutationAuthorityRequest<Actor>,
+    request: MutationAuthorityRequest<Actor, Rejection>,
     run: (
       tx: Transaction,
       stamp: StampAccumulator
-    ) => Promise<Result<void, Rejection>>
+    ) => Promise<Result<void, MutationAttemptFailure<Rejection>>>
   ): Promise<
     Result<MutationTerminalOutcome<Rejection>, MutationAuthorityAdapterError>
   >
@@ -172,6 +140,15 @@ interface ParsedEnvelope {
   readonly protocol: string
   readonly mutationId: string
   readonly invocation: MutationInvocation<string, unknown>
+}
+
+/** A strictly parsed, canonical request which has not touched receipt authority. */
+export interface PreparedMutationRequest {
+  readonly mutationId: string
+  readonly protocol: string
+  readonly mutation: string
+  readonly args: unknown
+  readonly canonical: CanonicalInvocation
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -244,118 +221,88 @@ function parseEnvelope(
   })
 }
 
-function assertCompleteHandlers(
-  mutationNames: ReadonlySet<string>,
-  handlers: Readonly<Record<string, unknown>>
-): void {
-  const registered = Object.keys(handlers)
-  const missing = [...mutationNames].filter(
-    (name) => !Object.hasOwn(handlers, name)
-  )
-  const unknown = registered.filter((name) => !mutationNames.has(name))
-
-  if (missing.length === 0 && unknown.length === 0) return
-
-  throw new Error(
-    `Incomplete mutation handlers: missing [${missing.join(", ")}], unknown [${unknown.join(", ")}]`
-  )
-}
-
-/**
- * Creates the framework-independent authority door for one protocol.
- *
- * It strictly parses the envelope, reparses mutation arguments, computes the
- * canonical receipt identity, and dispatches through the adapter-owned
- * transactional attempt.
- */
-export function createMutationExecutor<
+/** Strictly parses and canonicalizes an envelope without claiming a receipt. */
+export async function prepareMutationRequest<
   const Protocol extends ProtocolDefinition<
     string,
-    readonly AnyMutationDefinition[],
-    unknown
+    readonly AnyMutationDefinition[]
   >,
+>(
+  protocol: Protocol,
+  envelope: unknown
+): Promise<Result<PreparedMutationRequest, MutationExecutorError>> {
+  const mutationNames = new Set(
+    protocol.mutations.map((mutation) => mutation.name)
+  )
+  const parsedEnvelope = parseEnvelope(envelope, protocol.id, mutationNames)
+  if (!parsedEnvelope.ok) return parsedEnvelope
+
+  const definition =
+    protocol.mutationsByName[parsedEnvelope.value.invocation.name]
+  if (!definition) {
+    return err({ code: "invalid-envelope", reason: "unknown-mutation" })
+  }
+
+  const parsedArguments = await definition.args["~standard"].validate(
+    parsedEnvelope.value.invocation.args
+  )
+  if (parsedArguments.issues) {
+    return err({
+      code: "invalid-arguments",
+      mutation: definition.name,
+      issues: parsedArguments.issues,
+    })
+  }
+
+  const invocation = {
+    name: definition.name,
+    args: parsedArguments.value,
+  }
+  const prepared = await prepareCanonicalInvocation(protocol.id, invocation)
+  if (!prepared.ok) {
+    return err({ code: "canonical-invocation", error: prepared.error })
+  }
+
+  return ok({
+    mutationId: parsedEnvelope.value.mutationId,
+    protocol: protocol.id,
+    mutation: definition.name,
+    args: prepared.value.invocation.args,
+    canonical: prepared.value.canonical,
+  })
+}
+
+/** Executes one prepared request through receipt authority. */
+export function executePreparedMutation<
   Transaction,
   Actor,
   Rejection,
+  Preflight,
 >(options: {
-  readonly protocol: Protocol
-  readonly authority: MutationAuthorityAdapter<Transaction, Actor, Rejection>
-  readonly handlers: MutationHandlers<Protocol, Transaction, Actor, Rejection>
-}) {
-  const mutationNames = new Set(
-    options.protocol.mutations.map((mutation) => mutation.name)
+  readonly prepared: PreparedMutationRequest
+  readonly actor: Actor
+  readonly authority: MutationAuthorityAdapter<
+    Transaction,
+    Actor,
+    Rejection,
+    Preflight
+  >
+  readonly parseRejection?: (value: unknown) => Rejection
+  readonly run: (
+    tx: Transaction,
+    stamp: StampAccumulator,
+    args: unknown
+  ) => Promise<Result<void, MutationAttemptFailure<Rejection>>>
+}): Promise<Result<MutationTerminalOutcome<Rejection>, MutationExecutorError>> {
+  return options.authority.execute(
+    {
+      actor: options.actor,
+      mutationId: options.prepared.mutationId,
+      protocol: options.prepared.protocol,
+      canonical: options.prepared.canonical,
+      parseRejection: options.parseRejection,
+    },
+    (tx, stamp) =>
+      options.run(tx, stamp, structuredClone(options.prepared.args))
   )
-  assertCompleteHandlers(
-    mutationNames,
-    options.handlers as Readonly<Record<string, unknown>>
-  )
-
-  return async (
-    envelope: unknown,
-    actor: Actor
-  ): Promise<
-    Result<MutationTerminalOutcome<Rejection>, MutationExecutorError>
-  > => {
-    const parsedEnvelope = parseEnvelope(
-      envelope,
-      options.protocol.id,
-      mutationNames
-    )
-    if (!parsedEnvelope.ok) return parsedEnvelope
-
-    const definition =
-      options.protocol.mutationsByName[parsedEnvelope.value.invocation.name]
-    if (!definition) {
-      return err({ code: "invalid-envelope", reason: "unknown-mutation" })
-    }
-
-    const parsedArguments = await definition.args["~standard"].validate(
-      parsedEnvelope.value.invocation.args
-    )
-    if (parsedArguments.issues) {
-      return err({
-        code: "invalid-arguments",
-        mutation: definition.name,
-        issues: parsedArguments.issues,
-      })
-    }
-
-    const invocation = {
-      name: definition.name,
-      args: parsedArguments.value,
-    }
-    const prepared = await prepareCanonicalInvocation(
-      options.protocol.id,
-      invocation
-    )
-    if (!prepared.ok) {
-      return err({ code: "canonical-invocation", error: prepared.error })
-    }
-
-    const handler = (
-      options.handlers as Readonly<
-        Record<string, MutationHandler<Transaction, unknown, Actor, Rejection>>
-      >
-    )[definition.name]
-    if (!handler)
-      throw new Error(`Missing mutation handler: ${definition.name}`)
-
-    return options.authority.execute(
-      {
-        actor,
-        mutationId: parsedEnvelope.value.mutationId,
-        protocol: options.protocol.id,
-        canonical: prepared.value.canonical,
-      },
-      (tx, stamp) =>
-        Promise.resolve(
-          handler({
-            tx,
-            args: structuredClone(prepared.value.invocation.args),
-            actor,
-            stamp,
-          })
-        )
-    )
-  }
 }

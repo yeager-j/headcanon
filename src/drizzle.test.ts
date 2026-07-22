@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { err, ok } from "@workspace/result"
 
-import { createMutationExecutor } from "./authority"
+import { executePreparedMutation, prepareMutationRequest } from "./authority"
 import {
   createDrizzleMutationAuthority,
   throwMutationContention,
@@ -241,11 +241,19 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
         throw new Error("Invalid contract fixture rejection")
       },
     })
-    const execute = createMutationExecutor({
-      protocol: mutationAuthorityContractProtocol,
-      authority,
-      handlers: {
-        async [MUTATION_AUTHORITY_CONTRACT_MUTATION]({ tx, args, stamp }) {
+    const execute = async (envelope: unknown) => {
+      const prepared = await prepareMutationRequest(
+        mutationAuthorityContractProtocol,
+        envelope
+      )
+      if (!prepared.ok) return prepared
+
+      return executePreparedMutation({
+        prepared: prepared.value,
+        actor: MUTATION_AUTHORITY_CONTRACT_ACTOR,
+        authority,
+        async run(tx, stamp, rawArgs) {
+          const args = rawArgs as MutationAuthorityContractArgs
           attempts.set(args.effect, (attempts.get(args.effect) ?? 0) + 1)
           if (serializationFailures > 0) {
             serializationFailures -= 1
@@ -264,7 +272,10 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
             args.maximumPrimary !== null &&
             primary.value > args.maximumPrimary
           ) {
-            return err({ code: "precondition" } as const)
+            return err({
+              kind: "refused",
+              error: { code: "precondition" },
+            } as const)
           }
 
           const writes = args.axes.flatMap((requestedAxis) => {
@@ -329,16 +340,18 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
             throw new Error("authority contract exception")
           }
           if (args.behavior === "reject") {
-            return err({ code: "rejected-after-write" } as const)
+            return err({
+              kind: "refused",
+              error: { code: "rejected-after-write" },
+            } as const)
           }
           return ok(undefined)
         },
-      },
-    })
+      })
+    }
 
     return {
-      execute: (envelope) =>
-        execute(envelope, MUTATION_AUTHORITY_CONTRACT_ACTOR),
+      execute,
       read: readState,
       replace: replaceState,
       contendNext: async (primaryDelta = 0) => {

@@ -22,7 +22,7 @@ import {
 import { acceptedStamp, revisionVector } from "./revisions"
 
 // The receipt table is defined in `./receipt-table` (drizzle-orm only, so schema
-// tooling never loads the executor graph) and published from the dedicated
+// tooling never loads the authority graph) and published from the dedicated
 // `./drizzle-schema` entry. This adapter imports it for its own queries; it does
 // not re-export it, so the table has exactly one public home (UNN-673).
 
@@ -45,13 +45,12 @@ export type DrizzleMutationTransaction<
 > = PgTransaction<QueryResult, Schema, ExtractTablesWithRelations<Schema>>
 
 /**
- * The transaction a mutation handler runs inside, derived from the adopter's own
- * Drizzle database type. A handler defined inline in `createNextMutationExecutor`'s
- * `handlers` map already infers its context; name this only when hoisting a
- * handler into its own function, e.g.
- * `MutationHandlerContext<DrizzleHandlerTx<typeof db>, Args, Actor>`.
+ * The transaction a mutation command runs inside, derived from the adopter's own
+ * Drizzle database type. A command registered through `createNextMutationAction`
+ * already infers this context; name it only when a command or Store needs an
+ * explicit transaction type.
  */
-export type DrizzleHandlerTx<
+export type DrizzleMutationTx<
   DB extends PgDatabase<PgQueryResultHKT, Record<string, unknown>>,
 > = Parameters<Parameters<DB["transaction"]>[0]>[0]
 
@@ -63,16 +62,20 @@ export interface DrizzleMutationAuthorityOptions<
 > {
   readonly db: PgDatabase<QueryResult, Schema>
   readonly scope: (actor: Actor) => string
-  readonly parseRejection: (value: unknown) => Rejection
+  readonly parseRejection?: (value: unknown) => Rejection
   readonly maxAttempts?: number
   readonly transaction?: PgTransactionConfig
   readonly isContentionError?: (error: unknown) => boolean
 }
 
-class TerminalRejection<Rejection> extends Error {
-  constructor(readonly rejection: Rejection) {
-    super("Terminal mutation rejection")
-    this.name = "TerminalRejection"
+class TerminalDecision<Rejection> extends Error {
+  constructor(
+    readonly decision:
+      | { readonly kind: "refused"; readonly error: Rejection }
+      | { readonly kind: "denied" }
+  ) {
+    super("Terminal mutation decision")
+    this.name = "TerminalDecision"
   }
 }
 
@@ -95,7 +98,7 @@ function hasExactly(value: Record<string, unknown>, keys: readonly string[]) {
 
 function parseStoredOutcome<Rejection>(
   value: unknown,
-  parseRejection: (value: unknown) => Rejection
+  parseRejection?: (value: unknown) => Rejection
 ): MutationTerminalOutcome<Rejection> {
   if (!isPlainRecord(value) || typeof value.kind !== "string") {
     throw new Error("Invalid mutation receipt outcome")
@@ -120,18 +123,25 @@ function parseStoredOutcome<Rejection>(
   }
 
   if (value.kind === "rejected" && hasExactly(value, ["kind", "error"])) {
+    if (!parseRejection) {
+      throw new Error("Missing mutation receipt refusal parser")
+    }
     return Object.freeze({
       kind: "rejected",
       error: parseRejection(structuredClone(value.error)),
     })
   }
 
-  throw new Error("Invalid rejected mutation receipt")
+  if (value.kind === "denied" && hasExactly(value, ["kind"])) {
+    return Object.freeze({ kind: "denied" })
+  }
+
+  throw new Error("Invalid terminal mutation receipt")
 }
 
 function serializeOutcome<Rejection>(
   outcome: MutationTerminalOutcome<Rejection>,
-  parseRejection: (value: unknown) => Rejection
+  parseRejection?: (value: unknown) => Rejection
 ): {
   readonly stored: StoredMutationTerminalOutcome
   readonly terminal: MutationTerminalOutcome<Rejection>
@@ -205,8 +215,9 @@ export function createDrizzleMutationAuthority<
 ): MutationAuthorityAdapter<
   DrizzleMutationTransaction<QueryResult, Schema>,
   Actor,
-  Rejection
-> {
+  Rejection,
+  PgDatabase<QueryResult, Schema>
+> & { readonly preflight: PgDatabase<QueryResult, Schema> } {
   const maxAttempts = options.maxAttempts ?? 2
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new Error("maxAttempts must be a positive integer")
@@ -218,8 +229,10 @@ export function createDrizzleMutationAuthority<
     options.isContentionError?.(error) === true
 
   return {
+    preflight: options.db,
     async execute(request, run) {
       const actorScope = options.scope(request.actor)
+      const parseRejection = request.parseRejection ?? options.parseRejection
 
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         try {
@@ -255,10 +268,7 @@ export function createDrizzleMutationAuthority<
                 return collision(request.mutationId)
               }
               return ok(
-                parseStoredOutcome(
-                  recorded.terminalOutcome,
-                  options.parseRejection
-                )
+                parseStoredOutcome(recorded.terminalOutcome, parseRejection)
               )
             }
 
@@ -266,20 +276,20 @@ export function createDrizzleMutationAuthority<
             let terminal: MutationTerminalOutcome<Rejection>
 
             try {
-              await tx.transaction(async (handlerTx) => {
-                const handled = await run(handlerTx, stamp)
-                if (!handled.ok) throw new TerminalRejection(handled.error)
+              await tx.transaction(async (attemptTx) => {
+                const attempted = await run(attemptTx, stamp)
+                if (!attempted.ok) throw new TerminalDecision(attempted.error)
               })
               terminal = { kind: "accepted", stamp: stamp.accepted() }
             } catch (error) {
-              if (!(error instanceof TerminalRejection)) throw error
-              terminal = { kind: "rejected", error: error.rejection }
+              if (!(error instanceof TerminalDecision)) throw error
+              terminal =
+                error.decision.kind === "denied"
+                  ? { kind: "denied" }
+                  : { kind: "rejected", error: error.decision.error }
             }
 
-            const serialized = serializeOutcome(
-              terminal,
-              options.parseRejection
-            )
+            const serialized = serializeOutcome(terminal, parseRejection)
             await tx.insert(headcanonMutationReceipts).values({
               actorScope,
               mutationId: request.mutationId,

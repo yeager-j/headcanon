@@ -12,7 +12,6 @@ import {
   axisId,
   defineMutation,
   defineProtocol,
-  rejections,
   revisionVector,
   type AcceptedStamp,
   type Canon,
@@ -561,7 +560,7 @@ describe("createPredictedRoot", () => {
 })
 
 // ---------------------------------------------------------------------------
-// Heterogeneous protocols + declared rejections (UNN-676)
+// Heterogeneous protocols + mutation-specific refusals (UNN-676/UNN-685)
 // ---------------------------------------------------------------------------
 
 type SetArgs = { readonly to: number }
@@ -576,35 +575,46 @@ const setArgsSchema: StandardSchemaV1<unknown, SetArgs> = {
   },
 }
 
+const counterGoneSchema: StandardSchemaV1<unknown, "counter-gone"> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon-test",
+    validate(value) {
+      return value === "counter-gone"
+        ? { value }
+        : { issues: [{ message: "Expected counter-gone" }] }
+    },
+  },
+}
+
 const set = defineMutation({
   name: "counter.set",
   args: setArgsSchema,
+  refusal: counterGoneSchema,
   predict(state: number, args): Result<number, CounterError> {
     void state
     return ok(args.to)
   },
 })
 
-/** Two mutations with DIFFERENT argument schemas plus a declared authority
- *  rejection — the shape that used to collapse `StateOf`/`ErrorOf` to `never`
+/** Two mutations with DIFFERENT argument schemas plus a mutation-specific
+ *  refusal — the shape that used to collapse `StateOf`/`ErrorOf` to `never`
  *  (non-distributive inference over the mutation union). */
 const mixedProtocol = defineProtocol({
   id: "test.counter.mixed.v1",
   mutations: [add, set],
-  rejections: rejections<"counter-gone">(),
 })
 
 // Compile-time regression: a send returning the full client error union —
-// predictor refusals ∪ declared rejections — must satisfy the options type.
-// With the collapsed-to-`never` bug (or without the rejections declaration)
-// this assignment fails to typecheck.
+// predictor refusals ∪ mutation-specific receipt refusals — must satisfy the
+// options type. With the collapsed-to-`never` bug this assignment fails.
 const _mixedSendProbe: PredictedRootOptions<
   typeof mixedProtocol
 >["send"] = async () => err<CounterError | "counter-gone">("counter-gone")
 void _mixedSendProbe
 
-describe("createPredictedRoot — declared authority rejections", () => {
-  it("rolls back a prediction rejected with a protocol-declared rejection", async () => {
+describe("createPredictedRoot — mutation-specific authority refusals", () => {
+  it("rolls back a prediction rejected with the selected mutation's refusal", async () => {
     const deliveries: Array<{
       envelope: MutationEnvelope<
         ReturnType<typeof add> | ReturnType<typeof set>

@@ -17,14 +17,13 @@ export {
 export {
   defineMutation,
   defineProtocol,
-  rejections,
   type InvocationOf,
   type MutationDefinition,
+  type MutationErrorOf,
   type MutationInvocation,
+  type MutationRefusalOf,
   type ProtocolDefinition,
   type ProtocolInvocation,
-  type ProtocolRejectionOf,
-  type ProtocolRejections,
 } from "./protocol"
 export {
   canonicalInvocation,
@@ -33,15 +32,12 @@ export {
 } from "./canonical-invocation"
 export {
   createStampAccumulator,
-  createMutationExecutor,
   type MutationAuthorityAdapter,
   type MutationAuthorityAdapterError,
   type MutationAuthorityRequest,
+  type MutationAttemptFailure,
   type MutationEnvelope,
   type MutationExecutorError,
-  type MutationHandler,
-  type MutationHandlerContext,
-  type MutationHandlers,
   type MutationTerminalOutcome,
   type ReadableStampAccumulator,
   type StampAccumulator,

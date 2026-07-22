@@ -1,16 +1,28 @@
 import { createHash, randomUUID } from "node:crypto"
+import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { cacheTag, refresh, revalidateTag, updateTag } from "next/cache"
+import { forbidden } from "next/navigation"
+
+import { err, ok, type Result } from "@workspace/result"
 
 import {
-  createMutationExecutor,
+  executePreparedMutation,
+  prepareMutationRequest,
+  type MutationAttemptFailure,
   type MutationAuthorityAdapter,
-  type MutationHandlers,
+  type MutationExecutorError,
+  type MutationTerminalOutcome,
+  type StampAccumulator,
 } from "../authority"
 import type {
   InvalidationPublicationFailureReporter,
   InvalidationPublisher,
 } from "../invalidation"
-import type { AnyMutationDefinition, ProtocolDefinition } from "../protocol"
+import type {
+  AnyMutationDefinition,
+  MutationRefusalOf,
+  ProtocolDefinition,
+} from "../protocol"
 import {
   axisId,
   type AcceptedStamp,
@@ -135,38 +147,347 @@ export function announceExternalCommit(
   )
 }
 
-/** Adds Next Server Action finalization to the framework-independent executor. */
-export function createNextMutationExecutor<
+type MutationWithRefusal = AnyMutationDefinition & {
+  readonly refusal: StandardSchemaV1
+}
+
+type MutationArgs<Mutation extends AnyMutationDefinition> = Mutation extends (
+  args: infer Args
+) => unknown
+  ? Args
+  : never
+
+type ProtocolMutation<Protocol> =
+  Protocol extends ProtocolDefinition<string, infer Mutations>
+    ? Mutations[number]
+    : never
+
+/** Evidence that fail-closed admission succeeded for the current observation. */
+export type MutationAdmission<Evidence> =
+  | { readonly kind: "allowed"; readonly evidence: Evidence }
+  | { readonly kind: "denied" }
+
+/** The application command's terminal decision inside one authority attempt. */
+export type MutationCommandDecision<Refusal> =
+  | { readonly kind: "accepted" }
+  | { readonly kind: "refused"; readonly error: Refusal }
+  | { readonly kind: "denied" }
+
+export function allowMutation<Evidence>(
+  evidence: Evidence
+): MutationAdmission<Evidence> {
+  return Object.freeze({ kind: "allowed", evidence })
+}
+
+export function denyMutation(): { readonly kind: "denied" } {
+  return Object.freeze({ kind: "denied" })
+}
+
+export function acceptMutation(): { readonly kind: "accepted" } {
+  return Object.freeze({ kind: "accepted" })
+}
+
+export function refuseMutation<Refusal>(
+  error: Refusal
+): MutationCommandDecision<Refusal> {
+  return Object.freeze({ kind: "refused", error })
+}
+
+/** One app-owned command bound to a client-safe mutation definition. */
+export interface MutationCommand<
+  Mutation extends MutationWithRefusal,
+  Actor,
+  Preflight,
+  Transaction,
+  Evidence,
+> {
+  readonly admit: (context: {
+    readonly executor: Preflight | Transaction
+    readonly actor: Actor
+    readonly args: MutationArgs<Mutation>
+  }) => MutationAdmission<Evidence> | Promise<MutationAdmission<Evidence>>
+  readonly execute: (context: {
+    readonly tx: Transaction
+    readonly actor: Actor
+    readonly args: MutationArgs<Mutation>
+    readonly evidence: Evidence
+    readonly stamp: StampAccumulator
+  }) =>
+    | MutationCommandDecision<MutationRefusalOf<Mutation>>
+    | Promise<MutationCommandDecision<MutationRefusalOf<Mutation>>>
+  readonly afterAccepted?: (context: {
+    readonly actor: Actor
+    readonly args: MutationArgs<Mutation>
+    readonly stamp: AcceptedStamp
+    readonly preflight: Evidence
+  }) => void | Promise<void>
+}
+
+export interface MutationBinding<
+  Mutation extends MutationWithRefusal,
+  Command = unknown,
+> {
+  readonly mutation: Mutation
+  readonly command: Command
+}
+
+/** Binds by definition identity, preserving the mutation's exact argument type. */
+export function bindMutation<
+  const Mutation extends MutationWithRefusal,
+  Actor,
+  Preflight,
+  Transaction,
+  Evidence,
+>(
+  mutation: Mutation,
+  command: MutationCommand<
+    NoInfer<Mutation>,
+    Actor,
+    Preflight,
+    Transaction,
+    Evidence
+  >
+): MutationBinding<
+  Mutation,
+  MutationCommand<Mutation, Actor, Preflight, Transaction, Evidence>
+> {
+  return Object.freeze({ mutation, command })
+}
+
+type AnyMutationBinding = MutationBinding<MutationWithRefusal>
+
+type BoundMutation<Commands extends readonly AnyMutationBinding[]> =
+  Commands[number] extends MutationBinding<infer Mutation, unknown>
+    ? Mutation
+    : never
+
+type CompleteBindings<
+  Protocol,
+  Commands extends readonly AnyMutationBinding[],
+> =
+  Exclude<ProtocolMutation<Protocol>, BoundMutation<Commands>> extends never
+    ? Exclude<BoundMutation<Commands>, ProtocolMutation<Protocol>> extends never
+      ? unknown
+      : { readonly __unknownMutationBinding: never }
+    : { readonly __missingMutationBinding: never }
+
+type CompatibleBindings<
+  Commands extends readonly AnyMutationBinding[],
+  Actor,
+  Preflight,
+  Transaction,
+> = Commands extends readonly [
+  infer First extends AnyMutationBinding,
+  ...infer Rest extends readonly AnyMutationBinding[],
+]
+  ? First extends MutationBinding<infer Mutation, infer Command>
+    ? Command extends MutationCommand<
+        Mutation,
+        Actor,
+        Preflight,
+        Transaction,
+        infer _Evidence
+      >
+      ? CompatibleBindings<Rest, Actor, Preflight, Transaction>
+      : { readonly __incompatibleMutationCommand: never }
+    : { readonly __incompatibleMutationCommand: never }
+  : unknown
+
+type RuntimeCommand<Actor, Preflight, Transaction, Refusal> = {
+  readonly admit: (context: {
+    readonly executor: Preflight | Transaction
+    readonly actor: Actor
+    readonly args: unknown
+  }) => MutationAdmission<unknown> | Promise<MutationAdmission<unknown>>
+  readonly execute: (context: {
+    readonly tx: Transaction
+    readonly actor: Actor
+    readonly args: unknown
+    readonly evidence: unknown
+    readonly stamp: StampAccumulator
+  }) =>
+    | MutationCommandDecision<Refusal>
+    | Promise<MutationCommandDecision<Refusal>>
+  readonly afterAccepted?: (context: {
+    readonly actor: Actor
+    readonly args: unknown
+    readonly stamp: AcceptedStamp
+    readonly preflight: unknown
+  }) => void | Promise<void>
+}
+
+interface RuntimeBinding<Actor, Preflight, Transaction, Refusal> {
+  readonly mutation: MutationWithRefusal
+  readonly command: RuntimeCommand<Actor, Preflight, Transaction, Refusal>
+}
+
+function parseMutationRefusal<Refusal>(
+  schema: StandardSchemaV1,
+  value: unknown
+): Refusal {
+  const parsed = schema["~standard"].validate(value)
+  if ("then" in parsed) {
+    throw new Error("Mutation refusal codecs must validate synchronously")
+  }
+  if (parsed.issues) throw new Error("Invalid stored mutation refusal")
+  return parsed.value as Refusal
+}
+
+function assertCompleteBindings(
+  protocol: ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
+  commands: readonly AnyMutationBinding[]
+): void {
+  const expected = new Set(protocol.mutations.map(({ name }) => name))
+  const registered = new Set<string>()
+
+  for (const { mutation } of commands) {
+    if (registered.has(mutation.name)) {
+      throw new Error(`Duplicate mutation binding: ${mutation.name}`)
+    }
+    if (protocol.mutationsByName[mutation.name] !== mutation) {
+      throw new Error(
+        `Mutation binding does not use the protocol definition: ${mutation.name}`
+      )
+    }
+    registered.add(mutation.name)
+  }
+
+  const missing = [...expected].filter((name) => !registered.has(name))
+  const unknown = [...registered].filter((name) => !expected.has(name))
+  if (missing.length === 0 && unknown.length === 0) return
+
+  throw new Error(
+    `Incomplete mutation bindings: missing [${missing.join(", ")}], unknown [${unknown.join(", ")}]`
+  )
+}
+
+/**
+ * Creates one Server Action from an exhaustive, definition-keyed command list.
+ *
+ * Admission runs before receipt ownership and again inside every retryable
+ * attempt. Accepted projections are deliberately at-least-once: duplicate
+ * accepted delivery reruns finalization and `afterAccepted` from the receipt.
+ */
+export function createNextMutationAction<
   const Protocol extends ProtocolDefinition<
     string,
-    readonly AnyMutationDefinition[],
-    unknown
+    readonly AnyMutationDefinition[]
   >,
   Transaction,
   Actor,
-  Rejection,
+  Preflight,
+  const Commands extends readonly AnyMutationBinding[],
 >(options: {
   readonly protocol: Protocol
-  readonly authority: MutationAuthorityAdapter<Transaction, Actor, Rejection>
-  readonly handlers: MutationHandlers<Protocol, Transaction, Actor, Rejection>
+  readonly actor: () => Actor | Promise<Actor>
+  readonly authority: MutationAuthorityAdapter<
+    Transaction,
+    Actor,
+    unknown,
+    Preflight
+  > & { readonly preflight: Preflight }
+  readonly commands: Commands &
+    CompleteBindings<Protocol, Commands> &
+    CompatibleBindings<Commands, Actor, Preflight, Transaction>
   readonly invalidations: InvalidationPublisher
   readonly reportInvalidationFailure: InvalidationPublicationFailureReporter
 }) {
-  const execute = createMutationExecutor({
-    protocol: options.protocol,
-    authority: options.authority,
-    handlers: options.handlers,
-  })
+  type Refusal = MutationRefusalOf<BoundMutation<Commands>>
+  type Terminal = MutationTerminalOutcome<Refusal>
 
-  return async (envelope: unknown, actor: Actor) => {
-    const outcome = await execute(envelope, actor)
-    if (!outcome.ok || outcome.value.kind !== "accepted") return outcome
+  assertCompleteBindings(options.protocol, options.commands)
+  const bindings = new Map(
+    options.commands.map((binding) => [
+      binding.mutation.name,
+      binding as RuntimeBinding<Actor, Preflight, Transaction, Refusal>,
+    ])
+  )
+
+  return async (
+    envelope: unknown
+  ): Promise<
+    Result<
+      Exclude<Terminal, { readonly kind: "denied" }>,
+      MutationExecutorError
+    >
+  > => {
+    const actor = await options.actor()
+    const prepared = await prepareMutationRequest(options.protocol, envelope)
+    if (!prepared.ok) return prepared
+
+    const binding = bindings.get(prepared.value.mutation)
+    if (!binding) {
+      throw new Error(`Missing mutation binding: ${prepared.value.mutation}`)
+    }
+    const args = structuredClone(prepared.value.args)
+    const preflight = await binding.command.admit({
+      executor: options.authority.preflight,
+      actor,
+      args,
+    })
+    if (preflight.kind === "denied") forbidden()
+
+    const outcome = await executePreparedMutation<
+      Transaction,
+      Actor,
+      Refusal,
+      Preflight
+    >({
+      prepared: prepared.value,
+      actor,
+      authority: options.authority as MutationAuthorityAdapter<
+        Transaction,
+        Actor,
+        Refusal,
+        Preflight
+      >,
+      parseRejection: (value) =>
+        parseMutationRefusal<Refusal>(binding.mutation.refusal, value),
+      run: async (tx, stamp, attemptArgs) => {
+        const admitted = await binding.command.admit({
+          executor: tx,
+          actor,
+          args: attemptArgs,
+        })
+        if (admitted.kind === "denied") {
+          return err({
+            kind: "denied",
+          } satisfies MutationAttemptFailure<Refusal>)
+        }
+
+        const decision = await binding.command.execute({
+          tx,
+          actor,
+          args: attemptArgs,
+          evidence: admitted.evidence,
+          stamp,
+        })
+        if (decision.kind === "accepted") return ok(undefined)
+        return err(
+          decision.kind === "denied"
+            ? ({ kind: "denied" } satisfies MutationAttemptFailure<Refusal>)
+            : ({
+                kind: "refused",
+                error: decision.error,
+              } satisfies MutationAttemptFailure<Refusal>)
+        )
+      },
+    })
+    if (!outcome.ok) return outcome
+    if (outcome.value.kind === "denied") forbidden()
+    if (outcome.value.kind === "rejected") return ok(outcome.value)
 
     await finalizeExternalActionCommit(
       outcome.value.stamp,
       options.invalidations,
       options.reportInvalidationFailure
     )
-    return outcome
+    await binding.command.afterAccepted?.({
+      actor,
+      args,
+      stamp: outcome.value.stamp,
+      preflight: preflight.evidence,
+    })
+    return ok(outcome.value)
   }
 }

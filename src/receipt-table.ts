@@ -13,9 +13,9 @@ import {
  * The mutation-receipt table definition, isolated from the authority adapter so
  * that adopters can include it in their Drizzle schema and migrations without
  * pulling the executor graph (and its `canonicalize` dependency) into
- * schema-only tooling such as `drizzle-kit`. The adapter in `./drizzle`
- * re-exports it, so `@workspace/headcanon/drizzle` remains the runtime home; a
- * migration-only consumer imports `@workspace/headcanon/drizzle-schema`.
+ * schema-only tooling such as `drizzle-kit`. The adapter imports the table for
+ * its queries without re-exporting it; schema consumers use the dedicated
+ * `@workspace/headcanon/drizzle-schema` entry.
  */
 
 /** The durable terminal outcome stored per mutation, as serialized JSON. */
@@ -25,6 +25,7 @@ export type StoredMutationTerminalOutcome =
       readonly stamp: { readonly revisions: unknown }
     }
   | { readonly kind: "rejected"; readonly error: unknown }
+  | { readonly kind: "denied" }
 
 /** Durable authority outcomes keyed by trusted actor scope and mutation UUID. */
 export const headcanonMutationReceipts = pgTable(

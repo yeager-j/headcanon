@@ -33,12 +33,12 @@ introducing another projected-state store.
   and invocation into RFC 8785 canonical JSON, exact UTF-8 bytes, and a lowercase
   SHA-256 fingerprint. It rejects values outside the supported JSON domain before
   canonicalization and isolates valid input from inherited `toJSON` behavior.
-- **Authority execution.** `createMutationExecutor` strictly admits envelopes,
-  reparses arguments, computes receipt identity, and dispatches through an
-  exhaustive handler registry. The authority adapter owns receipt scope,
+- **Authority execution.** `createNextMutationAction` strictly admits envelopes,
+  reparses arguments, and selects one exhaustive definition-keyed command before
+  entering receipt authority. The authority adapter owns receipt scope,
   transactional attempts, contention retry, and attempt-local stamp lifetimes;
-  handlers receive only their transaction, parsed arguments, trusted actor, and
-  stamp accumulator.
+  commands own application admission, execution, and repeat-safe accepted
+  projections.
 - **Invalidation vocabulary.** The framework-independent entry defines singleton
   axis invalidations, subscribers, and publishers without pulling React or Next
   into the protocol graph.
@@ -95,7 +95,7 @@ delivery. The same entry owns `useRouterRefresh`; snapshot refresh remains in
 
 The server binding derives one bounded SHA-256 cache tag per axis,
 `tagVersionedBase` fails closed above Next's 128-tag ceiling, and
-`createNextMutationExecutor` finalizes accepted stamps with `updateTag`, one
+`createNextMutationAction` finalizes accepted stamps with `updateTag`, one
 shared-event invalidation publication, and server `refresh()`. The separately
 named external-commit helpers preserve the Server Action versus Route Handler
 context distinction. Each binding requires an application-owned failure
@@ -140,29 +140,29 @@ behavioral contracts rather than duplicating synchronization assertions.
 ## Drizzle/Postgres authority
 
 `@workspace/headcanon/drizzle` exports `createDrizzleMutationAuthority`,
-`throwMutationContention`, and the `DrizzleHandlerTx` helper type. The receipt
+`throwMutationContention`, and the `DrizzleMutationTx` helper type. The receipt
 table itself is published from the dependency-minimal
 `@workspace/headcanon/drizzle-schema` entry (drizzle-orm only), so an adopter can
 add it to their Drizzle schema — and let `drizzle-kit` scan it — without the
-executor graph being pulled into schema tooling. Include the table in the
+authority graph being pulled into schema tooling. Include the table in the
 adopter's schema so its normal migration workflow owns deployment; the equivalent
 baseline SQL is checked in at `drizzle/0000_headcanon_mutation_receipts.sql` for
 migration review and fixtures.
 
-Handlers infer their context when defined inline in the executor's `handlers`
-map. When a handler is hoisted into its own function, name its transaction with
-`DrizzleHandlerTx<typeof db>` rather than hand-deriving it from the client type.
+Commands infer their context when registered through `createNextMutationAction`.
+When a command or Store needs an explicit transaction type, use
+`DrizzleMutationTx<typeof db>` rather than hand-deriving it from the client type.
 
 The adapter requires an interactive Postgres Drizzle client: for Neon, use the
 WebSocket `Pool` integration rather than the HTTP query client. It acquires a
 transaction-scoped receipt identity lock before application work, runs each
-handler in a nested Drizzle transaction/savepoint, and retries bounded
+command attempt in a nested Drizzle transaction/savepoint, and retries bounded
 contention. Expected rejections must cross the receipt boundary through the
 caller's `parseRejection`; malformed stored outcomes fail closed.
 
 Guarded application writes call `throwMutationContention()` when their
 compare-and-swap affects no row. That aborts the outer attempt, discards its
-domain writes and stamp, and reruns the complete handler from current state.
+domain writes and stamp, and reruns the complete command from current state.
 Unexpected exceptions still propagate without a receipt.
 
 The real-Postgres contract suite runs when `HEADCANON_TEST_DATABASE_URL` or

@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { err, ok, type Result } from "@workspace/result"
 
 import {
-  createMutationExecutor,
   createStampAccumulator,
+  executePreparedMutation,
+  prepareMutationRequest,
+  type MutationAttemptFailure,
   type MutationAuthorityAdapter,
   type MutationAuthorityAdapterError,
   type MutationAuthorityRequest,
@@ -139,21 +141,26 @@ export function createInMemoryMutationAuthority<
     err({ code: "mutation-id-reused", mutationId } as const)
 
   const copyOutcome = (
-    outcome: MutationTerminalOutcome<Rejection>
+    outcome: MutationTerminalOutcome<Rejection>,
+    parseRejection?: (value: unknown) => Rejection
   ): MutationTerminalOutcome<Rejection> =>
     outcome.kind === "accepted"
       ? outcome
-      : Object.freeze({
-          kind: "rejected",
-          error: cloneRejection(outcome.error),
-        })
+      : outcome.kind === "denied"
+        ? outcome
+        : Object.freeze({
+            kind: "rejected",
+            error: parseRejection
+              ? parseRejection(JSON.parse(JSON.stringify(outcome.error)))
+              : cloneRejection(outcome.error),
+          })
 
   const execute = async (
-    request: MutationAuthorityRequest<Actor>,
+    request: MutationAuthorityRequest<Actor, Rejection>,
     run: (
       tx: InMemoryTransaction<State>,
       stamp: StampAccumulator
-    ) => Promise<Result<void, Rejection>>
+    ) => Promise<Result<void, MutationAttemptFailure<Rejection>>>
   ): Promise<
     Result<MutationTerminalOutcome<Rejection>, MutationAuthorityAdapterError>
   > => {
@@ -161,7 +168,7 @@ export function createInMemoryMutationAuthority<
     const recorded = receipts.get(key)
     if (recorded) {
       return equalBytes(recorded.canonicalBytes, request.canonical.bytes)
-        ? ok(copyOutcome(recorded.outcome))
+        ? ok(copyOutcome(recorded.outcome, request.parseRejection))
         : collision(request.mutationId)
     }
 
@@ -169,7 +176,9 @@ export function createInMemoryMutationAuthority<
     if (active) {
       return equalBytes(active.canonicalBytes, request.canonical.bytes)
         ? active.outcome.then((result) =>
-            result.ok ? ok(copyOutcome(result.value)) : result
+            result.ok
+              ? ok(copyOutcome(result.value, request.parseRejection))
+              : result
           )
         : collision(request.mutationId)
     }
@@ -181,7 +190,9 @@ export function createInMemoryMutationAuthority<
           committedWhileWaiting.canonicalBytes,
           request.canonical.bytes
         )
-          ? ok(copyOutcome(committedWhileWaiting.outcome))
+          ? ok(
+              copyOutcome(committedWhileWaiting.outcome, request.parseRejection)
+            )
           : collision(request.mutationId)
       }
 
@@ -198,15 +209,20 @@ export function createInMemoryMutationAuthority<
         const handled = await run(tx, stamp)
 
         if (!handled.ok) {
-          const terminal = Object.freeze({
-            kind: "rejected",
-            error: cloneRejection(handled.error),
-          }) satisfies MutationTerminalOutcome<Rejection>
+          const terminal =
+            handled.error.kind === "denied"
+              ? (Object.freeze({
+                  kind: "denied",
+                }) satisfies MutationTerminalOutcome<Rejection>)
+              : (Object.freeze({
+                  kind: "rejected",
+                  error: cloneRejection(handled.error.error),
+                }) satisfies MutationTerminalOutcome<Rejection>)
           receipts.set(key, {
             canonicalBytes: request.canonical.bytes.slice(),
             outcome: terminal,
           })
-          return ok(copyOutcome(terminal))
+          return ok(copyOutcome(terminal, request.parseRejection))
         }
 
         const contentionUpdate = contention.shift()
@@ -541,17 +557,28 @@ export function createInMemoryMutationAuthorityContractHarness(): MutationAuthor
         initialState: MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE,
         scope: (actor) => actor,
       })
-      const execute = createMutationExecutor({
-        protocol: mutationAuthorityContractProtocol,
-        authority,
-        handlers: {
-          async [MUTATION_AUTHORITY_CONTRACT_MUTATION]({ tx, args, stamp }) {
+      const execute = async (envelope: unknown) => {
+        const prepared = await prepareMutationRequest(
+          mutationAuthorityContractProtocol,
+          envelope
+        )
+        if (!prepared.ok) return prepared
+
+        return executePreparedMutation({
+          prepared: prepared.value,
+          actor: MUTATION_AUTHORITY_CONTRACT_ACTOR,
+          authority,
+          async run(tx, stamp, rawArgs) {
+            const args = rawArgs as AuthorityContractArgs
             const current = tx.read()
             if (
               args.maximumPrimary !== null &&
               current.primary > args.maximumPrimary
             ) {
-              return err({ code: "precondition" })
+              return err({
+                kind: "refused",
+                error: { code: "precondition" },
+              } as const)
             }
 
             const advanced = advanceContractState(current, args)
@@ -572,16 +599,18 @@ export function createInMemoryMutationAuthorityContractHarness(): MutationAuthor
               throw new Error("authority contract exception")
             }
             if (args.behavior === "reject") {
-              return err({ code: "rejected-after-write" })
+              return err({
+                kind: "refused",
+                error: { code: "rejected-after-write" },
+              } as const)
             }
             return ok(undefined)
           },
-        },
-      })
+        })
+      }
 
       return {
-        execute: (envelope) =>
-          execute(envelope, MUTATION_AUTHORITY_CONTRACT_ACTOR),
+        execute,
         read: async () => authority.read(),
         replace: async (next) => authority.replace(next),
         contendNext: async (primaryDelta = 0) => {

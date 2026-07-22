@@ -1,11 +1,12 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { describe, expect, expectTypeOf, it } from "vitest"
 
-import { ok } from "@workspace/result"
+import { ok, type Result } from "@workspace/result"
 
 import {
   defineMutation,
   defineProtocol,
+  type MutationErrorOf,
   type MutationInvocation,
   type ProtocolInvocation,
 } from "./index"
@@ -29,6 +30,28 @@ const amountSchema: StandardSchemaV1<unknown, AmountArgs> = {
     },
   },
 }
+
+type PredictionRefusal = { readonly code: "predicted" }
+type AuthorityRefusal = { readonly code: "authoritative" }
+
+const authorityRefusalSchema: StandardSchemaV1<unknown, AuthorityRefusal> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon-test",
+    validate(value) {
+      return { value: value as AuthorityRefusal }
+    },
+  },
+}
+
+const correlated = defineMutation({
+  name: "counter.correlated",
+  args: amountSchema,
+  refusal: authorityRefusalSchema,
+  predict(state: number): Result<number, PredictionRefusal> {
+    return ok(state)
+  },
+})
 
 const increment = defineMutation({
   name: "counter.increment",
@@ -96,6 +119,21 @@ describe("defineMutation", () => {
   it("rejects incorrect invocation arguments at compile time", () => {
     // @ts-expect-error — the schema's inferred output requires a numeric amount.
     increment({ amount: "2" })
+  })
+
+  it("correlates predictor and authority errors to the invocation", () => {
+    const invocation = correlated({ amount: 1 })
+
+    expectTypeOf(invocation).toEqualTypeOf<
+      MutationInvocation<
+        "counter.correlated",
+        AmountArgs,
+        PredictionRefusal | AuthorityRefusal
+      >
+    >()
+    expectTypeOf<MutationErrorOf<typeof correlated>>().toEqualTypeOf<
+      PredictionRefusal | AuthorityRefusal
+    >()
   })
 })
 
