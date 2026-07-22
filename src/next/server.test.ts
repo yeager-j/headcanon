@@ -21,6 +21,7 @@ import {
 import {
   acceptMutation,
   allowMutation,
+  allowMutationScreening,
   announceExternalCommit,
   axisCacheTag,
   bindMutation,
@@ -293,8 +294,13 @@ const wrongArgsCommand: MutationCommand<
   string,
   CounterTx,
   CounterTx,
+  undefined,
   undefined
 > = {
+  screen: ({ args }) => {
+    void args.value
+    return allowMutationScreening(undefined)
+  },
   admit: ({ args }) => {
     void args.value
     return allowMutation(undefined)
@@ -317,6 +323,7 @@ describe("Next mutation action", () => {
     string,
     CounterTx,
     CounterTx,
+    { readonly screened: number },
     { readonly observed: number }
   >
   type IncrementAfterAccepted = NonNullable<IncrementCommand["afterAccepted"]>
@@ -336,17 +343,21 @@ describe("Next mutation action", () => {
 
   function command(
     options: {
-      readonly admissions?: string[]
+      readonly lifecycle?: string[]
       readonly afterAccepted?: IncrementAfterAccepted
-      readonly deny?: boolean
+      readonly denyScreen?: boolean
     } = {}
   ): IncrementCommand {
     return {
-      admit({ executor }: { readonly executor: CounterTx }) {
-        options.admissions?.push(`admit:${executor.read()}`)
-        return options.deny
+      screen({ executor }) {
+        options.lifecycle?.push(`screen:${executor.read()}`)
+        return options.denyScreen
           ? denyMutation()
-          : allowMutation({ observed: executor.read() })
+          : allowMutationScreening({ screened: executor.read() })
+      },
+      admit({ tx }) {
+        options.lifecycle?.push(`admit:${tx.read()}`)
+        return allowMutation({ observed: tx.read() })
       },
       execute({ tx, args, stamp }) {
         if (args.amount < 0) return refuseMutation({ code: "refused" } as const)
@@ -363,6 +374,7 @@ describe("Next mutation action", () => {
       string,
       CounterTx,
       CounterTx,
+      { readonly screened: number },
       { readonly observed: number }
     >
   }
@@ -387,32 +399,32 @@ describe("Next mutation action", () => {
     invocation: increment({ amount: 1 }),
   }
 
-  it("runs admission before receipt ownership and on every contention attempt", async () => {
+  it("screens before receipt ownership and admits on every contention attempt", async () => {
     const authority = createAuthority()
-    const admissions: string[] = []
+    const lifecycle: string[] = []
     authority.contendNext((current) => current + 10)
 
-    await action(authority, command({ admissions }))(envelope)
+    await action(authority, command({ lifecycle }))(envelope)
 
-    expect(admissions).toEqual(["admit:0", "admit:0", "admit:10"])
+    expect(lifecycle).toEqual(["screen:0", "admit:0", "admit:10"])
     expect(authority.read()).toBe(11)
     expect(authority.attemptCount("actor", envelope.mutationId)).toBe(2)
   })
 
-  it("claims no receipt when preflight admission denies", async () => {
+  it("claims no receipt when screening denies", async () => {
     const authority = createAuthority()
 
     await expect(
-      action(authority, command({ deny: true }))(envelope)
+      action(authority, command({ denyScreen: true }))(envelope)
     ).rejects.toThrow("forbidden")
 
     expect(authority.receiptCount()).toBe(0)
   })
 
-  it("never runs admission for a malformed or unknown envelope", async () => {
+  it("never screens or admits a malformed or unknown envelope", async () => {
     const authority = createAuthority()
-    const admissions: string[] = []
-    const execute = action(authority, command({ admissions }))
+    const lifecycle: string[] = []
+    const execute = action(authority, command({ lifecycle }))
 
     await expect(execute({ bad: true })).resolves.toEqual(
       err({ code: "invalid-envelope", reason: "unexpected-fields" })
@@ -426,7 +438,7 @@ describe("Next mutation action", () => {
       err({ code: "invalid-envelope", reason: "unknown-mutation" })
     )
 
-    expect(admissions).toEqual([])
+    expect(lifecycle).toEqual([])
     expect(authority.receiptCount()).toBe(0)
   })
 
@@ -434,10 +446,9 @@ describe("Next mutation action", () => {
     const authority = createAuthority()
     let transactionAdmissions = 0
     const registered = {
-      admit({ executor }) {
-        if (executor === authority.preflight) {
-          return allowMutation({ observed: executor.read() })
-        }
+      screen: ({ executor }) =>
+        allowMutationScreening({ screened: executor.read() }),
+      admit() {
         transactionAdmissions += 1
         return denyMutation()
       },
@@ -447,6 +458,7 @@ describe("Next mutation action", () => {
       string,
       CounterTx,
       CounterTx,
+      { readonly screened: number },
       { readonly observed: number }
     >
     const execute = action(authority, registered)
@@ -488,10 +500,28 @@ describe("Next mutation action", () => {
     expect(authority.read()).toBe(1)
   })
 
+  it("passes screening projection, never attempt evidence, to afterAccepted", async () => {
+    const authority = createAuthority()
+    const afterAccepted = vi.fn()
+    const execute = action(authority, command({ afterAccepted }))
+
+    await execute(envelope)
+
+    expect(afterAccepted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projection: { screened: 0 },
+      })
+    )
+    expect(afterAccepted.mock.calls[0]![0]).not.toHaveProperty("evidence")
+    expect(afterAccepted.mock.calls[0]![0]).not.toHaveProperty("preflight")
+  })
+
   it("accepts a three-axis command without another interface field", async () => {
     const authority = createAuthority()
     const registered: IncrementCommand = {
-      admit: ({ executor }) => allowMutation({ observed: executor.read() }),
+      screen: ({ executor }) =>
+        allowMutationScreening({ screened: executor.read() }),
+      admit: ({ tx }) => allowMutation({ observed: tx.read() }),
       execute: ({ tx, args, stamp }) => {
         tx.write(tx.read() + args.amount)
         for (const [name, value] of [

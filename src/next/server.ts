@@ -162,7 +162,12 @@ type ProtocolMutation<Protocol> =
     ? Mutations[number]
     : never
 
-/** Evidence that fail-closed admission succeeded for the current observation. */
+/** Immutable application context retained for repeat-safe accepted projections. */
+export type MutationScreening<Projection> =
+  | { readonly kind: "allowed"; readonly projection: Projection }
+  | { readonly kind: "denied" }
+
+/** Evidence that transactional admission succeeded for one authority attempt. */
 export type MutationAdmission<Evidence> =
   | { readonly kind: "allowed"; readonly evidence: Evidence }
   | { readonly kind: "denied" }
@@ -177,6 +182,12 @@ export function allowMutation<Evidence>(
   evidence: Evidence
 ): MutationAdmission<Evidence> {
   return Object.freeze({ kind: "allowed", evidence })
+}
+
+export function allowMutationScreening<Projection>(
+  projection: Projection
+): MutationScreening<Projection> {
+  return Object.freeze({ kind: "allowed", projection })
 }
 
 export function denyMutation(): { readonly kind: "denied" } {
@@ -199,10 +210,16 @@ export interface MutationCommand<
   Actor,
   Preflight,
   Transaction,
+  Projection,
   Evidence,
 > {
+  readonly screen: (context: {
+    readonly executor: Preflight
+    readonly actor: Actor
+    readonly args: MutationArgs<Mutation>
+  }) => MutationScreening<Projection> | Promise<MutationScreening<Projection>>
   readonly admit: (context: {
-    readonly executor: Preflight | Transaction
+    readonly tx: Transaction
     readonly actor: Actor
     readonly args: MutationArgs<Mutation>
   }) => MutationAdmission<Evidence> | Promise<MutationAdmission<Evidence>>
@@ -219,7 +236,7 @@ export interface MutationCommand<
     readonly actor: Actor
     readonly args: MutationArgs<Mutation>
     readonly stamp: AcceptedStamp
-    readonly preflight: Evidence
+    readonly projection: Projection
   }) => void | Promise<void>
 }
 
@@ -237,6 +254,7 @@ export function bindMutation<
   Actor,
   Preflight,
   Transaction,
+  Projection,
   Evidence,
 >(
   mutation: Mutation,
@@ -245,11 +263,12 @@ export function bindMutation<
     Actor,
     Preflight,
     Transaction,
+    Projection,
     Evidence
   >
 ): MutationBinding<
   Mutation,
-  MutationCommand<Mutation, Actor, Preflight, Transaction, Evidence>
+  MutationCommand<Mutation, Actor, Preflight, Transaction, Projection, Evidence>
 > {
   return Object.freeze({ mutation, command })
 }
@@ -286,6 +305,7 @@ type CompatibleBindings<
         Actor,
         Preflight,
         Transaction,
+        infer _Projection,
         infer _Evidence
       >
       ? CompatibleBindings<Rest, Actor, Preflight, Transaction>
@@ -294,8 +314,13 @@ type CompatibleBindings<
   : unknown
 
 type RuntimeCommand<Actor, Preflight, Transaction, Refusal> = {
+  readonly screen: (context: {
+    readonly executor: Preflight
+    readonly actor: Actor
+    readonly args: unknown
+  }) => MutationScreening<unknown> | Promise<MutationScreening<unknown>>
   readonly admit: (context: {
-    readonly executor: Preflight | Transaction
+    readonly tx: Transaction
     readonly actor: Actor
     readonly args: unknown
   }) => MutationAdmission<unknown> | Promise<MutationAdmission<unknown>>
@@ -312,7 +337,7 @@ type RuntimeCommand<Actor, Preflight, Transaction, Refusal> = {
     readonly actor: Actor
     readonly args: unknown
     readonly stamp: AcceptedStamp
-    readonly preflight: unknown
+    readonly projection: unknown
   }) => void | Promise<void>
 }
 
@@ -364,8 +389,8 @@ function assertCompleteBindings(
 /**
  * Creates one Server Action from an exhaustive, definition-keyed command list.
  *
- * Admission runs before receipt ownership and again inside every retryable
- * attempt. Accepted projections are deliberately at-least-once: duplicate
+ * Screening runs before receipt ownership; admission runs inside every
+ * retryable attempt. Accepted projections are deliberately at-least-once: duplicate
  * accepted delivery reruns finalization and `afterAccepted` from the receipt.
  */
 export function createNextMutationAction<
@@ -420,12 +445,12 @@ export function createNextMutationAction<
       throw new Error(`Missing mutation binding: ${prepared.value.mutation}`)
     }
     const args = structuredClone(prepared.value.args)
-    const preflight = await binding.command.admit({
+    const screening = await binding.command.screen({
       executor: options.authority.preflight,
       actor,
       args,
     })
-    if (preflight.kind === "denied") forbidden()
+    if (screening.kind === "denied") forbidden()
 
     const outcome = await executePreparedMutation<
       Transaction,
@@ -445,7 +470,7 @@ export function createNextMutationAction<
         parseMutationRefusal<Refusal>(binding.mutation.refusal, value),
       run: async (tx, stamp, attemptArgs) => {
         const admitted = await binding.command.admit({
-          executor: tx,
+          tx,
           actor,
           args: attemptArgs,
         })
@@ -486,7 +511,7 @@ export function createNextMutationAction<
       actor,
       args,
       stamp: outcome.value.stamp,
-      preflight: preflight.evidence,
+      projection: screening.projection,
     })
     return ok(outcome.value)
   }
