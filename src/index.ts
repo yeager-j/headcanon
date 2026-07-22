@@ -44,6 +44,7 @@ export {
 } from "./authority"
 export {
   axisInvalidation,
+  createLazyInvalidationAdapter,
   createNoRealtimeInvalidationAdapter,
   type AxisInvalidationValidationError,
   type AxisInvalidation,
@@ -53,4 +54,5 @@ export {
   type InvalidationPublisher,
   type InvalidationStatus,
   type InvalidationSubscription,
+  type LazyInvalidationAdapterOptions,
 } from "./invalidation"

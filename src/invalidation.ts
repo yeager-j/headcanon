@@ -35,6 +35,87 @@ export interface InvalidationAdapter {
   subscribe(subscription: InvalidationSubscription): () => void
 }
 
+export interface LazyInvalidationAdapterOptions {
+  readonly initialize: () => Promise<InvalidationAdapter | null>
+  readonly onInitializationError?: (error: unknown) => void
+}
+
+/**
+ * Adapts an asynchronously-created transport to the synchronous root seam.
+ * Initialization happens at most once. Early subscriptions are buffered, and
+ * cancelling one before readiness prevents it from ever reaching the transport.
+ */
+export function createLazyInvalidationAdapter(
+  options: LazyInvalidationAdapterOptions
+): InvalidationAdapter {
+  type BufferedSubscription = {
+    readonly subscription: InvalidationSubscription
+    cancelled: boolean
+    unsubscribe: (() => void) | null
+  }
+
+  let state: "idle" | "initializing" | "ready" | "unavailable" = "idle"
+  let inner: InvalidationAdapter | null = null
+  const buffered = new Set<BufferedSubscription>()
+
+  const becomeUnavailable = (error?: unknown): void => {
+    if (error !== undefined) options.onInitializationError?.(error)
+    state = "unavailable"
+    for (const entry of buffered) {
+      if (!entry.cancelled) entry.subscription.onStatusChange("unavailable")
+    }
+    buffered.clear()
+  }
+
+  const initialize = async (): Promise<void> => {
+    try {
+      inner = await options.initialize()
+      if (!inner) {
+        becomeUnavailable()
+        return
+      }
+
+      state = "ready"
+      for (const entry of buffered) {
+        if (!entry.cancelled) {
+          entry.unsubscribe = inner.subscribe(entry.subscription)
+        }
+      }
+      buffered.clear()
+    } catch (error) {
+      becomeUnavailable(error)
+    }
+  }
+
+  return {
+    initialStatus: "reauthorizing",
+    subscribe(subscription) {
+      if (state === "ready" && inner) return inner.subscribe(subscription)
+      if (state === "unavailable") {
+        subscription.onStatusChange("unavailable")
+        return () => undefined
+      }
+
+      const entry: BufferedSubscription = {
+        subscription,
+        cancelled: false,
+        unsubscribe: null,
+      }
+      buffered.add(entry)
+      if (state === "idle") {
+        state = "initializing"
+        void initialize()
+      }
+
+      return () => {
+        entry.cancelled = true
+        entry.unsubscribe?.()
+        buffered.delete(entry)
+      }
+    },
+  }
+}
+
 /** Declares that a root intentionally has no push-invalidation transport. */
 export function createNoRealtimeInvalidationAdapter(): InvalidationAdapter {
   return {
