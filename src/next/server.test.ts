@@ -8,7 +8,6 @@ import {
   axisId,
   defineMutation,
   defineProtocol,
-  revision,
   revisionVector,
   type AcceptedStamp,
   type InvalidationPublisher,
@@ -326,7 +325,7 @@ describe("Next mutation action", () => {
     { readonly screened: number },
     { readonly observed: number }
   >
-  type IncrementAfterAccepted = NonNullable<IncrementCommand["afterAccepted"]>
+  type IncrementFinalization = NonNullable<IncrementCommand["finalizeAccepted"]>
 
   function createAuthority() {
     const authority = createInMemoryMutationAuthority<number, string, unknown>({
@@ -344,7 +343,7 @@ describe("Next mutation action", () => {
   function command(
     options: {
       readonly lifecycle?: string[]
-      readonly afterAccepted?: IncrementAfterAccepted
+      readonly finalizeAccepted?: IncrementFinalization
       readonly denyScreen?: boolean
     } = {}
   ): IncrementCommand {
@@ -363,20 +362,11 @@ describe("Next mutation action", () => {
         if (args.amount < 0) return refuseMutation({ code: "refused" } as const)
         const next = tx.read() + args.amount
         tx.write(next)
-        const parsed = revision(next)
-        if (!parsed.ok) throw new Error("Invalid counter revision")
-        stamp.record(axisId("counter/value"), parsed.value)
+        stamp.record(axisId("counter/value"), next)
         return acceptMutation()
       },
-      afterAccepted: options.afterAccepted,
-    } satisfies MutationCommand<
-      typeof increment,
-      string,
-      CounterTx,
-      CounterTx,
-      { readonly screened: number },
-      { readonly observed: number }
-    >
+      finalizeAccepted: options.finalizeAccepted,
+    } satisfies IncrementCommand
   }
 
   function action(
@@ -453,14 +443,7 @@ describe("Next mutation action", () => {
         return denyMutation()
       },
       execute: () => acceptMutation(),
-    } satisfies MutationCommand<
-      typeof increment,
-      string,
-      CounterTx,
-      CounterTx,
-      { readonly screened: number },
-      { readonly observed: number }
-    >
+    } satisfies IncrementCommand
     const execute = action(authority, registered)
 
     await expect(execute(envelope)).rejects.toThrow("forbidden")
@@ -487,33 +470,33 @@ describe("Next mutation action", () => {
     expect(authority.receiptCount()).toBe(1)
   })
 
-  it("reruns afterAccepted for duplicate accepted recovery", async () => {
+  it("reruns repeat-safe finalization for duplicate accepted recovery", async () => {
     const authority = createAuthority()
-    const afterAccepted = vi.fn()
-    const execute = action(authority, command({ afterAccepted }))
+    const finalizeAccepted = vi.fn()
+    const execute = action(authority, command({ finalizeAccepted }))
 
     const first = await execute(envelope)
     const duplicate = await execute(envelope)
 
     expect(duplicate).toEqual(first)
-    expect(afterAccepted).toHaveBeenCalledTimes(2)
+    expect(finalizeAccepted).toHaveBeenCalledTimes(2)
     expect(authority.read()).toBe(1)
   })
 
-  it("passes screening projection, never attempt evidence, to afterAccepted", async () => {
+  it("passes screening projection, never attempt evidence, to finalization", async () => {
     const authority = createAuthority()
-    const afterAccepted = vi.fn()
-    const execute = action(authority, command({ afterAccepted }))
+    const finalizeAccepted = vi.fn()
+    const execute = action(authority, command({ finalizeAccepted }))
 
     await execute(envelope)
 
-    expect(afterAccepted).toHaveBeenCalledWith(
+    expect(finalizeAccepted).toHaveBeenCalledWith(
       expect.objectContaining({
         projection: { screened: 0 },
       })
     )
-    expect(afterAccepted.mock.calls[0]![0]).not.toHaveProperty("evidence")
-    expect(afterAccepted.mock.calls[0]![0]).not.toHaveProperty("preflight")
+    expect(finalizeAccepted.mock.calls[0]![0]).not.toHaveProperty("evidence")
+    expect(finalizeAccepted.mock.calls[0]![0]).not.toHaveProperty("preflight")
   })
 
   it("accepts a three-axis command without another interface field", async () => {
@@ -529,9 +512,7 @@ describe("Next mutation action", () => {
           ["counter/second", 2],
           ["counter/third", 3],
         ] as const) {
-          const parsed = revision(value)
-          if (!parsed.ok) throw new Error("Invalid test revision")
-          stamp.record(axisId(name), parsed.value)
+          stamp.record(axisId(name), value)
         }
         return acceptMutation()
       },
@@ -553,14 +534,14 @@ describe("Next mutation action", () => {
     )
   })
 
-  it("does not run afterAccepted for a public refusal", async () => {
+  it("does not finalize a public refusal", async () => {
     const authority = createAuthority()
-    const afterAccepted = vi.fn()
-    const execute = action(authority, command({ afterAccepted }))
+    const finalizeAccepted = vi.fn()
+    const execute = action(authority, command({ finalizeAccepted }))
 
     await execute({ ...envelope, invocation: increment({ amount: -1 }) })
 
-    expect(afterAccepted).not.toHaveBeenCalled()
+    expect(finalizeAccepted).not.toHaveBeenCalled()
   })
 
   it("fails closed when the authority presents a corrupt stored refusal", async () => {

@@ -13,7 +13,6 @@ import {
   throwMutationContention,
 } from "./drizzle"
 import { headcanonMutationReceipts } from "./receipt-table"
-import { revision } from "./revisions"
 import {
   MUTATION_AUTHORITY_CONTRACT_ACTOR,
   MUTATION_AUTHORITY_CONTRACT_AXES,
@@ -90,12 +89,6 @@ function contractArgs(
     maximumPrimary: null,
     ...overrides,
   }
-}
-
-function requireRevision(value: number) {
-  const parsed = revision(value)
-  if (!parsed.ok) throw new Error("Invalid contract fixture revision")
-  return parsed.value
 }
 
 describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
@@ -333,7 +326,7 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
                 : axis === SECONDARY
                   ? MUTATION_AUTHORITY_CONTRACT_AXES.secondary
                   : MUTATION_AUTHORITY_CONTRACT_AXES.rollback
-            stamp.record(stampedAxis, requireRevision(written.revision))
+            stamp.record(stampedAxis, written.revision)
           }
 
           if (args.behavior === "throw") {

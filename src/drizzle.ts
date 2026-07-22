@@ -162,7 +162,16 @@ function requestLockKey<Actor>(
   return JSON.stringify([actorScope, request.mutationId])
 }
 
-function errorCode(error: unknown): string | undefined {
+export interface PostgresErrorMatch {
+  readonly code: string
+  readonly constraint?: string
+}
+
+/** Matches a PostgreSQL error anywhere in a cycle-safe causal chain. */
+export function matchesPostgresError(
+  error: unknown,
+  expected: PostgresErrorMatch
+): boolean {
   let current = error
   const visited = new Set<object>()
 
@@ -174,18 +183,26 @@ function errorCode(error: unknown): string | undefined {
     visited.add(current)
     const errorLike = current as {
       readonly code?: unknown
+      readonly constraint?: unknown
       readonly cause?: unknown
     }
-    if (typeof errorLike.code === "string") return errorLike.code
+    if (
+      errorLike.code === expected.code &&
+      (expected.constraint === undefined ||
+        errorLike.constraint === expected.constraint)
+    ) {
+      return true
+    }
     current = errorLike.cause
   }
 
-  return undefined
+  return false
 }
 
 function isPostgresContention(error: unknown): boolean {
-  const code = errorCode(error)
-  return code === "40001" || code === "40P01" || code === "55P03"
+  return ["40001", "40P01", "55P03"].some((code) =>
+    matchesPostgresError(error, { code })
+  )
 }
 
 function collision(mutationId: string) {

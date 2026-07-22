@@ -30,7 +30,8 @@ export interface MutationEnvelope<Invocation> {
 
 /** The attempt-local authority for constructing a complete accepted vector. */
 export interface StampAccumulator {
-  record(axis: AxisId, revision: Revision): void
+  /** Validates and records one persisted revision for this authority attempt. */
+  record(axis: AxisId, revision: number): void
 }
 
 export interface ReadableStampAccumulator extends StampAccumulator {

@@ -140,7 +140,10 @@ behavioral contracts rather than duplicating synchronization assertions.
 ## Drizzle/Postgres authority
 
 `@workspace/headcanon/drizzle` exports `createDrizzleMutationAuthority`,
-`throwMutationContention`, and the `DrizzleMutationTx` helper type. The receipt
+`throwMutationContention`, the cycle-safe `matchesPostgresError` matcher, and the
+`DrizzleMutationTx` helper type. The matcher lets application-specific
+contention rules select a SQLSTATE and optional constraint without reimplementing
+wrapped `cause` traversal. The receipt
 table itself is published from the dependency-minimal
 `@workspace/headcanon/drizzle-schema` entry (drizzle-orm only), so an adopter can
 add it to their Drizzle schema — and let `drizzle-kit` scan it — without the

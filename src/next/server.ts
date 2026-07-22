@@ -232,7 +232,11 @@ export interface MutationCommand<
   }) =>
     | MutationCommandDecision<MutationRefusalOf<Mutation>>
     | Promise<MutationCommandDecision<MutationRefusalOf<Mutation>>>
-  readonly afterAccepted?: (context: {
+  /**
+   * Runs after every accepted delivery, including recovery from a stored
+   * receipt. Implementations must be repeat-safe.
+   */
+  readonly finalizeAccepted?: (context: {
     readonly actor: Actor
     readonly args: MutationArgs<Mutation>
     readonly stamp: AcceptedStamp
@@ -333,7 +337,7 @@ type RuntimeCommand<Actor, Preflight, Transaction, Refusal> = {
   }) =>
     | MutationCommandDecision<Refusal>
     | Promise<MutationCommandDecision<Refusal>>
-  readonly afterAccepted?: (context: {
+  readonly finalizeAccepted?: (context: {
     readonly actor: Actor
     readonly args: unknown
     readonly stamp: AcceptedStamp
@@ -391,7 +395,7 @@ function assertCompleteBindings(
  *
  * Screening runs before receipt ownership; admission runs inside every
  * retryable attempt. Accepted projections are deliberately at-least-once: duplicate
- * accepted delivery reruns finalization and `afterAccepted` from the receipt.
+ * accepted delivery reruns finalization and `finalizeAccepted` from the receipt.
  */
 export function createNextMutationAction<
   const Protocol extends ProtocolDefinition<
@@ -507,7 +511,7 @@ export function createNextMutationAction<
       options.invalidations,
       options.reportInvalidationFailure
     )
-    await binding.command.afterAccepted?.({
+    await binding.command.finalizeAccepted?.({
       actor,
       args,
       stamp: outcome.value.stamp,
