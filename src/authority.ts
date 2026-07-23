@@ -34,11 +34,22 @@ export interface StampAccumulator {
   record(axis: AxisId, revision: number): void
 }
 
+/** A stamp accumulator that can publish the complete vector for its attempt. */
 export interface ReadableStampAccumulator extends StampAccumulator {
   accepted(): AcceptedStamp
 }
 
-/** Creates one isolated revision vector for a single authority attempt. */
+/**
+ * Creates one isolated revision vector for a single authority attempt.
+ *
+ * Commands call `record` once for every persisted revision they advance. The
+ * accumulator rejects invalid or regressing coordinates and `accepted()`
+ * returns the complete vector for the attempt. The authority must discard it
+ * when a transaction rolls back; it is deliberately not a process-wide
+ * revision store.
+ *
+ * @returns A fresh accumulator whose accepted stamp contains only this attempt's records.
+ */
 export function createStampAccumulator(): ReadableStampAccumulator {
   const revisions = new Map<AxisId, Revision>()
 
@@ -92,10 +103,12 @@ export type ProtocolIdentity<ProtocolId extends string> = {
   readonly [protocolIdentity]?: ProtocolId
 }
 
+/** Expected authority failures that prevent a terminal receipt outcome. */
 export type MutationAuthorityAdapterError =
   | { readonly code: "mutation-id-reused"; readonly mutationId: string }
   | { readonly code: "contention"; readonly mutationId: string }
 
+/** Trusted context and canonical identity supplied to a mutation authority adapter. */
 export interface MutationAuthorityRequest<Actor, Rejection = unknown> {
   readonly actor: Actor
   readonly mutationId: string
@@ -130,6 +143,7 @@ export interface MutationAuthorityAdapter<
   >
 }
 
+/** Failures returned before or while admitting a mutation into authority execution. */
 export type MutationExecutorError =
   | {
       readonly code: "invalid-envelope"
@@ -237,7 +251,19 @@ function parseEnvelope(
   })
 }
 
-/** Strictly parses and canonicalizes an envelope without claiming a receipt. */
+/**
+ * Strictly parses and canonicalizes an envelope without claiming a receipt.
+ *
+ * This is the server-side trust-boundary step: it checks the exact envelope
+ * shape and protocol, validates the mutation name, parses arguments with the
+ * registered Standard Schema, and derives canonical receipt identity. It does
+ * not call application commands, open a transaction, or reserve mutation
+ * identity, so invalid requests cannot create receipt rows.
+ *
+ * @param protocol Protocol whose ID, registry, and argument schemas admit the request.
+ * @param envelope Untrusted value received from a transport boundary.
+ * @returns A prepared request or a typed admission/canonicalization failure.
+ */
 export async function prepareMutationRequest<
   const Protocol extends ProtocolDefinition<
     string,
@@ -288,7 +314,19 @@ export async function prepareMutationRequest<
   })
 }
 
-/** Executes one prepared request through receipt authority. */
+/**
+ * Executes one prepared request through receipt authority.
+ *
+ * The adapter owns receipt deduplication, collision detection, transaction
+ * attempts, and contention retry. The `run` callback owns application policy
+ * and writes for the current attempt; it may be invoked more than once, so it
+ * must be safe to rerun against fresh transaction state. A returned refusal or
+ * denial becomes a terminal receipt outcome, while adapter contention remains
+ * an expected error for the caller to retry.
+ *
+ * @param options Prepared identity, trusted actor, authority adapter, refusal parser, and application runner.
+ * @returns A promise for the terminal outcome or a typed executor/authority failure.
+ */
 export function executePreparedMutation<
   Transaction,
   Actor,

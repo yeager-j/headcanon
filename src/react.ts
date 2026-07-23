@@ -38,6 +38,7 @@ import {
   type RevisionVector,
 } from "./revisions"
 
+/** Terminal lifecycle failures surfaced by a predicted root's receipts. */
 export type MutationLifecycleError<Error> =
   | { readonly kind: "domain"; readonly error: Error }
   | { readonly kind: "replay-refused"; readonly error: Error }
@@ -47,6 +48,7 @@ export type MutationLifecycleError<Error> =
       readonly outcome: "unknown" | "accepted"
     }
 
+/** Independent acceptance and canonization milestones for one mutation. */
 export interface MutationReceipt<Error> {
   readonly id: string
   readonly accepted: Promise<
@@ -55,12 +57,14 @@ export interface MutationReceipt<Error> {
   readonly canonized: Promise<Result<void, MutationLifecycleError<Error>>>
 }
 
+/** A pending invocation jossed while replaying newer authoritative canon. */
 export interface ReplayConflict<Invocation, Error> {
   readonly mutationId: string
   readonly invocation: Invocation
   readonly error: Error
 }
 
+/** State and controls exposed by a mounted optimistic predicted root. */
 export interface PredictedRoot<State, Invocation, Error> {
   readonly value: State
   readonly mutate: (
@@ -75,6 +79,7 @@ export interface PredictedRoot<State, Invocation, Error> {
   readonly conflicts: readonly ReplayConflict<Invocation, Error>[]
 }
 
+/** Read-only state and lifecycle controls exposed by an observed root. */
 export interface ObservedRoot<State> {
   readonly value: State
   readonly retryRefresh: () => void
@@ -135,6 +140,7 @@ type ErrorForInvocation<Protocol, Invocation> = MutationErrorOf<
   MutationForInvocation<Protocol, Invocation>
 >
 
+/** Protocol-specialized predicted-root shape with correlated mutation errors. */
 export type ProtocolPredictedRoot<
   Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
 > = Omit<
@@ -173,6 +179,7 @@ export class RetryableDeliveryError extends Error {
  *  contention degrades to an honest uncertain state instead of hammering. */
 const DELIVERY_RETRY_DELAYS_MS = [300, 1000, 3000] as const
 
+/** Protocol, delivery, refresh, and invalidation dependencies for a root factory. */
 export interface PredictedRootOptions<
   Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
 > {
@@ -191,6 +198,7 @@ export interface PredictedRootOptions<
   readonly invalidations?: InvalidationAdapter
 }
 
+/** Latest complete authoritative canon supplied to a mounted root. */
 export interface PredictedRootInput<State> {
   /**
    * The current complete authoritative canon. Must be **referentially stable
@@ -205,6 +213,8 @@ export interface PredictedRootInput<State> {
 /**
  * The public hook type returned by a predicted-root factory. Its protocol fixes
  * the canon state, invocation union, and correlated mutation error types.
+ * @param input Current complete authoritative canon.
+ * @returns Protocol-specialized predicted root state and controls.
  */
 export type PredictedRootHook<
   Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
@@ -212,6 +222,7 @@ export type PredictedRootHook<
   input: PredictedRootInput<StateOf<Protocol>>
 ) => ProtocolPredictedRoot<Protocol>
 
+/** Refresh and optional invalidation dependencies for an observed root. */
 export interface ObservedRootOptions {
   readonly refresh: () => RefreshAdapter
   readonly invalidations?: InvalidationAdapter
@@ -342,6 +353,23 @@ function removeFromQueue(queue: string[], mutationId: string): void {
   if (index >= 0) queue.splice(index, 1)
 }
 
+/**
+ * Creates a framework-independent React predicted-root hook.
+ *
+ * The returned hook keeps the latest complete `Canon` as the authoritative
+ * base and folds pending invocations over it with React's optimistic state
+ * mechanism. A successful local prediction returns a receipt with independent
+ * `accepted` and `canonized` promises: acceptance means the authority committed
+ * an `AcceptedStamp`, while canonization waits until this root's canon covers
+ * that stamp. Delivery is serialized in invocation order, uncertain envelopes
+ * retain their original mutation ID for retry, and replay-refused predictions
+ * are reported as conflicts rather than silently disappearing. Callers own the
+ * refresh carrier and optional invalidation transport; the root owns
+ * subscription cleanup and pending-receipt settlement on unmount.
+ *
+ * @param options Protocol, delivery, refresh, and optional invalidation dependencies.
+ * @returns A hook exposing predicted state, mutation receipts, retry controls, and status.
+ */
 export function createPredictedRoot<
   const Protocol extends ProtocolDefinition<
     string,
@@ -354,7 +382,13 @@ export function createPredictedRoot<
   )
 }
 
-/** @internal Framework bindings use this to preserve control-flow throws. */
+/**
+ * Builds a predicted-root hook with a framework-specific control-flow classifier.
+ * @internal Framework bindings use this to preserve control-flow throws.
+ * @param options Protocol, delivery, refresh, and invalidation dependencies.
+ * @param classifyDeliveryError Classifies framework control-flow exceptions.
+ * @returns A hook that mounts the configured predicted root.
+ */
 export function createPredictedRootWithDeliveryErrorClassifier<
   const Protocol extends ProtocolDefinition<
     string,
@@ -912,6 +946,11 @@ export function createPredictedRootWithDeliveryErrorClassifier<
   }
 }
 
+/**
+ * Creates a read-only React observed-root hook.
+ * @param options Refresh and optional invalidation dependencies.
+ * @returns A hook exposing authoritative state and incorporation status without mutation controls.
+ */
 export function createObservedRoot(options: ObservedRootOptions) {
   return function useObservedRoot<State>({
     canon,

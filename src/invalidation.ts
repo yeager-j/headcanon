@@ -16,6 +16,7 @@ export interface AxisInvalidation {
   readonly revision: Revision
 }
 
+/** Lifecycle state reported by an invalidation transport. */
 export type InvalidationStatus =
   | "disabled"
   | "active"
@@ -23,6 +24,7 @@ export type InvalidationStatus =
   | "polling"
   | "unavailable"
 
+/** Root-owned subscription callbacks for a set of revision axes. */
 export interface InvalidationSubscription {
   readonly axes: readonly AxisId[]
   readonly onInvalidation: (invalidation: AxisInvalidation) => void
@@ -30,11 +32,13 @@ export interface InvalidationSubscription {
   readonly onSubscriptionGap?: () => void
 }
 
+/** Synchronous subscription seam implemented by push or fallback transports. */
 export interface InvalidationAdapter {
   readonly initialStatus: InvalidationStatus
   subscribe(subscription: InvalidationSubscription): () => void
 }
 
+/** Initialization and diagnostics supplied to the lazy transport adapter. */
 export interface LazyInvalidationAdapterOptions {
   readonly initialize: () => Promise<InvalidationAdapter | null>
   readonly onInitializationError?: (error: unknown) => void
@@ -44,6 +48,8 @@ export interface LazyInvalidationAdapterOptions {
  * Adapts an asynchronously-created transport to the synchronous root seam.
  * Initialization happens at most once. Early subscriptions are buffered, and
  * cancelling one before readiness prevents it from ever reaching the transport.
+ * @param options Initialization callback and optional diagnostics handler.
+ * @returns An invalidation adapter that buffers subscriptions until ready.
  */
 export function createLazyInvalidationAdapter(
   options: LazyInvalidationAdapterOptions
@@ -116,7 +122,10 @@ export function createLazyInvalidationAdapter(
   }
 }
 
-/** Declares that a root intentionally has no push-invalidation transport. */
+/**
+ * Declares that a root intentionally has no push-invalidation transport.
+ * @returns An adapter that reports `disabled` and never publishes updates.
+ */
 export function createNoRealtimeInvalidationAdapter(): InvalidationAdapter {
   return {
     initialStatus: "disabled",
@@ -132,6 +141,7 @@ export interface InvalidationPublisher {
   publish(eventId: string, stamp: AcceptedStamp): void | Promise<void>
 }
 
+/** Diagnostic record for an invalidation publication that did not complete. */
 export interface InvalidationPublicationFailure {
   readonly kind: "rejected" | "timed-out"
   readonly eventId: string
@@ -139,10 +149,16 @@ export interface InvalidationPublicationFailure {
   readonly error?: unknown
 }
 
+/**
+ * Application-owned sink for publication rejection and timeout diagnostics.
+ * @param failure Failure record including the accepted stamp and event ID.
+ * @returns Nothing; reporter failures are ignored by finalization.
+ */
 export type InvalidationPublicationFailureReporter = (
   failure: InvalidationPublicationFailure
 ) => void
 
+/** Fail-closed reasons an untrusted axis invalidation payload was rejected. */
 export type AxisInvalidationValidationError =
   | {
       readonly code: "invalid-axis-invalidation"
@@ -172,7 +188,11 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   })
 }
 
-/** Parses one untrusted realtime payload without admitting domain data. */
+/**
+ * Parses one untrusted realtime payload without admitting domain data.
+ * @param value Untrusted transport payload.
+ * @returns A validated axis invalidation or a typed validation failure.
+ */
 export function axisInvalidation(
   value: unknown
 ): Result<AxisInvalidation, AxisInvalidationValidationError> {

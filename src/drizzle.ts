@@ -34,11 +34,16 @@ export class MutationContentionError extends Error {
   }
 }
 
-/** Rolls the current attempt back so the authority can retry from current state. */
+/**
+ * Rolls the current attempt back so the authority can retry from current state.
+ * @returns Never; throws transaction-control-flow contention.
+ * @throws {@link MutationContentionError} to request an authority retry.
+ */
 export function throwMutationContention(): never {
   throw new MutationContentionError()
 }
 
+/** Transaction-capable Drizzle client shape accepted by the authority adapter. */
 export type DrizzleMutationTransaction<
   QueryResult extends PgQueryResultHKT,
   Schema extends Record<string, unknown>,
@@ -54,6 +59,7 @@ export type DrizzleMutationTx<
   DB extends PgDatabase<PgQueryResultHKT, Record<string, unknown>>,
 > = Parameters<Parameters<DB["transaction"]>[0]>[0]
 
+/** Application policy and database hooks used by the Drizzle authority adapter. */
 export interface DrizzleMutationAuthorityOptions<
   QueryResult extends PgQueryResultHKT,
   Schema extends Record<string, unknown>,
@@ -162,12 +168,18 @@ function requestLockKey<Actor>(
   return JSON.stringify([actorScope, request.mutationId])
 }
 
+/** SQLSTATE and optional constraint pattern used to classify contention errors. */
 export interface PostgresErrorMatch {
   readonly code: string
   readonly constraint?: string
 }
 
-/** Matches a PostgreSQL error anywhere in a cycle-safe causal chain. */
+/**
+ * Matches a PostgreSQL error anywhere in a cycle-safe causal chain.
+ * @param error Unknown thrown value or causal chain root.
+ * @param expected SQLSTATE and optional constraint to match.
+ * @returns Whether the chain contains the expected PostgreSQL error.
+ */
 export function matchesPostgresError(
   error: unknown,
   expected: PostgresErrorMatch
@@ -212,10 +224,19 @@ function collision(mutationId: string) {
 /**
  * Creates the Postgres authority adapter around an interactive Drizzle client.
  *
- * The transaction-scoped advisory lock is acquired before any receipt or
- * application row access. Hash collisions can only serialize unrelated
- * mutations; exact receipt identity and equality still use the primary key and
- * canonical invocation text.
+ * Each execution derives a trusted actor scope, acquires a transaction-scoped
+ * advisory lock before receipt or application-row access, and runs the command
+ * callback inside a transaction attempt. Duplicate mutation IDs return the
+ * stored terminal outcome when canonical bytes match; a reused ID with
+ * different bytes returns `mutation-id-reused`. PostgreSQL serialization,
+ * deadlock, lock-timeout, and application-classified contention roll back the
+ * attempt and retry from fresh state up to `maxAttempts`. The adapter requires
+ * an interactive transaction client and does not decide actor identity,
+ * authorization, domain semantics, or projection ownership.
+ *
+ * @param options Interactive Drizzle client, trusted scope function, retry policy, and optional contention/refusal hooks.
+ * @returns A receipt-owning mutation authority with the database as preflight executor.
+ * @throws Error when retry configuration is invalid or the database reports an unexpected failure.
  */
 export function createDrizzleMutationAuthority<
   QueryResult extends PgQueryResultHKT,

@@ -28,9 +28,16 @@ import {
 import type { RefreshAdapter } from "../refresh"
 import type { AcceptedStamp } from "../revisions"
 
+/** Grace period allowing a Server Action's RSC response to carry acceptance. */
 export const ROUTER_ACCEPTANCE_GRACE_MS = 250
 
-/** @internal Applies Next's control-flow classification at a catch boundary. */
+/**
+ * Applies Next's control-flow classification at a catch boundary.
+ * @internal Used by the generated Next predicted-root adapter.
+ * @param error Unknown value caught while delivering a Server Action.
+ * @returns Never returns when Next identifies framework control flow.
+ * @throws Re-throws Next navigation or authorization control flow.
+ */
 export function rethrowNextControlFlow(error: unknown): void {
   unstable_rethrow(error)
 }
@@ -46,6 +53,8 @@ type ProtocolMutation<Protocol> =
  * admits `unknown` envelopes, so its parameter cannot distinguish protocols.
  * The identity tag makes binding the wrong protocol's action a local type
  * error even when two protocols share a refusal shape.
+ * @param envelope Parsed protocol envelope to deliver.
+ * @returns A promise for the terminal authority result.
  */
 export type NextMutationAction<
   Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
@@ -81,10 +90,17 @@ export interface NextActionPredictedRootOptions<
 /**
  * Creates a predicted-root hook for a Next.js App Router surface.
  *
- * The action form is the standard path: it supplies the normal sender adapter
- * and defaults refresh to the App Router carrier. The explicit `send` and
- * `refresh` form remains available for snapshot carriers, tests, and unusual
- * delivery adapters.
+ * The action form is the standard path: it supplies the sender that preserves
+ * Next control-flow throws and defaults refresh to `router.refresh()`. The
+ * explicit `send` and `refresh` form remains available for snapshot carriers,
+ * tests, and unusual delivery adapters. The generated action must use the same
+ * protocol object as the root; its phantom protocol identity makes accidental
+ * cross-protocol binding a type error. Omit `invalidations` when the surface
+ * intentionally has no push transport.
+ *
+ * @param options Protocol and either generated action or explicit delivery dependencies.
+ * @returns A predicted-root hook for the Next App Router.
+ * @throws Framework control-flow errors are rethrown; ordinary delivery errors are classified by the root.
  */
 export function createNextPredictedRoot<
   const Protocol extends ProtocolDefinition<
@@ -125,13 +141,16 @@ export function createNextPredictedRoot<
   )
 }
 
-/** Options for an App Router observed root with no mutation surface. */
+/** Optional App Router refresh and invalidation dependencies for an observed root. */
 export interface NextObservedRootOptions {
   readonly refresh?: () => RefreshAdapter
   readonly invalidations?: ObservedRootOptions["invalidations"]
 }
 
-/** An observed root whose canon arrives as RSC props through the App Router. */
+/** An observed root whose canon arrives as RSC props through the App Router.
+ * @param options Optional refresh and invalidation dependencies.
+ * @returns An observed-root hook.
+ */
 export function createNextObservedRoot(options: NextObservedRootOptions = {}) {
   return createObservedRoot({
     refresh: options.refresh ?? useRouterRefresh,
@@ -143,6 +162,8 @@ export function createNextObservedRoot(options: NextObservedRootOptions = {}) {
  * Adapts a generated Server Action to the explicit predicted-root delivery
  * seam. Prefer the `action` form of {@link createNextPredictedRoot} for the
  * standard App Router carrier.
+ * @param action Generated Server Action for one protocol.
+ * @returns A sender adapter returning accepted stamps or typed refusals.
  */
 export function createNextMutationSender<
   const Protocol extends ProtocolDefinition<
@@ -173,7 +194,9 @@ export function createNextMutationSender<
   }
 }
 
-/** Requests a new RSC payload through the App Router. */
+/** Requests a new RSC payload through the App Router.
+ * @returns A refresh adapter backed by `router.refresh()`.
+ */
 export function useRouterRefresh(): RefreshAdapter {
   const router = useRouter()
 

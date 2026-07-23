@@ -24,6 +24,8 @@ export interface MutationContext {
  *
  * The schema is parsed again at the authority. `predict` must be pure and
  * deterministic because later canons replay the same invocation through it.
+ * @param args Parsed arguments accepted by the invocation factory.
+ * @returns A serializable named mutation invocation.
  */
 export type MutationDefinition<
   Name extends string,
@@ -129,11 +131,21 @@ export type ProtocolInvocation<Protocol> =
     : never
 
 /**
- * Defines one named mutation and returns its typed invocation factory.
+ * Defines one mutation's shared client/server contract and returns its typed
+ * invocation factory.
  *
- * Calling the result packages already-typed arguments without treating local
- * construction as authority validation; the registered schema owns parsing at
- * the trust boundary.
+ * The returned function is the value callers use to express intent. It adds the
+ * stable mutation name and preserves the typed arguments for prediction,
+ * transport, and authority dispatch. Calling it does not authorize, persist,
+ * or re-parse the arguments; the server parses them again at the trust
+ * boundary. `predict` must be pure and deterministic because pending
+ * invocations are replayed over later authoritative canons. If `refusal` is
+ * supplied, its output schema defines the structured error that may be stored
+ * and reproduced from a receipt.
+ *
+ * @param definition Stable name, argument schema, pure predictor, and optional refusal schema.
+ * @returns A frozen callable mutation definition with stable wire metadata.
+ * @throws An error from the schema/predictor setup only if the supplied definition is invalid at runtime.
  */
 export function defineMutation<
   const Name extends string,
@@ -176,8 +188,17 @@ export function defineMutation<
 /**
  * Registers a closed set of mutations under one stable protocol ID.
  *
- * Duplicate mutation names throw during definition so wire dispatch can make
- * the name-to-definition distinction exactly once.
+ * A protocol is the dispatch boundary shared by the browser and authority. It
+ * freezes the mutation list and builds a name-indexed registry so the server
+ * can resolve an untrusted invocation name exactly once before running the
+ * matching command. TypeScript also requires all mutations in the registry to
+ * predict the same state shape. Duplicate names and malformed definitions
+ * throw during construction; they are programmer/configuration errors, not
+ * request-level refusals.
+ *
+ * @param definition Stable protocol ID and closed mutation registry.
+ * @returns A frozen protocol definition with name-indexed mutation lookup.
+ * @throws Error when a mutation is malformed or two mutations share a name.
  */
 export function defineProtocol<
   const Id extends string,

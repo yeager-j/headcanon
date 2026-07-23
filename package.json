@@ -9,6 +9,7 @@
     "format": "eslint --fix \"**/*.{ts,mjs}\" && prettier --write \"**/*.{ts,mjs,md,json}\"",
     "typecheck": "tsc --noEmit",
     "depcheck": "node depcheck.mjs",
+    "check:public-api-docs": "node scripts/check-public-api-docs.mjs",
     "test": "vitest run"
   },
   "sideEffects": false,

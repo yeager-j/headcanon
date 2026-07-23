@@ -19,6 +19,7 @@ export interface CanonicalInvocation {
   readonly sha256: string
 }
 
+/** A parsed invocation together with the exact bytes used for receipt identity. */
 export interface PreparedCanonicalInvocation<Name extends string, Args> {
   readonly canonical: CanonicalInvocation
   readonly invocation: MutationInvocation<Name, Args>
@@ -208,9 +209,17 @@ function toHex(bytes: Uint8Array): string {
 /**
  * Produces environment-independent receipt identity for a parsed invocation.
  *
- * The full `{ protocol, invocation }` envelope is proven to be plain JSON before
- * RFC 8785 canonicalization or SHA-256 hashing runs. Invalid values therefore
- * cannot reach receipt lookup under a lossy or runtime-specific representation.
+ * The full `{ protocol, invocation }` envelope is validated as plain JSON,
+ * isolated from inherited `toJSON` behavior, serialized with RFC 8785 ordering,
+ * and hashed from the exact UTF-8 bytes. Consumers should compare `bytes` when
+ * proving duplicate-delivery identity; `sha256` is a useful indexed lookup and
+ * diagnostic fingerprint, but is not the equality proof. The operation has no
+ * persistence or authority side effect and is safe to run before claiming a
+ * receipt.
+ *
+ * @param protocolId Stable protocol identifier included in the identity material.
+ * @param invocation Parsed invocation whose name and arguments form the request intent.
+ * @returns A promise for canonical identity, or a typed failure for unsupported JSON or unavailable hashing.
  */
 export async function prepareCanonicalInvocation<Name extends string, Args>(
   protocolId: string,
@@ -249,6 +258,13 @@ export async function prepareCanonicalInvocation<Name extends string, Args>(
   }
 }
 
+/**
+ * Canonicalizes a protocol invocation and computes its exact SHA-256 receipt identity.
+ *
+ * @param protocolId Stable protocol identifier included in the identity material.
+ * @param invocation Serializable invocation to validate and canonicalize.
+ * @returns A promise for the canonical invocation, or a typed failure for unsupported input or hashing failure.
+ */
 export async function canonicalInvocation<Name extends string, Args>(
   protocolId: string,
   invocation: MutationInvocation<Name, Args>

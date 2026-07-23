@@ -1,5 +1,6 @@
 import type { AxisId } from "../revisions"
 
+/** Ably event name used for singleton accepted-axis invalidations. */
 export const ABLY_AXIS_INVALIDATION_EVENT = "headcanon.axis-invalidation.v1"
 
 const AXIS_CHANNEL_VERSION = "headcanon:axis:v1"
@@ -18,7 +19,11 @@ function normalizedNamespace(namespace: string): string {
   return normalized
 }
 
-/** Derives a deployment-scoped channel without exposing the storage axis. */
+/** Derives a deployment-scoped channel without exposing the storage axis.
+ * @param namespace Deployment-scoped application namespace.
+ * @param axis Storage axis to hash.
+ * @returns Derived Ably channel name.
+ */
 export async function ablyAxisChannelName(
   namespace: string,
   axis: AxisId
@@ -30,6 +35,10 @@ export async function ablyAxisChannelName(
   return `${normalizedNamespace(namespace)}:${AXIS_CHANNEL_VERSION}:${bytesToHex(digest)}`
 }
 
+/** Builds a sorted, duplicate-free subscribe-only Ably capability claim.
+ * @param channelNames Channel names to authorize.
+ * @returns A canonical subscribe-only capability object.
+ */
 export function ablySubscribeCapability(
   channelNames: readonly string[]
 ): Record<string, ["subscribe"]> {
@@ -40,7 +49,10 @@ export function ablySubscribeCapability(
   return capability
 }
 
-/** Measures the canonical capability claim before application-owned issuance. */
+/** Measures the canonical capability claim before application-owned issuance.
+ * @param capability Capability object to encode.
+ * @returns UTF-8 byte length of its JSON representation.
+ */
 export function ablyCapabilityByteLength(
   capability: Readonly<Record<string, readonly ["subscribe"]>>
 ): number {

@@ -58,6 +58,7 @@ export interface InMemoryTransaction<State> {
   write(next: State): void
 }
 
+/** In-memory authority surface used by contract fixtures and package consumers. */
 export interface InMemoryMutationAuthority<
   State,
   Actor,
@@ -97,6 +98,8 @@ function receiptKey(scope: string, mutationId: string): string {
  * Each attempt receives an isolated state cell and stamp accumulator. Injected
  * contention discards both, optionally advances external authority, and reruns
  * the handler against the newer committed state.
+ * @param options Initial state, actor scope, cloning, and retry policy.
+ * @returns An isolated in-memory mutation authority.
  */
 export function createInMemoryMutationAuthority<
   State,
@@ -279,13 +282,17 @@ export function createInMemoryMutationAuthority<
   }
 }
 
+/** Synchronous in-memory invalidation bus for contract tests and fixtures. */
 export interface InMemoryInvalidationAdapter
   extends InvalidationAdapter, InvalidationPublisher {
   readonly published: readonly AxisInvalidation[]
   setStatus(status: InvalidationStatus): void
 }
 
-/** A synchronous per-axis invalidation bus for tests and local fixtures. */
+/**
+ * A synchronous per-axis invalidation bus for tests and local fixtures.
+ * @returns An in-memory invalidation adapter and publisher.
+ */
 export function createInMemoryInvalidationAdapter(): InMemoryInvalidationAdapter {
   const subscriptions = new Set<InvalidationSubscription>()
   const published: AxisInvalidation[] = []
@@ -329,11 +336,15 @@ export function createInMemoryInvalidationAdapter(): InMemoryInvalidationAdapter
   }
 }
 
+/** Stable protocol identifier used by the reusable authority fixture. */
 export const MUTATION_AUTHORITY_CONTRACT_PROTOCOL =
   "headcanon.authority-contract.v1"
+/** Stable mutation name used by the reusable authority fixture. */
 export const MUTATION_AUTHORITY_CONTRACT_MUTATION = "authority-contract.apply"
+/** Stable actor scope used by the reusable authority fixture. */
 export const MUTATION_AUTHORITY_CONTRACT_ACTOR = "contract-actor"
 
+/** Axis names exercised by the reusable authority fixture. */
 export const MUTATION_AUTHORITY_CONTRACT_AXES = Object.freeze({
   primary: axisId("headcanon/contract/primary"),
   secondary: axisId("headcanon/contract/secondary"),
@@ -344,16 +355,19 @@ const PRIMARY_AXIS = MUTATION_AUTHORITY_CONTRACT_AXES.primary
 const SECONDARY_AXIS = MUTATION_AUTHORITY_CONTRACT_AXES.secondary
 const ROLLBACK_AXIS = MUTATION_AUTHORITY_CONTRACT_AXES.rollback
 
+/** Axis union used by the authority contract fixture. */
 export type MutationAuthorityContractAxis =
   | "primary"
   | "secondary"
   | "rollback-when-zero"
+/** State transition exercised by the authority contract fixture. */
 export type MutationAuthorityContractBehavior =
   | "accept"
   | "reject"
   | "throw"
   | "mutate-args-when-zero"
 
+/** Serializable arguments accepted by the authority contract mutation. */
 export interface MutationAuthorityContractArgs {
   readonly amount: number
   readonly axes: readonly MutationAuthorityContractAxis[]
@@ -364,6 +378,7 @@ export interface MutationAuthorityContractArgs {
 
 type AuthorityContractArgs = MutationAuthorityContractArgs
 
+/** Mutable state model used by the authority contract fixture. */
 export interface MutationAuthorityContractState {
   readonly primary: number
   readonly secondary: number
@@ -376,10 +391,12 @@ export interface MutationAuthorityContractState {
   readonly effects: readonly string[]
 }
 
+/** Structured refusal returned by the authority contract fixture. */
 export type MutationAuthorityContractRejection = {
   readonly code: "precondition" | "rejected-after-write"
 }
 
+/** Adapter operations observed by the authority contract harness. */
 export interface MutationAuthorityContractDriver {
   execute(
     envelope: unknown
@@ -397,6 +414,7 @@ export interface MutationAuthorityContractDriver {
   attemptCount(mutationId: string): Promise<number>
 }
 
+/** Complete authority fixture passed to reusable contract assertions. */
 export interface MutationAuthorityContractHarness {
   readonly name: string
   create():
@@ -448,6 +466,10 @@ const authorityContractArgsSchema: StandardSchemaV1<
   },
 }
 
+/** Standard-schema mutation definition used by the authority contract.
+ * @param args Contract mutation arguments.
+ * @returns A serializable authority-contract invocation.
+ */
 export const mutationAuthorityContractMutation = defineMutation({
   name: MUTATION_AUTHORITY_CONTRACT_MUTATION,
   args: authorityContractArgsSchema,
@@ -456,11 +478,13 @@ export const mutationAuthorityContractMutation = defineMutation({
   },
 })
 
+/** Protocol containing the reusable authority contract mutation. */
 export const mutationAuthorityContractProtocol = defineProtocol({
   id: MUTATION_AUTHORITY_CONTRACT_PROTOCOL,
   mutations: [mutationAuthorityContractMutation],
 })
 
+/** Fresh initial state for the authority contract fixture. */
 export const MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE: MutationAuthorityContractState =
   Object.freeze({
     primary: 0,
@@ -544,7 +568,9 @@ function advanceContractState(
   }
 }
 
-/** A ready-to-run in-memory harness for `verifyMutationAuthorityContract`. */
+/** A ready-to-run in-memory harness for `verifyMutationAuthorityContract`.
+ * @returns An isolated in-memory authority contract fixture.
+ */
 export function createInMemoryMutationAuthorityContractHarness(): MutationAuthorityContractHarness {
   return {
     name: "in-memory",
@@ -652,6 +678,12 @@ function requireAccepted<Rejection>(
   return terminal.stamp
 }
 
+/**
+ * Asserts that accepted multi-axis writes return every incremented revision.
+ * @param stamp Accepted stamp produced by the fixture.
+ * @param state State observed after the write.
+ * @returns Nothing; assertions throw on contract violation.
+ */
 export function assertMutationAuthorityContractAccumulation(
   stamp: AcceptedStamp,
   state: MutationAuthorityContractState
@@ -667,13 +699,21 @@ export function assertMutationAuthorityContractAccumulation(
   })
 }
 
+/**
+ * Asserts that a rolled-back attempt contributes no state or stamp changes.
+ * @param state State observed after rollback.
+ * @returns Nothing; assertions throw on contract violation.
+ */
 export function assertMutationAuthorityContractRollback(
   state: MutationAuthorityContractState
 ): void {
   expect(state).toEqual(MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE)
 }
 
-/** Runs the reusable black-box authority contract against one adapter fixture. */
+/** Runs the reusable black-box authority contract against one adapter fixture.
+ * @param harness Adapter fixture to exercise.
+ * @returns Nothing; assertions throw on contract violation.
+ */
 export function verifyMutationAuthorityContract(
   harness: MutationAuthorityContractHarness
 ): void {
@@ -945,6 +985,7 @@ export function verifyMutationAuthorityContract(
   })
 }
 
+/** Observable operations supplied to the invalidation contract. */
 export interface InvalidationContractFixture {
   readonly adapter: InvalidationAdapter
   readonly publisher: InvalidationPublisher
@@ -952,12 +993,15 @@ export interface InvalidationContractFixture {
   readonly settled: () => Promise<void>
 }
 
+/** Complete invalidation fixture passed to reusable contract assertions. */
 export interface InvalidationContractHarness {
   readonly name: string
   create(): InvalidationContractFixture | Promise<InvalidationContractFixture>
 }
 
-/** A ready-to-run in-memory harness for `verifyInvalidationContract`. */
+/** A ready-to-run in-memory harness for `verifyInvalidationContract`.
+ * @returns An isolated in-memory invalidation contract fixture.
+ */
 export function createInMemoryInvalidationContractHarness(): InvalidationContractHarness {
   return {
     name: "in-memory",
@@ -1002,7 +1046,10 @@ function invalidationStamp(entries: Record<string, number>): AcceptedStamp {
   return acceptedStamp(invalidationVector(entries))
 }
 
-/** Runs the reusable black-box invalidation contract against one adapter. */
+/** Runs the reusable black-box invalidation contract against one adapter.
+ * @param harness Adapter fixture to exercise.
+ * @returns Nothing; assertions throw on contract violation.
+ */
 export function verifyInvalidationContract(
   harness: InvalidationContractHarness
 ): void {
@@ -1181,6 +1228,10 @@ export function verifyInvalidationContract(
   })
 }
 
+/**
+ * Verifies the polling fallback lifecycle and cleanup contract.
+ * @returns Nothing; assertions throw on contract violation.
+ */
 export function verifyPollingFallbackContract(): void {
   describe("polling fallback contract", () => {
     let visibility: DocumentVisibilityState
@@ -1321,6 +1372,7 @@ export function verifyPollingFallbackContract(): void {
   })
 }
 
+/** Refresh carrier fixture used by reusable stall-state assertions. */
 export interface RefreshContractHarness {
   readonly name: string
   readonly completion: "canon" | "request"
@@ -1372,6 +1424,11 @@ function setupRefreshContract(harness: RefreshContractHarness) {
   return { ...rendered, acceptanceGraceMs, request }
 }
 
+/**
+ * Asserts that a refresh fixture exposes the expected stalled state.
+ * @param status Freshness fields observed from the root.
+ * @returns Nothing; assertions throw on contract violation.
+ */
 export function assertRefreshContractStalled(
   status: Pick<IncorporationStatus, "freshness" | "stallReason">
 ): void {
@@ -1391,6 +1448,11 @@ async function completeAttempt(
   await flushMicrotasks()
 }
 
+/**
+ * Runs the reusable refresh incorporation contract against a fixture.
+ * @param harness Refresh carrier fixture to exercise.
+ * @returns Nothing; assertions throw on contract violation.
+ */
 export function verifyRefreshContract(harness: RefreshContractHarness): void {
   describe(`${harness.name} refresh contract`, () => {
     it("honors carrier grace and stalls after two uncovered refreshes", async () => {

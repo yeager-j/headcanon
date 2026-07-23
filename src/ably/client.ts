@@ -18,6 +18,7 @@ interface AblyMessage {
 
 type AblyMessageListener = (message: AblyMessage) => void
 
+/** Minimal channel contract required by the client invalidation adapter. */
 export interface AblyRealtimeChannel {
   subscribe(name: string, listener: AblyMessageListener): Promise<unknown>
   unsubscribe(name: string, listener: AblyMessageListener): void
@@ -25,6 +26,7 @@ export interface AblyRealtimeChannel {
   detach(): Promise<unknown>
 }
 
+/** Minimal Ably realtime client contract required for exact-set authorization. */
 export interface AblyRealtimeClient {
   readonly auth: {
     authorize(tokenParams: {
@@ -49,6 +51,7 @@ type AblyConnectionEvent =
 
 type AblyConnectionListener = (change: unknown) => void
 
+/** Connection lifecycle callbacks used to close invalidation delivery gaps. */
 export interface AblyRealtimeConnection {
   readonly state: string
   on(event: AblyConnectionEvent, listener: AblyConnectionListener): void
@@ -57,6 +60,7 @@ export interface AblyRealtimeConnection {
   off(events: AblyConnectionEvent[], listener: AblyConnectionListener): void
 }
 
+/** Ably invalidation adapter with explicit retry and reconciliation completion. */
 export interface AblyInvalidationAdapter extends InvalidationAdapter {
   retry(): void
   settled(): Promise<void>
@@ -98,7 +102,22 @@ function sameAxes(
   )
 }
 
-/** Owns exact-set authorization, attachment, and gap recovery for mounted roots. */
+/**
+ * Owns exact-set authorization, attachment, and gap recovery for mounted roots.
+ *
+ * The adapter aggregates axes from all live subscriptions, authorizes exactly
+ * that deduplicated channel set, and attaches channels only after authorization
+ * succeeds. Axis changes and reconnects are reconciled through one coalesced
+ * generation loop. A successful attachment marks a delivery gap, so consumers
+ * receive `onSubscriptionGap` and can refresh the authoritative canon before
+ * trusting realtime state. Malformed payloads and lifecycle failures are
+ * reported to optional diagnostics callbacks; callback failures are isolated
+ * from the subscription lifecycle. Unsubscribing removes listeners and detaches
+ * channels that no remaining root observes.
+ *
+ * @param options Realtime client, deployment namespace, and lifecycle diagnostics.
+ * @returns An Ably invalidation adapter with `retry()` and `settled()` controls.
+ */
 export function createAblyInvalidationAdapter(options: {
   readonly realtime: AblyRealtimeClient
   readonly namespace: string

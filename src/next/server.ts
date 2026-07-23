@@ -31,18 +31,26 @@ import {
   type RevisionVector,
 } from "../revisions"
 
+/** Maximum axis count supported by one Next cache-tagged versioned base. */
 export const MAX_VERSIONED_BASE_AXES = 128
 
 const AXIS_CACHE_TAG_PREFIX = "headcanon:axis:v1:"
 const INVALIDATION_PUBLICATION_TIMEOUT_MS = 1_000
 
-/** Derives the one bounded, versioned cache tag owned by an axis. */
+/** Derives the one bounded, versioned cache tag owned by an axis.
+ * @param axis Axis address to hash.
+ * @returns Stable cache tag for the axis.
+ */
 export function axisCacheTag(axis: AxisId): string {
   const digest = createHash("sha256").update(axis, "utf8").digest("hex")
   return `${AXIS_CACHE_TAG_PREFIX}${digest}`
 }
 
-/** Applies every observed axis tag to one Cache Components entry. */
+/** Applies every observed axis tag to one Cache Components entry.
+ * @param base Versioned base whose revisions identify cache tags.
+ * @returns The same base, after registering its cache tags.
+ * @throws RangeError when the base exceeds the Next tag limit.
+ */
 export function tagVersionedBase<
   Base extends { readonly revisions: RevisionVector },
 >(base: Base): Base {
@@ -125,7 +133,12 @@ async function finalizeStamp(
   await publishInvalidation(stamp, invalidations, reportFailure)
 }
 
-/** Finalizes a non-protocol commit made inside a Server Action. */
+/** Finalizes a non-protocol commit made inside a Server Action.
+ * @param stamp Accepted revisions advanced by the commit.
+ * @param invalidations Application-owned invalidation publisher.
+ * @param reportFailure Diagnostic sink for publication failures.
+ * @returns Completion of cache expiry, route refresh, and bounded publication.
+ */
 export function finalizeExternalActionCommit(
   stamp: AcceptedStamp,
   invalidations: InvalidationPublisher,
@@ -134,7 +147,12 @@ export function finalizeExternalActionCommit(
   return finalizeStamp(stamp, invalidations, updateTag, reportFailure, refresh)
 }
 
-/** Finalizes a non-protocol commit without an invoking route to refresh. */
+/** Finalizes a non-protocol commit without an invoking route to refresh.
+ * @param stamp Accepted revisions advanced by the commit.
+ * @param invalidations Application-owned invalidation publisher.
+ * @param reportFailure Diagnostic sink for publication failures.
+ * @returns Completion of cache expiry and bounded publication.
+ */
 export function announceExternalCommit(
   stamp: AcceptedStamp,
   invalidations: InvalidationPublisher,
@@ -179,26 +197,44 @@ export type MutationCommandDecision<Refusal> =
   | { readonly kind: "refused"; readonly error: Refusal }
   | { readonly kind: "denied" }
 
+/** Marks transactional admission as allowed and carries its trusted evidence.
+ * @param evidence Trusted evidence produced during admission.
+ * @returns An allowed admission decision.
+ */
 export function allowMutation<Evidence>(
   evidence: Evidence
 ): MutationAdmission<Evidence> {
   return Object.freeze({ kind: "allowed", evidence })
 }
 
+/** Marks preflight screening as allowed and carries its repeat-safe projection.
+ * @param projection Repeat-safe projection retained for accepted finalization.
+ * @returns An allowed screening decision.
+ */
 export function allowMutationScreening<Projection>(
   projection: Projection
 ): MutationScreening<Projection> {
   return Object.freeze({ kind: "allowed", projection })
 }
 
+/** Returns the private denial decision, which is not exposed as a refusal.
+ * @returns A denied command decision.
+ */
 export function denyMutation(): { readonly kind: "denied" } {
   return Object.freeze({ kind: "denied" })
 }
 
+/** Returns the terminal accepted decision for a command attempt.
+ * @returns An accepted command decision.
+ */
 export function acceptMutation(): { readonly kind: "accepted" } {
   return Object.freeze({ kind: "accepted" })
 }
 
+/** Returns a structured refusal that is safe to record and replay.
+ * @param error Public refusal value.
+ * @returns A refused command decision.
+ */
 export function refuseMutation<Refusal>(
   error: Refusal
 ): MutationCommandDecision<Refusal> {
@@ -247,6 +283,7 @@ export interface MutationCommand<
   }) => void | Promise<void>
 }
 
+/** Definition-keyed association between one mutation and its application command. */
 export interface MutationBinding<
   Mutation extends MutationWithRefusal,
   Command = unknown,
@@ -255,7 +292,11 @@ export interface MutationBinding<
   readonly command: Command
 }
 
-/** Binds by definition identity, preserving the mutation's exact argument type. */
+/** Binds by definition identity, preserving the mutation's exact argument type.
+ * @param mutation Client-safe mutation definition.
+ * @param command Application-owned command for that exact definition.
+ * @returns A frozen mutation-command binding.
+ */
 export function bindMutation<
   const Mutation extends MutationWithRefusal,
   Actor,
@@ -288,6 +329,7 @@ export function bindMutation<
  * infer. `defineMutationCommand(mutation, command)` produces the same frozen
  * binding as `bindMutation` and preserves its wrong-definition negative
  * typecheck; if adopted, it replaces `bindMutation` rather than joining it.
+ * @returns A contextually typed command-binding factory.
  */
 export function createMutationCommandDefiner<Actor, Preflight, Transaction>() {
   return function defineMutationCommand<
@@ -436,9 +478,23 @@ function assertCompleteBindings(
 /**
  * Creates one Server Action from an exhaustive, definition-keyed command list.
  *
- * Screening runs before receipt ownership; admission runs inside every
- * retryable attempt. Accepted projections are deliberately at-least-once: duplicate
- * accepted delivery reruns finalization and `finalizeAccepted` from the receipt.
+ * The returned action treats its argument as untrusted: it parses the envelope,
+ * revalidates arguments, derives canonical identity, and resolves the matching
+ * command by mutation-definition identity. It derives the actor from the
+ * supplied trusted callback, runs screening before receipt ownership, and runs
+ * admission plus execution inside the authority's retryable transaction
+ * attempts. The authority owns receipt deduplication and contention; commands
+ * own application authorization, domain writes, axis stamping, and the
+ * repeat-safe `finalizeAccepted` projection. Accepted finalization is
+ * intentionally at-least-once because a redelivery may recover a stored
+ * receipt. The action expires affected Next cache tags, refreshes the invoking
+ * route, and publishes invalidations after acceptance; publication failures go
+ * only to the supplied reporter and do not turn an accepted mutation into a
+ * rejection.
+ *
+ * @param options Protocol, trusted actor, authority, exhaustive commands, invalidation publisher, and failure reporter.
+ * @returns A protocol-branded Server Action returning terminal outcomes or typed executor failures.
+ * @throws Trusted actor or command callbacks may throw unexpected application/framework failures.
  */
 export function createNextMutationAction<
   const Protocol extends ProtocolDefinition<

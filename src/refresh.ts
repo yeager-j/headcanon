@@ -28,14 +28,18 @@ import {
   type RevisionVector,
 } from "./revisions"
 
+/** Grace period used by snapshot carriers before an acceptance refresh. */
 export const SNAPSHOT_ACCEPTANCE_GRACE_MS = 0
+/** Delay before retrying one refresh that still does not cover an accepted stamp. */
 export const UNCOVERED_REFRESH_RETRY_MS = 1_000
 
+/** Refresh carrier used to obtain a newer authoritative canon. */
 export interface RefreshAdapter {
   readonly acceptanceGraceMs: number
   request(): void | Promise<void>
 }
 
+/** Timing and visibility policy for degraded invalidation polling. */
 export interface PollingFallbackOptions {
   readonly intervalMs: number
   readonly pauseWhenHidden?: boolean
@@ -56,6 +60,19 @@ function pollingStatus(status: InvalidationStatus): InvalidationStatus {
 /**
  * Preserves bounded liveness through the subscribed root's existing refresh
  * path whenever its primary invalidation transport is unavailable.
+ *
+ * The wrapper reports `polling` while the primary adapter is disabled,
+ * reauthorizing, or unavailable, and requests refreshes at the configured
+ * interval through `onSubscriptionGap`. It stops the timer on unsubscribe and
+ * can pause while the document is hidden. When the primary transport becomes
+ * active, polling stops and the original status is forwarded. This is a
+ * liveness fallback, not a second data source: the root still obtains state
+ * only through its existing refresh carrier.
+ *
+ * @param primary Push invalidation adapter to wrap.
+ * @param options Polling interval and visibility policy.
+ * @returns An invalidation adapter with polling fallback.
+ * @throws Error when `intervalMs` is not a finite positive number.
  */
 export function withPollingFallback(
   primary: InvalidationAdapter,
@@ -146,10 +163,13 @@ export function withPollingFallback(
   }
 }
 
+/** Reason a root exhausted its bounded refresh recovery budget. */
 export type RefreshStallReason = "behind" | "missing-axis" | "refresh-error"
 
+/** Freshness lifecycle of the mounted authoritative canon. */
 export type FreshnessStatus = "current" | "grace" | "refreshing" | "stalled"
 
+/** Combined freshness and invalidation state exposed by root APIs. */
 export interface IncorporationStatus {
   readonly freshness: FreshnessStatus
   readonly invalidations: InvalidationStatus
@@ -229,6 +249,10 @@ function missingAxes(
     .filter((axis) => revisionAt(canon.revisions, axis) === undefined)
 }
 
+/** Creates the refresh carrier for a snapshot or non-router data source.
+ * @param refetch Snapshot refetch operation.
+ * @returns A refresh adapter with the snapshot grace policy.
+ */
 export function useSnapshotRefresh(
   refetch: () => void | Promise<void>
 ): RefreshAdapter {
@@ -241,6 +265,7 @@ export function useSnapshotRefresh(
   )
 }
 
+/** Imperative incorporation controls shared by predicted and observed roots. */
 export interface IncorporationCoordinator {
   readonly status: IncorporationStatus
   readonly retryRefresh: () => void

@@ -54,10 +54,16 @@ export type RevisionVectorValidationError =
  *
  * The application remains responsible for its axis namespace and stability;
  * this constructor deliberately does not impose an address grammar.
+ * @param value Globally stable application-owned axis address.
+ * @returns The same string carrying the `AxisId` compile-time brand.
  */
 export const axisId = (value: string): AxisId => value as AxisId
 
-/** Parses an untrusted value into a non-negative safe-integer revision. */
+/**
+ * Parses an untrusted value into a non-negative safe-integer revision.
+ * @param value Candidate revision value from an external boundary.
+ * @returns A validated branded revision or a typed validation failure.
+ */
 export function revision(
   value: unknown
 ): Result<Revision, RevisionValidationError> {
@@ -100,6 +106,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  *
  * Validation stops at the first invalid coordinate and preserves its axis in
  * the typed error so adapters can report the failed boundary precisely.
+ * @param value Candidate revision vector from an external boundary.
+ * @returns An immutable validated vector or a typed validation failure.
  */
 export function revisionVector(
   value: unknown
@@ -153,6 +161,9 @@ export function defineCoordinate(
  * Reads one coordinate, treating inherited members as absent — the only safe
  * way to index a vector whose keys are application-supplied axis strings. See
  * {@link defineCoordinate} for why the vector is not null-prototype.
+ * @param vector Revision vector to inspect.
+ * @param axis Axis address to look up.
+ * @returns The own revision at the axis, or `undefined` when absent.
  */
 export function revisionAt(
   vector: RevisionVector,
@@ -161,7 +172,11 @@ export function revisionAt(
   return Object.hasOwn(vector, axis) ? vector[axis] : undefined
 }
 
-/** Wraps a validated revision vector as the atomic result of acceptance. */
+/**
+ * Wraps a validated revision vector as the atomic result of acceptance.
+ * @param revisions Complete vector advanced by the accepted mutation.
+ * @returns An immutable accepted stamp.
+ */
 export const acceptedStamp = (revisions: RevisionVector): AcceptedStamp =>
   Object.freeze({ revisions })
 
@@ -174,6 +189,9 @@ export const acceptedStamp = (revisions: RevisionVector): AcceptedStamp =>
  * failure, not an expected boundary. It is the uncached counterpart of
  * `tagVersionedBase`, which likewise throws; a `"use cache"` loader tags the
  * same shape instead. Both accept any `{ value, revisions }`.
+ * @param input Loader value and raw axis revisions observed together.
+ * @returns A frozen canon carrying branded revisions.
+ * @throws Error when the supplied revision vector is invalid.
  */
 export function defineCanon<State>(input: {
   readonly value: State
@@ -199,6 +217,9 @@ export function defineCanon<State>(input: {
  *
  * Coverage is the product order over axis revisions. Missing or behind axes do
  * not cover their coordinate; an empty stamp is covered immediately.
+ * @param canon Authoritative projection revisions to inspect.
+ * @param stamp Accepted revisions that must be covered.
+ * @returns Whether every coordinate in the stamp is present at or beyond its accepted revision.
  */
 export function covers<State>(
   canon: Pick<Canon<State>, "revisions">,
