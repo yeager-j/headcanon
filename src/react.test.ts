@@ -19,11 +19,13 @@ import {
 } from "./index"
 import {
   createPredictedRoot,
+  createPredictedRootContext,
   RetryableDeliveryError,
   useSnapshotRefresh,
   type MutationEnvelope,
   type MutationReceipt,
   type PredictedRootOptions,
+  type PredictedRootRecoveryListeners,
 } from "./react"
 
 type CounterError = { readonly code: "prediction-refused" }
@@ -98,16 +100,30 @@ function createControlledSender() {
   return { deliveries, send }
 }
 
-function setup(initialCanon = canon(0, 0)) {
+function setup(
+  initialCanon = canon(0, 0),
+  defaultRecoveryListeners?: PredictedRootRecoveryListeners<
+    CounterInvocation,
+    CounterError
+  >,
+  mountedRecoveryListeners?: PredictedRootRecoveryListeners<
+    CounterInvocation,
+    CounterError
+  >
+) {
   const controlled = createControlledSender()
   const useCounterPredictions = createPredictedRoot({
     protocol: counterProtocol,
     send: controlled.send,
     refresh: useNoRefresh,
+    recoveryListeners: defaultRecoveryListeners,
   })
   const rendered = renderHook(
     ({ currentCanon }: { currentCanon: Canon<number> }) =>
-      useCounterPredictions({ canon: currentCanon }),
+      useCounterPredictions({
+        canon: currentCanon,
+        recoveryListeners: mountedRecoveryListeners,
+      }),
     { initialProps: { currentCanon: initialCanon } }
   )
   return { ...controlled, ...rendered }
@@ -138,6 +154,124 @@ describe("createPredictedRoot", () => {
     expect(result.current.value).toBe(3)
     expect(result.current.status.pending).toBe(2)
     expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it("observes prediction, acceptance, and canonization as distinct stages", async () => {
+    const { result, deliveries, rerender } = setup()
+    const stages: string[] = []
+    const onPrediction = vi.fn((outcome) => {
+      stages.push("prediction")
+      expect(outcome.ok).toBe(true)
+    })
+    const onAcceptance = vi.fn((outcome) => {
+      stages.push("acceptance")
+      expect(outcome).toEqual(ok(stamp(1)))
+    })
+    const onCanonization = vi.fn((outcome) => {
+      stages.push("canonization")
+      expect(outcome).toEqual(ok(undefined))
+    })
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      const outcome = result.current.mutate(add({ amount: 1 }), {
+        onPrediction,
+        onAcceptance,
+        onCanonization,
+      })
+      if (!outcome.ok) throw new Error("unexpected local refusal")
+      receipt = outcome.value
+    })
+
+    expect(stages).toEqual(["prediction"])
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    await receipt.accepted
+    expect(stages).toEqual(["prediction", "acceptance"])
+
+    rerender({ currentCanon: canon(1, 1) })
+    await receipt.canonized
+    expect(stages).toEqual(["prediction", "acceptance", "canonization"])
+  })
+
+  it("reports a prediction refusal without opening later stages", () => {
+    const { result } = setup()
+    const onPrediction = vi.fn()
+    const onAcceptance = vi.fn()
+    const onCanonization = vi.fn()
+
+    let outcome: ReturnType<typeof result.current.mutate> | undefined
+    act(() => {
+      outcome = result.current.mutate(add({ amount: 1, refuseAt: 0 }), {
+        onPrediction,
+        onAcceptance,
+        onCanonization,
+      })
+    })
+
+    expect(outcome).toEqual(err({ code: "prediction-refused" }))
+    expect(onPrediction).toHaveBeenCalledWith(
+      err({ code: "prediction-refused" })
+    )
+    expect(onAcceptance).not.toHaveBeenCalled()
+    expect(onCanonization).not.toHaveBeenCalled()
+  })
+
+  it("reports an authority refusal to acceptance and canonization", async () => {
+    const { result, deliveries } = setup()
+    const onAcceptance = vi.fn()
+    const onCanonization = vi.fn()
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      const outcome = result.current.mutate(add({ amount: 1 }), {
+        onAcceptance,
+        onCanonization,
+      })
+      if (!outcome.ok) throw new Error("unexpected local refusal")
+      receipt = outcome.value
+    })
+
+    act(() => deliveries[0]?.resolve(err({ code: "prediction-refused" })))
+    await receipt.accepted
+    await receipt.canonized
+    const refusal = err({
+      kind: "domain" as const,
+      error: { code: "prediction-refused" as const },
+    })
+    expect(onAcceptance).toHaveBeenCalledWith(refusal)
+    expect(onCanonization).toHaveBeenCalledWith(refusal)
+  })
+
+  it("uses root listeners unless a mutate call overrides that stage", () => {
+    const defaultPrediction = vi.fn()
+    const overridePrediction = vi.fn()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send: createControlledSender().send,
+      refresh: useNoRefresh,
+      mutationListeners: {
+        onPrediction: defaultPrediction,
+      },
+    })
+    const { result } = renderHook(() =>
+      useCounterPredictions({ canon: canon(0, 0) })
+    )
+
+    act(() => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }), {
+        onPrediction: overridePrediction,
+      })
+    })
+
+    expect(overridePrediction).toHaveBeenCalledOnce()
+    expect(defaultPrediction).not.toHaveBeenCalled()
+
+    act(() => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    expect(defaultPrediction).toHaveBeenCalledWith(
+      err({ code: "prediction-refused" })
+    )
   })
 
   it("locally refuses after allocating an ID without recording or delivering it", () => {
@@ -411,7 +545,10 @@ describe("createPredictedRoot", () => {
   })
 
   it("cancels a replay-refused envelope that has never been sent", async () => {
-    const { result, deliveries, rerender, send } = setup()
+    const onConflict = vi.fn()
+    const { result, deliveries, rerender, send } = setup(canon(0, 0), {
+      onConflict,
+    })
     let blocked: MutationReceipt<CounterError>
     let refused: MutationReceipt<CounterError>
 
@@ -437,6 +574,9 @@ describe("createPredictedRoot", () => {
         error: { code: "prediction-refused" },
       },
     ])
+    expect(onConflict).toHaveBeenCalledWith(result.current.conflicts[0])
+    rerender({ currentCanon: canon(10, 10) })
+    expect(onConflict).toHaveBeenCalledTimes(1)
     expect(send).toHaveBeenCalledTimes(1)
 
     act(() => deliveries[0]?.resolve(ok(stamp(11))))
@@ -518,7 +658,14 @@ describe("createPredictedRoot", () => {
     // (a held Action freezes canon delivery and navigation), so the paused
     // queue's predictions revert to canon while the envelopes and receipts
     // stay pending for honest same-ID redelivery.
-    const { result, deliveries, send } = setup()
+    const recoveryCleanup = vi.fn()
+    const defaultDeliveryListener = vi.fn()
+    const onDeliveryUncertain = vi.fn(() => recoveryCleanup)
+    const { result, deliveries, send } = setup(
+      canon(0, 0),
+      { onDeliveryUncertain: defaultDeliveryListener },
+      { onDeliveryUncertain }
+    )
     let first: MutationReceipt<CounterError>
 
     act(() => {
@@ -530,6 +677,10 @@ describe("createPredictedRoot", () => {
     await waitFor(() =>
       expect(result.current.status.delivery).toBe("uncertain")
     )
+    expect(onDeliveryUncertain).toHaveBeenCalledWith({
+      retry: result.current.retryDelivery,
+    })
+    expect(defaultDeliveryListener).not.toHaveBeenCalled()
     await waitFor(() => expect(result.current.value).toBe(0))
     expect(result.current.status.pending).toBe(2)
     expect(send).toHaveBeenCalledTimes(1)
@@ -538,6 +689,9 @@ describe("createPredictedRoot", () => {
     void first!.accepted.then(marker, marker)
     await Promise.resolve()
     expect(marker).not.toHaveBeenCalled()
+
+    act(() => result.current.retryDelivery())
+    await waitFor(() => expect(recoveryCleanup).toHaveBeenCalledOnce())
   })
 
   it("retries uncertain delivery with the same envelope and mutation ID", async () => {
@@ -601,6 +755,67 @@ describe("createPredictedRoot", () => {
 
     await expect(receipt!.canonized).resolves.toEqual(
       err({ kind: "root-unmounted", outcome: "accepted" })
+    )
+  })
+})
+
+describe("createPredictedRootContext", () => {
+  it("mounts one root and its recovery listeners for every consumer", async () => {
+    const controlled = createControlledSender()
+    const onDeliveryUncertain = vi.fn()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send: controlled.send,
+      refresh: useNoRefresh,
+    })
+    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+      name: "CounterRoot",
+    })
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(CounterRoot.Provider, {
+        canon: canon(0, 0),
+        recoveryListeners: { onDeliveryUncertain },
+        children,
+      })
+
+    const { result } = renderHook(
+      () => ({
+        first: CounterRoot.useRoot(),
+        second: CounterRoot.useRoot(),
+      }),
+      { wrapper }
+    )
+
+    expect(result.current.first).toBe(result.current.second)
+
+    act(() => {
+      mutate({ current: result.current.first }, add({ amount: 1 }))
+    })
+
+    expect(result.current.first.value).toBe(1)
+    expect(result.current.second.value).toBe(1)
+    expect(controlled.send).toHaveBeenCalledTimes(1)
+
+    act(() => controlled.deliveries[0]?.reject(new Error("response lost")))
+    await waitFor(() =>
+      expect(onDeliveryUncertain).toHaveBeenCalledWith({
+        retry: result.current.first.retryDelivery,
+      })
+    )
+  })
+
+  it("fails at the consumer when no generated provider owns the root", () => {
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send: createControlledSender().send,
+      refresh: useNoRefresh,
+    })
+    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+      name: "CounterRoot",
+    })
+
+    expect(() => renderHook(() => CounterRoot.useRoot())).toThrow(
+      "CounterRoot.useRoot must be used within CounterRoot.Provider"
     )
   })
 })

@@ -85,6 +85,8 @@ export interface NextActionPredictedRootOptions<
   readonly action: NextMutationAction<Protocol>
   readonly refresh?: () => RefreshAdapter
   readonly invalidations?: PredictedRootOptions<Protocol>["invalidations"]
+  readonly mutationListeners?: PredictedRootOptions<Protocol>["mutationListeners"]
+  readonly recoveryListeners?: PredictedRootOptions<Protocol>["recoveryListeners"]
 }
 
 /**
@@ -133,6 +135,8 @@ export function createNextPredictedRoot<
           send: createNextMutationSender<Protocol>(options.action),
           refresh: options.refresh ?? useRouterRefresh,
           invalidations: options.invalidations,
+          mutationListeners: options.mutationListeners,
+          recoveryListeners: options.recoveryListeners,
         }
       : options
   return createPredictedRootWithDeliveryErrorClassifier(

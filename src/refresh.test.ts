@@ -24,6 +24,7 @@ import {
   type InvalidationAdapter,
   type InvalidationSubscription,
   type MutationEnvelope,
+  type PredictedRootRecoveryListeners,
   type RefreshAdapter,
 } from "./react"
 import { verifyRefreshContract } from "./testing"
@@ -90,6 +91,10 @@ function setupPredictedRefresh(options: {
   readonly acceptedStamp?: AcceptedStamp
   readonly invalidations?: InvalidationAdapter
   readonly request?: () => void | Promise<void>
+  readonly recoveryListeners?: PredictedRootRecoveryListeners<
+    ReturnType<typeof add>,
+    TestError
+  >
 }) {
   const request = vi.fn(options.request ?? (async () => undefined))
   const adapter: RefreshAdapter = {
@@ -108,6 +113,7 @@ function setupPredictedRefresh(options: {
     send,
     refresh: useRefresh,
     invalidations: options.invalidations,
+    recoveryListeners: options.recoveryListeners,
   })
   const rendered = renderHook(
     ({ currentCanon }: { readonly currentCanon: Canon<number> }) =>
@@ -206,6 +212,29 @@ describe("refresh incorporation", () => {
       freshness: "stalled",
       stallReason: "behind",
     })
+  })
+
+  it("owns stalled-freshness listener cleanup until the root recovers", async () => {
+    const cleanup = vi.fn()
+    const onFreshnessStalled = vi.fn(() => cleanup)
+    const { result, rerender } = setupPredictedRefresh({
+      acceptanceGraceMs: 0,
+      recoveryListeners: { onFreshnessStalled },
+    })
+
+    await flushMicrotasks()
+    await advance(1_000)
+    await flushMicrotasks()
+
+    expect(result.current.status.freshness).toBe("stalled")
+    expect(onFreshnessStalled).toHaveBeenCalledWith({
+      retry: result.current.retryRefresh,
+      reason: "behind",
+      missingAxes: [],
+    })
+
+    rerender({ currentCanon: canon(1, 1) })
+    expect(cleanup).toHaveBeenCalledOnce()
   })
 
   it("deduplicates an own-write invalidation against recorded acceptance", async () => {

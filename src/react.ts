@@ -1,14 +1,19 @@
 "use client"
 
 import {
+  createContext,
+  createElement,
   startTransition,
   useCallback,
+  useContext,
   useEffect,
+  useEffectEvent,
   useMemo,
   useOptimistic,
   useReducer,
   useRef,
   useState,
+  type ReactNode,
 } from "react"
 
 import { err, ok, type Result } from "@workspace/result"
@@ -30,10 +35,12 @@ import {
   type IncorporationStatus,
   type InvalidationAdapter,
   type RefreshAdapter,
+  type RefreshStallReason,
 } from "./refresh"
 import {
   covers,
   type AcceptedStamp,
+  type AxisId,
   type Canon,
   type RevisionVector,
 } from "./revisions"
@@ -57,6 +64,22 @@ export interface MutationReceipt<Error> {
   readonly canonized: Promise<Result<void, MutationLifecycleError<Error>>>
 }
 
+/** Observers for the three mutation stages represented by a receipt. */
+export interface MutationStageListeners<Error> {
+  /** Called immediately with the local prediction result. */
+  readonly onPrediction?: (
+    result: Result<MutationReceipt<Error>, Error>
+  ) => void
+  /** Called when the authority accepts or refuses the mutation. */
+  readonly onAcceptance?: (
+    result: Result<AcceptedStamp, MutationLifecycleError<Error>>
+  ) => void
+  /** Called when acceptance is incorporated into canon, or can no longer be. */
+  readonly onCanonization?: (
+    result: Result<void, MutationLifecycleError<Error>>
+  ) => void
+}
+
 /** A pending invocation jossed while replaying newer authoritative canon. */
 export interface ReplayConflict<Invocation, Error> {
   readonly mutationId: string
@@ -68,7 +91,8 @@ export interface ReplayConflict<Invocation, Error> {
 export interface PredictedRoot<State, Invocation, Error> {
   readonly value: State
   readonly mutate: (
-    invocation: Invocation
+    invocation: Invocation,
+    listeners?: MutationStageListeners<Error>
   ) => Result<MutationReceipt<Error>, Error>
   readonly retryDelivery: () => void
   readonly retryRefresh: () => void
@@ -84,6 +108,11 @@ export interface ObservedRoot<State> {
   readonly value: State
   readonly retryRefresh: () => void
   readonly status: IncorporationStatus
+}
+
+/** Human-readable identity used in generated provider names and missing-provider errors. */
+export interface PredictedRootContextOptions {
+  readonly name: string
 }
 
 type MutationOf<Protocol> =
@@ -152,7 +181,8 @@ export type ProtocolPredictedRoot<
   "mutate"
 > & {
   readonly mutate: <Invocation extends ProtocolInvocation<Protocol>>(
-    invocation: Invocation
+    invocation: Invocation,
+    listeners?: MutationStageListeners<ErrorForInvocation<Protocol, Invocation>>
   ) => Result<
     MutationReceipt<ErrorForInvocation<Protocol, Invocation>>,
     ErrorForInvocation<Protocol, Invocation>
@@ -196,10 +226,21 @@ export interface PredictedRootOptions<
   ) => Promise<Result<AcceptedStamp, ErrorOf<Protocol>>>
   readonly refresh: () => RefreshAdapter
   readonly invalidations?: InvalidationAdapter
+  /** Default stage observers used when a mutate call does not override a stage. */
+  readonly mutationListeners?: MutationStageListeners<ErrorOf<Protocol>>
+  /** Default root-recovery observers used when a mounted root does not override a condition. */
+  readonly recoveryListeners?: PredictedRootRecoveryListeners<
+    ProtocolInvocation<Protocol>,
+    ErrorOf<Protocol>
+  >
 }
 
 /** Latest complete authoritative canon supplied to a mounted root. */
-export interface PredictedRootInput<State> {
+export interface PredictedRootInput<
+  State,
+  Invocation = unknown,
+  Error = unknown,
+> {
   /**
    * The current complete authoritative canon. Must be **referentially stable
    * per authoritative observation** — RSC props and snapshot state naturally
@@ -208,6 +249,8 @@ export interface PredictedRootInput<State> {
    * fresh base again: an unbounded render loop.
    */
   readonly canon: Canon<State>
+  /** Root-recovery observers scoped to this mounted aggregate. */
+  readonly recoveryListeners?: PredictedRootRecoveryListeners<Invocation, Error>
 }
 
 /**
@@ -219,8 +262,150 @@ export interface PredictedRootInput<State> {
 export type PredictedRootHook<
   Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
 > = (
-  input: PredictedRootInput<StateOf<Protocol>>
+  input: PredictedRootInput<
+    StateOf<Protocol>,
+    ProtocolInvocation<Protocol>,
+    ErrorOf<Protocol>
+  >
 ) => ProtocolPredictedRoot<Protocol>
+
+/** Props accepted by a generated predicted-root provider. */
+export type PredictedRootProviderProps<
+  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
+> = Parameters<PredictedRootHook<Protocol>>[0] & {
+  readonly children: ReactNode
+}
+
+/** One mounted predicted-root provider and its context-bound consumer hook. */
+export interface PredictedRootContext<
+  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
+> {
+  readonly Provider: (props: PredictedRootProviderProps<Protocol>) => ReactNode
+  readonly useRoot: () => ProtocolPredictedRoot<Protocol>
+}
+
+/** Delivery recovery controls supplied while the queue head is uncertain. */
+export interface DeliveryRecovery {
+  readonly retry: () => void
+}
+
+/** Canon recovery facts supplied while authoritative incorporation is stalled. */
+export interface FreshnessRecovery {
+  readonly retry: () => void
+  readonly reason: RefreshStallReason | null
+  readonly missingAxes: readonly AxisId[]
+}
+
+/** Application-owned listeners for a predicted root's degraded states and conflicts. */
+export interface PredictedRootRecoveryListeners<Invocation, Error> {
+  readonly onDeliveryUncertain?: (
+    recovery: DeliveryRecovery
+  ) => void | (() => void)
+  readonly onFreshnessStalled?: (
+    recovery: FreshnessRecovery
+  ) => void | (() => void)
+  readonly onConflict?: (conflict: ReplayConflict<Invocation, Error>) => void
+}
+
+/**
+ * Creates one context-owned predicted-root lifetime for a React subtree.
+ * Calling a predicted-root hook more than once creates independent queues and
+ * receipt ledgers; this provider mounts it once and every `useRoot` consumer
+ * receives that exact root. Key the provider when one component instance can
+ * switch between logical aggregates.
+ *
+ * @param usePredictedRoot Protocol-specialized root hook to mount once.
+ * @param options Human-readable context identity for React tools and errors.
+ * @returns A provider that accepts the latest canon and a context-bound root hook.
+ */
+export function createPredictedRootContext<
+  const Protocol extends ProtocolDefinition<
+    string,
+    readonly AnyMutationDefinition[]
+  >,
+>(
+  usePredictedRoot: PredictedRootHook<Protocol>,
+  options: PredictedRootContextOptions
+): PredictedRootContext<Protocol> {
+  type Root = ProtocolPredictedRoot<Protocol>
+
+  const missingRoot = Symbol(options.name)
+  const Context = createContext<Root | typeof missingRoot>(missingRoot)
+  Context.displayName = options.name
+
+  function Provider({
+    canon,
+    recoveryListeners,
+    children,
+  }: PredictedRootProviderProps<Protocol>): ReactNode {
+    const root = usePredictedRoot({ canon, recoveryListeners })
+    return createElement(Context.Provider, { value: root }, children)
+  }
+  Provider.displayName = `${options.name}.Provider`
+
+  function useRoot(): Root {
+    const root = useContext(Context)
+    if (root === missingRoot) {
+      throw new Error(
+        `${options.name}.useRoot must be used within ${options.name}.Provider`
+      )
+    }
+    return root
+  }
+
+  return Object.freeze({ Provider, useRoot })
+}
+
+type PredictedRootRecoverySource<Invocation, Error> = Pick<
+  PredictedRoot<unknown, Invocation, Error>,
+  "status" | "conflicts" | "retryDelivery" | "retryRefresh"
+>
+
+function useRecoveryListeners<Invocation, Error>(
+  root: PredictedRootRecoverySource<Invocation, Error>,
+  listeners: PredictedRootRecoveryListeners<Invocation, Error>
+): void {
+  const enterUncertainDelivery = useEffectEvent(() =>
+    listeners.onDeliveryUncertain?.({
+      retry: root.retryDelivery,
+    })
+  )
+  const handlesUncertainDelivery = listeners.onDeliveryUncertain !== undefined
+  useEffect(() => {
+    if (!handlesUncertainDelivery || root.status.delivery !== "uncertain") {
+      return
+    }
+    return enterUncertainDelivery()
+  }, [handlesUncertainDelivery, root.retryDelivery, root.status.delivery])
+
+  const enterStalledFreshness = useEffectEvent(() =>
+    listeners.onFreshnessStalled?.({
+      retry: root.retryRefresh,
+      reason: root.status.stallReason,
+      missingAxes: root.status.missingAxes,
+    })
+  )
+  const handlesStalledFreshness = listeners.onFreshnessStalled !== undefined
+  useEffect(() => {
+    if (!handlesStalledFreshness || root.status.freshness !== "stalled") {
+      return
+    }
+    return enterStalledFreshness()
+  }, [handlesStalledFreshness, root.retryRefresh, root.status.freshness])
+
+  const surfacedConflictIds = useRef(new Set<string>())
+  const surfaceNewConflicts = useEffectEvent(() => {
+    for (const conflict of root.conflicts) {
+      if (surfacedConflictIds.current.has(conflict.mutationId)) continue
+      listeners.onConflict?.(conflict)
+      surfacedConflictIds.current.add(conflict.mutationId)
+    }
+  })
+  const handlesConflicts = listeners.onConflict !== undefined
+  useEffect(() => {
+    if (handlesConflicts) surfaceNewConflicts()
+  }, [handlesConflicts, root.conflicts])
+}
 
 /** Refresh and optional invalidation dependencies for an observed root. */
 export interface ObservedRootOptions {
@@ -364,10 +549,11 @@ function removeFromQueue(queue: string[], mutationId: string): void {
  * that stamp. Delivery is serialized in invocation order, uncertain envelopes
  * retain their original mutation ID for retry, and replay-refused predictions
  * are reported as conflicts rather than silently disappearing. Callers own the
- * refresh carrier and optional invalidation transport; the root owns
- * subscription cleanup and pending-receipt settlement on unmount.
+ * refresh carrier, optional invalidation transport, and application-owned
+ * listeners; the root owns subscription and listener cleanup plus
+ * pending-receipt settlement on unmount.
  *
- * @param options Protocol, delivery, refresh, and optional invalidation dependencies.
+ * @param options Protocol, delivery, refresh, invalidation, and listener configuration.
  * @returns A hook exposing predicted state, mutation receipts, retry controls, and status.
  */
 export function createPredictedRoot<
@@ -414,7 +600,12 @@ export function createPredictedRootWithDeliveryErrorClassifier<
 
   return function usePredictedRoot({
     canon,
-  }: PredictedRootInput<State>): ProtocolPredictedRoot<Protocol> {
+    recoveryListeners,
+  }: PredictedRootInput<
+    State,
+    Invocation,
+    Error
+  >): ProtocolPredictedRoot<Protocol> {
     const ledgerRef = useRef(new Map<string, LedgerEntry<Invocation, Error>>())
     const queueRef = useRef<string[]>([])
     const conflictsRef = useRef<ReplayConflict<Invocation, Error>[]>([])
@@ -846,7 +1037,19 @@ export function createPredictedRootWithDeliveryErrorClassifier<
     )
 
     const mutate = useCallback(
-      (invocation: Invocation): Result<MutationReceipt<Error>, Error> => {
+      (
+        invocation: Invocation,
+        listeners?: MutationStageListeners<Error>
+      ): Result<MutationReceipt<Error>, Error> => {
+        const stageListeners = {
+          onPrediction:
+            listeners?.onPrediction ?? options.mutationListeners?.onPrediction,
+          onAcceptance:
+            listeners?.onAcceptance ?? options.mutationListeners?.onAcceptance,
+          onCanonization:
+            listeners?.onCanonization ??
+            options.mutationListeners?.onCanonization,
+        }
         const mutationId = globalThis.crypto.randomUUID()
         const envelope = freezeEnvelope(
           options.protocol.id,
@@ -858,7 +1061,11 @@ export function createPredictedRootWithDeliveryErrorClassifier<
           runtimeInvocation(envelope.invocation).args,
           mutationContext(envelope.mutationId)
         )
-        if (!predicted.ok) return err(predicted.error)
+        if (!predicted.ok) {
+          const result = err<Error>(predicted.error)
+          stageListeners.onPrediction?.(result)
+          return result
+        }
 
         const entry: LedgerEntry<Invocation, Error> = {
           envelope,
@@ -881,11 +1088,22 @@ export function createPredictedRootWithDeliveryErrorClassifier<
           setPausedIds((current) => new Set(current).add(mutationId))
         }
 
-        return ok({
+        const receipt: MutationReceipt<Error> = {
           id: mutationId,
           accepted: entry.accepted.promise,
           canonized: entry.canonized.promise,
-        })
+        }
+        const result = ok(receipt)
+
+        if (stageListeners.onAcceptance) {
+          void receipt.accepted.then(stageListeners.onAcceptance)
+        }
+        if (stageListeners.onCanonization) {
+          void receipt.canonized.then(stageListeners.onCanonization)
+        }
+        stageListeners.onPrediction?.(result)
+
+        return result
       },
       [frame.value, openDeliveryAction]
     )
@@ -924,7 +1142,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
       ? ledgerRef.current.get(queueHead)?.delivery
       : undefined
 
-    return {
+    const root: ProtocolPredictedRoot<Protocol> = {
       value: frame.value,
       mutate: mutate as ProtocolPredictedRoot<Protocol>["mutate"],
       retryDelivery,
@@ -943,6 +1161,17 @@ export function createPredictedRootWithDeliveryErrorClassifier<
       },
       conflicts: conflictsRef.current,
     }
+    useRecoveryListeners(root, {
+      onDeliveryUncertain:
+        recoveryListeners?.onDeliveryUncertain ??
+        options.recoveryListeners?.onDeliveryUncertain,
+      onFreshnessStalled:
+        recoveryListeners?.onFreshnessStalled ??
+        options.recoveryListeners?.onFreshnessStalled,
+      onConflict:
+        recoveryListeners?.onConflict ?? options.recoveryListeners?.onConflict,
+    })
+    return root
   }
 }
 
@@ -954,7 +1183,9 @@ export function createPredictedRootWithDeliveryErrorClassifier<
 export function createObservedRoot(options: ObservedRootOptions) {
   return function useObservedRoot<State>({
     canon,
-  }: PredictedRootInput<State>): ObservedRoot<State> {
+  }: {
+    readonly canon: Canon<State>
+  }): ObservedRoot<State> {
     const useRefresh = options.refresh
     const refresh = useRefresh()
     const incorporation = useIncorporation(

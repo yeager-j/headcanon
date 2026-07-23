@@ -67,27 +67,58 @@ export const applyNotesMutationAction = createNextMutationAction({
 "use client"
 
 import { createNextPredictedRoot } from "@workspace/headcanon/next/client"
+import { createPredictedRootContext } from "@workspace/headcanon/react"
 
-export const useNotePredictions = createNextPredictedRoot({
+const useNotePredictions = createNextPredictedRoot({
   protocol: notesProtocol,
   action: applyNotesMutationAction,
   invalidations: axisInvalidations, // omit when this client has no realtime
+  recoveryListeners: {
+    onDeliveryUncertain({ retry }) {
+      return showReconnectNotice({ retry })
+    },
+    onFreshnessStalled({ retry, reason, missingAxes }) {
+      return showRefreshNotice({ retry, reason, missingAxes })
+    },
+    onConflict(conflict) {
+      reportRolledBackPrediction(conflict)
+    },
+  },
+})
+
+export const NoteRoot = createPredictedRootContext(useNotePredictions, {
+  name: "NoteRoot",
 })
 ```
 
-### 4. Mount the root over the route's canon and mutate
+### 4. Mount one root over the route's canon and mutate from descendants
 
 ```tsx
-function NoteTitle({ canon }: { canon: Canon<NotesState> }) {
-  const { value, mutate } = useNotePredictions({ canon })
+function NoteSurface({ canon }: { canon: Canon<NotesState> }) {
+  return (
+    <NoteRoot.Provider canon={canon}>
+      <NoteTitle />
+    </NoteRoot.Provider>
+  )
+}
+
+function NoteTitle() {
+  const { value, mutate } = NoteRoot.useRoot()
 
   const rename = (title: string) => {
-    const result = mutate(renameNote({ noteId: value.focused, title }))
-    if (!result.ok) {
-      toast.error(copyFor(result.error)) // refused by the local predictor
-      return
-    }
-    return result.value
+    return mutate(renameNote({ noteId: value.focused, title }), {
+      onPrediction(result) {
+        if (!result.ok) toast.error(copyFor(result.error))
+      },
+      onAcceptance(result) {
+        if (!result.ok && result.error.kind === "domain") {
+          toast.error(copyFor(result.error.error))
+        }
+      },
+      onCanonization(result) {
+        if (result.ok) analytics.track("note-canonized")
+      },
+    })
   }
 
   // `value` shows a successful rename immediately. The server validates the
@@ -98,11 +129,11 @@ function NoteTitle({ canon }: { canon: Canon<NotesState> }) {
 ### 5. Await only the milestones the caller needs
 
 ```ts
-const receipt = rename("Chapter Two")
-if (!receipt) return
+const result = rename("Chapter Two")
+if (!result.ok) return
 
-const accepted = await receipt.accepted // authority committed an AcceptedStamp
-const canonized = await receipt.canonized // this canon now covers that stamp
+const accepted = await result.value.accepted // authority committed an AcceptedStamp
+const canonized = await result.value.canonized // this canon now covers that stamp
 ```
 
 That configuration supplies one ordered delivery queue with durable mutation
@@ -176,11 +207,27 @@ complete `Canon<State>`. Its reducer-form
 and treats an accepted mutation as identity as soon as canon covers its complete
 revision vector.
 
+Each call to that hook mounts an independent root with its own queue, receipt
+ledger, and subscription lifetime. `createPredictedRootContext` turns one
+generated hook into a provider plus `useRoot` consumer hook so every descendant
+shares the same mounted root. The provider's lifetime is the root's lifetime;
+key it by an application-owned aggregate identity if one component instance can
+switch between logical aggregates. Direct hook mounting remains useful for
+single-owner surfaces and tests.
+
 Each successful local prediction returns a `MutationReceipt` with independent
 `accepted` and `canonized` promises. Both promises resolve with `Result` and never
 reject. The mounted root owns one ordered delivery queue, preserves uncertain
 envelopes, josses replay-refused predictions after commit, and resolves unsettled
 receipts if the root unmounts.
+
+`mutate` accepts optional `onPrediction`, `onAcceptance`, and `onCanonization`
+listeners. Each listener receives the same `Result` represented by that stage,
+so the application chooses its own feedback, navigation, and telemetry policy
+without collapsing the lifecycle into generic success and error callbacks.
+Factory-level listeners provide defaults; a mutate call overrides only the
+stages it supplies. Delivery uncertainty remains root status because it is a
+queue condition, not a terminal mutation stage.
 
 When delivery becomes uncertain, `retryDelivery()` redelivers the queue head
 with the exact same envelope and mutation ID. Automatic reconnect policy remains
@@ -195,6 +242,15 @@ second. Two completed uncovered attempts produce a typed `behind`,
 mounted. `retryRefresh()` and genuinely fresher invalidations reset that budget.
 Promise-returning adapters complete from their promise; void carriers such as
 `router.refresh()` consume an attempt only when the root receives the next canon.
+
+`recoveryListeners` map uncertain delivery, stalled freshness, and newly recorded
+replay conflicts onto application-owned effects. Factory listeners provide
+defaults, while a mounted root may override individual conditions for
+aggregate-specific identity or copy. Degraded-state listeners may return cleanup
+that runs on recovery or unmount; conflict listeners run once per mutation ID
+during the root's mounted lifetime. Headcanon decides when those conditions are
+active and supplies retry controls; the application still decides whether to
+show a toast, banner, reconnect control, telemetry event, or nothing.
 
 `createObservedRoot` is the watch-only specialization. It exposes the canonical
 value, freshness and invalidation status, and `retryRefresh()` without a mutation
