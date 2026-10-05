@@ -168,28 +168,42 @@ context to enforce them.
 
 ## Protocol core
 
-- **Revision vectors.** `AxisId`, branded `Revision` values, `RevisionVector`,
-  `Canon<State>`, and `AcceptedStamp` model independently advancing streams of
-  authoritative state. Their constructors reject malformed external values with
-  typed `Result` failures.
-- **Canon construction.** `defineCanon({ value, revisions })` brands a loader's
-  axis-namespace keys and raw revision integers into a validated, frozen
-  `Canon<State>` for the uncached read path — the counterpart of
-  `tagVersionedBase` for `"use cache"` loaders. It throws on an invalid revision
-  vector, since a loader emitting a malformed coordinate is a data-integrity
-  fault rather than an expected boundary.
-- **Coverage.** `covers(canon, stamp)` applies the product order: canon covers an
-  accepted stamp only when every stamped axis exists at the accepted revision or
-  later. Lifecycle code can use that fact to determine when a headcanon has been
-  canonized.
+- **Revision vectors.** `AxisId` (any non-empty string), branded `Revision`
+  values, `RevisionVector`, `Canon<State>`, and `AcceptedStamp` model
+  independently advancing streams of authoritative state. `RevisionVector` is
+  opaque: read it with `revisionAt` and `revisionEntries`, never by indexing,
+  because axis strings may collide with `Object.prototype` members. The parsers
+  `revision`, `revisionVector`, and `acceptedStamp` reject malformed external
+  values with typed `Result` failures; an outer parser nests an inner parser's
+  error under `error`. An accepted stamp comes only from a stamp accumulator
+  inside authority or from the `acceptedStamp` parser at a wire or storage
+  boundary.
+- **Canon construction.** `defineCanon({ value, revisions })` parses a loader's
+  raw axis keys and revision integers into a validated, frozen `Canon<State>`
+  for the uncached read path. `tagVersionedBase` in `headcanon/next/server`
+  runs the same parse for `"use cache"` loaders and also tags the cache entry.
+  Both throw on an invalid revision vector, since a loader emitting a malformed
+  coordinate is a data-integrity fault rather than an expected boundary.
+- **Coverage.** `covers(canon.revisions, stamp.revisions)` applies the product
+  order: canon covers an accepted stamp only when every stamped axis exists at
+  the accepted revision or later. Lifecycle code can use that fact to determine
+  when a headcanon has been canonized.
 - **Typed protocols.** `defineMutation` creates a callable invocation factory that
-  retains its stable wire name, Standard Schema parser, and pure predictor.
-  `defineProtocol` freezes a name-indexed registry, infers its invocation union,
-  and rejects duplicate stable names.
+  retains its stable wire name, Standard Schema parser, and pure predictor, and
+  keeps a deeply frozen copy of each invocation's arguments. Arguments are in
+  parsed form: the factory takes the schema's output, the predictor and the
+  server command receive that same value, and authority parses it again and
+  refuses it as `invalid-arguments` unless parsing leaves it unchanged. A schema
+  whose output is not a valid input is a compile error. `defineProtocol` freezes
+  the mutation list, infers its invocation union, requires every mutation to
+  predict one state type (for inline tuples and predeclared arrays alike), and
+  rejects duplicate stable names.
 - **Canonical invocation identity.** `canonicalInvocation` combines a protocol ID
   and invocation into RFC 8785 canonical JSON, exact UTF-8 bytes, and a lowercase
-  SHA-256 fingerprint. It rejects values outside the supported JSON domain before
-  canonicalization and isolates valid input from inherited `toJSON` behavior.
+  SHA-256 fingerprint, and returns the isolated invocation that identity
+  describes; authority passes those arguments to commands. It rejects values
+  outside the supported JSON domain before canonicalization and isolates valid
+  input from inherited `toJSON` behavior.
 - **Authority execution.** `createNextMutationAction` strictly admits envelopes,
   reparses arguments, and selects one exhaustive definition-keyed command before
   entering receipt authority. The authority adapter owns receipt scope,
@@ -197,8 +211,14 @@ context to enforce them.
   commands own application admission, execution, and repeat-safe accepted
   projections.
 - **Invalidation vocabulary.** The framework-independent entry defines singleton
-  axis invalidations, subscribers, and publishers without pulling React or Next
-  into the protocol graph.
+  axis invalidations, subscribers, publishers, and the one meaning of each
+  `InvalidationStatus` (with `isDegradedInvalidationStatus` for `disabled`,
+  `reauthorizing`, and `unavailable`) without pulling React or Next into the
+  protocol graph. An adapter's `initialStatus` is read at subscribe time.
+  `createLazyInvalidationAdapter` wraps a transport that is created
+  asynchronously, for example after a dynamic import of the Ably SDK: it
+  reports `reauthorizing` until the transport is ready and then forwards the
+  transport's own status.
 - **Shared-entry safety.** The dependency gate walks everything reachable from the
   protocol and React client entries and rejects Node built-ins, server-only
   modules, database and server-framework dependencies, and environment or secret
@@ -275,8 +295,10 @@ binding runs `unstable_rethrow` before ordinary thrown requests become uncertain
 delivery. The same entry owns `useRouterRefresh`; snapshot refresh remains in
 `headcanon/react`.
 
-The server binding derives one bounded SHA-256 cache tag per axis,
-`tagVersionedBase` fails closed above Next's 128-tag ceiling, and
+The server binding derives one bounded SHA-256 cache tag per axis (hashed the
+same way as the Ably channel name, so `axisCacheTag` is async),
+`tagVersionedBase` parses a `"use cache"` loader's `{ value, revisions }` into a
+canon and fails closed above Next's 128-tag ceiling, and
 `createNextMutationAction` finalizes accepted stamps with `updateTag`, one
 shared-event invalidation publication, and server `refresh()`. The separately
 named external-commit helpers preserve the Server Action versus Route Handler

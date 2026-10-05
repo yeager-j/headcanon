@@ -1,7 +1,9 @@
 import canonicalize from "canonicalize"
 import { err, ok, type Result } from "serializable-result"
 
+import { plainRecordViolation } from "./admission"
 import type { MutationInvocation } from "./protocol"
+import { sha256Hex } from "./sha256"
 
 /**
  * The exact receipt identity material for one parsed protocol invocation.
@@ -18,34 +20,36 @@ export interface CanonicalInvocation {
   readonly sha256: string
 }
 
-/** A parsed invocation together with the exact bytes used for receipt identity. */
+/**
+ * An invocation's receipt identity together with the exact value it describes.
+ *
+ * `invocation` is an isolated copy of the validated input: null-prototype
+ * objects and `toJSON`-free arrays holding the same data. Authority hands its
+ * `args` to commands, so what was hashed is what runs.
+ */
 export interface PreparedCanonicalInvocation<Name extends string, Args> {
   readonly canonical: CanonicalInvocation
   readonly invocation: MutationInvocation<Name, Args>
 }
 
-/** A fail-closed input or hashing failure while preparing receipt identity. */
-export type CanonicalInvocationError =
-  | {
-      readonly code: "invalid-json-value"
-      readonly reason:
-        | "undefined"
-        | "function"
-        | "symbol"
-        | "bigint"
-        | "non-finite-number"
-        | "cyclic"
-        | "class-instance"
-        | "invalid-unicode"
-        | "symbol-key"
-        | "accessor-property"
-        | "non-enumerable-property"
-        | "unsupported-array-property"
-      readonly path: readonly (string | number)[]
-    }
-  | {
-      readonly code: "hash-unavailable" | "hash-failed"
-    }
+/** A fail-closed input failure while preparing receipt identity. */
+export type CanonicalInvocationError = {
+  readonly code: "invalid-json-value"
+  readonly reason:
+    | "undefined"
+    | "function"
+    | "symbol"
+    | "bigint"
+    | "non-finite-number"
+    | "cyclic"
+    | "class-instance"
+    | "invalid-unicode"
+    | "symbol-key"
+    | "accessor-property"
+    | "non-enumerable-property"
+    | "unsupported-array-property"
+  readonly path: readonly (string | number)[]
+}
 
 function hasValidUnicode(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
@@ -63,12 +67,9 @@ function hasValidUnicode(value: string): boolean {
 }
 
 function invalid(
-  reason: Extract<
-    CanonicalInvocationError,
-    { code: "invalid-json-value" }
-  >["reason"],
+  reason: CanonicalInvocationError["reason"],
   path: readonly (string | number)[]
-): Extract<CanonicalInvocationError, { code: "invalid-json-value" }> {
+): CanonicalInvocationError {
   return { code: "invalid-json-value", reason, path }
 }
 
@@ -95,11 +96,7 @@ function validateJsonValue(
   if (ancestors.has(value)) return invalid("cyclic", path)
 
   const isArray = Array.isArray(value)
-  const prototype = Object.getPrototypeOf(value)
-  if (
-    (isArray && prototype !== Array.prototype) ||
-    (!isArray && prototype !== Object.prototype && prototype !== null)
-  ) {
+  if (isArray && Object.getPrototypeOf(value) !== Array.prototype) {
     return invalid("class-instance", path)
   }
 
@@ -138,21 +135,24 @@ function validateJsonValue(
       return undefined
     }
 
-    for (const key of Reflect.ownKeys(value)) {
-      if (typeof key === "symbol") return invalid("symbol-key", path)
-      if (!hasValidUnicode(key))
-        return invalid("invalid-unicode", [...path, key])
+    const violation = plainRecordViolation(value)
+    if (violation?.reason === "not-plain-object") {
+      return invalid("class-instance", path)
+    }
+    if (violation) {
+      return invalid(
+        violation.reason,
+        "key" in violation ? [...path, violation.key] : path
+      )
+    }
 
-      const descriptor = Object.getOwnPropertyDescriptor(value, key)
-      if (!descriptor?.enumerable) {
-        return invalid("non-enumerable-property", [...path, key])
-      }
-      if (!("value" in descriptor)) {
-        return invalid("accessor-property", [...path, key])
+    for (const [key, propertyValue] of Object.entries(value)) {
+      if (!hasValidUnicode(key)) {
+        return invalid("invalid-unicode", [...path, key])
       }
 
       const propertyError = validateJsonValue(
-        descriptor.value,
+        propertyValue,
         [...path, key],
         ancestors
       )
@@ -199,10 +199,35 @@ function isolateFromInheritedToJson(value: unknown): unknown {
   return isolated
 }
 
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    ""
-  )
+function serializeCanonically(
+  value: unknown
+): Result<
+  { readonly json: string; readonly isolated: unknown },
+  CanonicalInvocationError
+> {
+  const validationError = validateJsonValue(value, [], new WeakSet())
+  if (validationError) return err(validationError)
+
+  const isolated = isolateFromInheritedToJson(value)
+  const json = canonicalize(isolated)
+  if (json === undefined) {
+    throw new Error("Validated canonical invocation did not serialize")
+  }
+  return ok({ json, isolated })
+}
+
+/**
+ * Serializes one value as RFC 8785 canonical JSON after the same validation
+ * receipt identity uses, so two values compare equal exactly when their JSON
+ * data is equal.
+ * @param value Candidate JSON value.
+ * @returns Canonical JSON, or the first unsupported value.
+ */
+export function canonicalJson(
+  value: unknown
+): Result<string, CanonicalInvocationError> {
+  const serialized = serializeCanonically(value)
+  return serialized.ok ? ok(serialized.value.json) : serialized
 }
 
 /**
@@ -212,62 +237,31 @@ function toHex(bytes: Uint8Array): string {
  * isolated from inherited `toJSON` behavior, serialized with RFC 8785 ordering,
  * and hashed from the exact UTF-8 bytes. Consumers should compare `bytes` when
  * proving duplicate-delivery identity; `sha256` is a useful indexed lookup and
- * diagnostic fingerprint, but is not the equality proof. The operation has no
- * persistence or authority side effect and is safe to run before claiming a
- * receipt.
+ * diagnostic fingerprint, but is not the equality proof. The result also
+ * carries the isolated invocation the identity describes, which authority
+ * passes to commands. The operation has no persistence or authority side
+ * effect and is safe to run before claiming a receipt.
  *
  * @param protocolId Stable protocol identifier included in the identity material.
  * @param invocation Parsed invocation whose name and arguments form the request intent.
- * @returns A promise for canonical identity, or a typed failure for unsupported JSON or unavailable hashing.
+ * @returns A promise for the canonical identity and isolated invocation, or a typed failure for unsupported JSON input.
  */
-export async function prepareCanonicalInvocation<Name extends string, Args>(
+export async function canonicalInvocation<Name extends string, Args>(
   protocolId: string,
   invocation: MutationInvocation<Name, Args>
 ): Promise<
   Result<PreparedCanonicalInvocation<Name, Args>, CanonicalInvocationError>
 > {
-  const envelope = { protocol: protocolId, invocation }
-  const validationError = validateJsonValue(envelope, [], new WeakSet())
-  if (validationError) return err(validationError)
+  const serialized = serializeCanonically({ protocol: protocolId, invocation })
+  if (!serialized.ok) return serialized
 
-  const isolatedEnvelope = isolateFromInheritedToJson(envelope) as {
-    readonly protocol: string
+  const { json } = serialized.value
+  const isolatedEnvelope = serialized.value.isolated as {
     readonly invocation: MutationInvocation<Name, Args>
   }
-  const json = canonicalize(isolatedEnvelope)
-  if (json === undefined) {
-    throw new Error("Validated canonical invocation did not serialize")
-  }
-
   const bytes = new TextEncoder().encode(json)
-  if (!globalThis.crypto?.subtle) return err({ code: "hash-unavailable" })
-
-  try {
-    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes)
-    return ok({
-      canonical: {
-        json,
-        bytes,
-        sha256: toHex(new Uint8Array(digest)),
-      },
-      invocation: isolatedEnvelope.invocation,
-    })
-  } catch {
-    return err({ code: "hash-failed" })
-  }
-}
-
-/**
- * Canonicalizes a protocol invocation and computes its exact SHA-256 receipt identity.
- *
- * @param protocolId Stable protocol identifier included in the identity material.
- * @param invocation Serializable invocation to validate and canonicalize.
- * @returns A promise for the canonical invocation, or a typed failure for unsupported input or hashing failure.
- */
-export async function canonicalInvocation<Name extends string, Args>(
-  protocolId: string,
-  invocation: MutationInvocation<Name, Args>
-): Promise<Result<CanonicalInvocation, CanonicalInvocationError>> {
-  const prepared = await prepareCanonicalInvocation(protocolId, invocation)
-  return prepared.ok ? ok(prepared.value.canonical) : prepared
+  return ok({
+    canonical: { json, bytes, sha256: await sha256Hex(bytes) },
+    invocation: isolatedEnvelope.invocation,
+  })
 }

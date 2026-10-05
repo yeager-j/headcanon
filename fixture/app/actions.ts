@@ -4,7 +4,6 @@ import { addItem, fixtureProtocol, ITEMS_AXIS } from "@/lib/protocol"
 import { authority } from "@/lib/store"
 import {
   acceptedStamp,
-  revisionVector,
   type AcceptedStamp,
   type MutationEnvelope,
 } from "headcanon"
@@ -47,11 +46,12 @@ export async function applyFixtureMutation(
 
   authority.items.push(text)
   authority.revision += 1
-  const vector = revisionVector({ [ITEMS_AXIS]: authority.revision })
-  if (!vector.ok) throw new Error("fixture authority minted an invalid vector")
+  const stamp = acceptedStamp({
+    revisions: { [ITEMS_AXIS]: authority.revision },
+  })
+  if (!stamp.ok) throw new Error("fixture authority minted an invalid stamp")
 
-  const stamp = acceptedStamp(vector.value)
-  authority.receipts.set(envelope.mutationId, stamp)
+  authority.receipts.set(envelope.mutationId, stamp.value)
   refresh()
-  return ok(stamp)
+  return ok(stamp.value)
 }

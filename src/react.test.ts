@@ -15,13 +15,13 @@ import {
   type AcceptedStamp,
   type Canon,
   type MutationContext,
+  type MutationEnvelope,
 } from "./index"
 import {
   createPredictedRoot,
   createPredictedRootContext,
   RetryableDeliveryError,
   useSnapshotRefresh,
-  type MutationEnvelope,
   type MutationReceipt,
   type PredictedRootOptions,
   type PredictedRootRecoveryListeners,
@@ -79,7 +79,9 @@ function canon(value: number, revision: number): Canon<number> {
 }
 
 function stamp(revision: number): AcceptedStamp {
-  return acceptedStamp(vector(revision))
+  const parsed = acceptedStamp({ revisions: { [counterAxis]: revision } })
+  if (!parsed.ok) throw new Error("Invalid test stamp")
+  return parsed.value
 }
 
 interface ControlledDelivery {
@@ -516,16 +518,13 @@ describe("createPredictedRoot", () => {
     act(() => {
       receipt = mutate(result, add({ amount: 1 }))
     })
-    const acceptedVector = revisionVector({
-      [counterAxis]: 1,
-      [otherAxis]: 2,
+    const accepted = acceptedStamp({
+      revisions: { [counterAxis]: 1, [otherAxis]: 2 },
     })
-    if (!acceptedVector.ok) throw new Error("Invalid accepted test vector")
+    if (!accepted.ok) throw new Error("Invalid accepted test stamp")
 
-    act(() => deliveries[0]?.resolve(ok(acceptedStamp(acceptedVector.value))))
-    await expect(receipt!.accepted).resolves.toEqual(
-      ok(acceptedStamp(acceptedVector.value))
-    )
+    act(() => deliveries[0]?.resolve(ok(accepted.value)))
+    await expect(receipt!.accepted).resolves.toEqual(ok(accepted.value))
 
     rerender({
       currentCanon: {

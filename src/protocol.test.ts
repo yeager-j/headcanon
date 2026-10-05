@@ -2,6 +2,7 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { ok, type Result } from "serializable-result"
 import { describe, expect, expectTypeOf, it } from "vitest"
 
+import { prepareMutationRequest } from "./authority"
 import {
   defineMutation,
   defineProtocol,
@@ -9,6 +10,7 @@ import {
   type MutationInvocation,
   type ProtocolInvocation,
 } from "./index"
+import { findMutation } from "./protocol"
 
 type AmountArgs = { readonly amount: number }
 
@@ -91,8 +93,94 @@ function rejectInvalidProtocolsAtCompileTime() {
     // @ts-expect-error — every mutation in one root shares its state type.
     mutations: [increment, append],
   })
+
+  const mixedArray = [increment, append]
+  defineProtocol({
+    id: "test.mixed-array.v1",
+    // @ts-expect-error — a predeclared, non-const array gets the same check.
+    mutations: mixedArray,
+  })
+
+  const mixedReadonlyArray: readonly (typeof increment | typeof append)[] = [
+    increment,
+    append,
+  ]
+  defineProtocol({
+    id: "test.mixed-readonly-array.v1",
+    // @ts-expect-error — so does a readonly array of a mutation union.
+    mutations: mixedReadonlyArray,
+  })
+
+  const numberToString: StandardSchemaV1<number, string> = {
+    "~standard": {
+      version: 1,
+      vendor: "headcanon-test",
+      validate: (value) => ({ value: String(value) }),
+    },
+  }
+  defineMutation({
+    name: "counter.transformed",
+    // @ts-expect-error — parsed output must be a valid input to re-parse.
+    args: numberToString,
+    predict: (state: number) => ok(state),
+  })
 }
 void rejectInvalidProtocolsAtCompileTime
+
+/** Appends "!" on every parse: output equals input type, but not its value. */
+const shoutSchema: StandardSchemaV1<string, string> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon-test",
+    validate: (value) =>
+      typeof value === "string"
+        ? { value: `${value}!` }
+        : { issues: [{ message: "Expected text" }] },
+  },
+}
+
+type StepInput = { readonly step?: number }
+type StepOutput = { readonly step: number }
+
+/** Fills a default: input and output types differ, output is valid input. */
+const stepSchema: StandardSchemaV1<StepInput, StepOutput> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon-test",
+    validate(value) {
+      if (typeof value !== "object" || value === null) {
+        return { issues: [{ message: "Expected an object" }] }
+      }
+      const step = (value as StepInput).step ?? 1
+      return typeof step === "number"
+        ? { value: { step } }
+        : { issues: [{ message: "Expected a numeric step" }] }
+    },
+  },
+}
+
+const shout = defineMutation({
+  name: "text.shout",
+  args: shoutSchema,
+  predict: (state: string, text) => ok(`${state}${text}`),
+})
+
+const step = defineMutation({
+  name: "counter.step",
+  args: stepSchema,
+  predict: (state: number, args) => ok(state + args.step),
+})
+
+function envelope(invocation: {
+  readonly name: string
+  readonly args: unknown
+}) {
+  return {
+    protocol: "test.parsed-form.v1",
+    mutationId: "00000000-0000-4000-8000-000000000000",
+    invocation,
+  }
+}
 
 describe("defineMutation", () => {
   it("returns a typed invocation factory with its protocol metadata", () => {
@@ -122,6 +210,38 @@ describe("defineMutation", () => {
     increment({ amount: "2" })
   })
 
+  it("takes parsed (output) arguments when input and output types differ", () => {
+    expectTypeOf(step).parameter(0).toEqualTypeOf<StepOutput>()
+    // @ts-expect-error — the default is filled by parsing, so callers pass it.
+    step({})
+    expect(
+      step.predict(1, step({ step: 2 }).args, { mutationId: "m" })
+    ).toEqual(ok(3))
+  })
+
+  it("keeps a deeply frozen copy of the arguments", () => {
+    const args = { amount: 2 }
+    const invocation = increment(args)
+    args.amount = 3
+
+    expect(invocation.args).toEqual({ amount: 2 })
+    expect(Object.isFrozen(invocation)).toBe(true)
+    expect(Object.isFrozen(invocation.args)).toBe(true)
+  })
+
+  it("reads the definition once, so later changes cannot alter the wire name", () => {
+    const definition = {
+      name: "counter.first",
+      args: amountSchema,
+      predict: (state: number) => ok(state),
+    }
+    const stable = defineMutation(definition)
+    ;(definition as { name: string }).name = "counter.second"
+
+    expect(stable.name).toBe("counter.first")
+    expect(stable({ amount: 1 }).name).toBe("counter.first")
+  })
+
   it("correlates predictor and authority errors to the invocation", () => {
     const invocation = correlated({ amount: 1 })
 
@@ -146,14 +266,28 @@ describe("defineProtocol", () => {
     })
 
     expect(protocol.id).toBe("test.counter.v1")
-    expect(protocol.mutationsByName["counter.increment"]).toBe(increment)
-    expect(protocol.mutationsByName["counter.reset"]).toBe(reset)
-    expect(Object.isFrozen(protocol.mutationsByName)).toBe(true)
+    expect(protocol.mutations).toEqual([increment, reset])
+    expect(Object.isFrozen(protocol.mutations)).toBe(true)
+    expect(findMutation(protocol, "counter.increment")).toBe(increment)
+    expect(findMutation(protocol, "counter.reset")).toBe(reset)
+    for (const inherited of ["__proto__", "toString", "constructor", 1]) {
+      expect(findMutation(protocol, inherited)).toBeUndefined()
+    }
 
     expectTypeOf<ProtocolInvocation<typeof protocol>>().toEqualTypeOf<
       | MutationInvocation<"counter.increment", AmountArgs>
       | MutationInvocation<"counter.reset", AmountArgs>
     >()
+  })
+
+  it("accepts a predeclared array whose mutations share one state", () => {
+    const sameState = [increment, reset]
+    const protocol = defineProtocol({
+      id: "test.array.v1",
+      mutations: sameState,
+    })
+
+    expect(findMutation(protocol, "counter.reset")).toBe(reset)
   })
 
   it("rejects duplicate stable names", () => {
@@ -184,5 +318,57 @@ describe("defineProtocol", () => {
         mutations: [helper as unknown as typeof increment],
       })
     ).toThrowError("Invalid mutation definition: helper")
+  })
+})
+
+describe("parsed-form arguments at the authority", () => {
+  const protocol = defineProtocol({
+    id: "test.parsed-form.v1",
+    mutations: [shout],
+  })
+  const stepProtocol = defineProtocol({
+    id: "test.parsed-form.v1",
+    mutations: [step],
+  })
+
+  it("refuses arguments a non-idempotent schema changes", async () => {
+    const invocation = shout("hey")
+    expect(shout.predict("", invocation.args, { mutationId: "m" })).toEqual(
+      ok("hey")
+    )
+
+    await expect(
+      prepareMutationRequest(protocol, envelope(invocation))
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "invalid-arguments",
+        mutation: "text.shout",
+        issues: [
+          {
+            message:
+              "Arguments must arrive in parsed form: the mutation's argument schema changed them",
+          },
+        ],
+      },
+    })
+  })
+
+  it("admits parsed-form arguments when input and output types differ", async () => {
+    const prepared = await prepareMutationRequest(
+      stepProtocol,
+      envelope(step({ step: 2 }))
+    )
+
+    expect(prepared.ok && prepared.value.args).toEqual({ step: 2 })
+  })
+
+  it("refuses unparsed wire input that parsing would fill in", async () => {
+    const prepared = await prepareMutationRequest(
+      stepProtocol,
+      envelope({ name: "counter.step", args: {} })
+    )
+
+    expect(prepared.ok ? null : prepared.error.code).toBe("invalid-arguments")
   })
 })

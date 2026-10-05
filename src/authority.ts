@@ -1,20 +1,22 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { err, ok, type Result } from "serializable-result"
 
+import { hasExactKeys, isPlainRecord } from "./admission"
 import {
-  prepareCanonicalInvocation,
+  canonicalInvocation,
+  canonicalJson,
   type CanonicalInvocation,
   type CanonicalInvocationError,
 } from "./canonical-invocation"
-import type {
-  AnyMutationDefinition,
-  MutationInvocation,
-  ProtocolDefinition,
+import {
+  findMutation,
+  type AnyMutationDefinition,
+  type ProtocolDefinition,
 } from "./protocol"
 import {
-  acceptedStamp,
-  defineCoordinate,
   revision,
+  revisionVectorFrom,
+  stampRecordedRevisions,
   type AcceptedStamp,
   type AxisId,
   type Revision,
@@ -65,13 +67,7 @@ export function createStampAccumulator(): ReadableStampAccumulator {
       revisions.set(axis, parsedRevision.value)
     },
     accepted() {
-      // A plain object built through `defineCoordinate` — an accepted stamp
-      // rides a Server Action response, so it must survive React's serializer.
-      const vector = {} as Record<AxisId, Revision>
-      for (const [axis, stampedRevision] of revisions) {
-        defineCoordinate(vector, axis, stampedRevision)
-      }
-      return acceptedStamp(Object.freeze(vector))
+      return stampRecordedRevisions(revisionVectorFrom(revisions))
     },
   }
 }
@@ -166,9 +162,9 @@ export type MutationExecutorError =
   | MutationAuthorityAdapterError
 
 interface ParsedEnvelope {
-  readonly protocol: string
   readonly mutationId: string
-  readonly invocation: MutationInvocation<string, unknown>
+  readonly definition: AnyMutationDefinition
+  readonly args: unknown
 }
 
 /** A strictly parsed, canonical request which has not touched receipt authority. */
@@ -180,45 +176,20 @@ export interface PreparedMutationRequest {
   readonly canonical: CanonicalInvocation
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false
-  }
-
-  const prototype = Object.getPrototypeOf(value)
-  if (prototype !== Object.prototype && prototype !== null) return false
-
-  return Reflect.ownKeys(value).every((key) => {
-    if (typeof key === "symbol") return false
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    return descriptor?.enumerable === true && "value" in descriptor
-  })
-}
-
-function hasExactly(value: Record<string, unknown>, keys: readonly string[]) {
-  const actual = Object.keys(value).sort()
-  const expected = [...keys].sort()
-  return (
-    actual.length === expected.length &&
-    actual.every((key, index) => key === expected[index])
-  )
-}
-
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function parseEnvelope(
   value: unknown,
-  protocolId: string,
-  mutationNames: ReadonlySet<string>
+  protocol: ProtocolDefinition<string, readonly AnyMutationDefinition[]>
 ): Result<ParsedEnvelope, MutationExecutorError> {
   if (!isPlainRecord(value)) {
     return err({ code: "invalid-envelope", reason: "not-plain-object" })
   }
-  if (!hasExactly(value, ["protocol", "mutationId", "invocation"])) {
+  if (!hasExactKeys(value, ["protocol", "mutationId", "invocation"])) {
     return err({ code: "invalid-envelope", reason: "unexpected-fields" })
   }
-  if (value.protocol !== protocolId) {
+  if (value.protocol !== protocol.id) {
     return err({ code: "invalid-envelope", reason: "invalid-protocol" })
   }
   if (
@@ -230,34 +201,38 @@ function parseEnvelope(
   if (!isPlainRecord(value.invocation)) {
     return err({ code: "invalid-envelope", reason: "invalid-invocation" })
   }
-  if (!hasExactly(value.invocation, ["name", "args"])) {
+  if (!hasExactKeys(value.invocation, ["name", "args"])) {
     return err({ code: "invalid-envelope", reason: "unexpected-fields" })
   }
-  if (
-    typeof value.invocation.name !== "string" ||
-    !mutationNames.has(value.invocation.name)
-  ) {
+  const definition = findMutation(protocol, value.invocation.name)
+  if (!definition) {
     return err({ code: "invalid-envelope", reason: "unknown-mutation" })
   }
 
   return ok({
-    protocol: protocolId,
     mutationId: value.mutationId,
-    invocation: {
-      name: value.invocation.name,
-      args: value.invocation.args,
-    },
+    definition,
+    args: value.invocation.args,
   })
 }
+
+/** Reported when a schema changes arguments that should already be parsed. */
+const UNPARSED_ARGUMENTS_ISSUE: StandardSchemaV1.Issue = Object.freeze({
+  message:
+    "Arguments must arrive in parsed form: the mutation's argument schema changed them",
+})
 
 /**
  * Strictly parses and canonicalizes an envelope without claiming a receipt.
  *
  * This is the server-side trust-boundary step: it checks the exact envelope
  * shape and protocol, validates the mutation name, parses arguments with the
- * registered Standard Schema, and derives canonical receipt identity. It does
- * not call application commands, open a transaction, or reserve mutation
- * identity, so invalid requests cannot create receipt rows.
+ * registered Standard Schema, and derives canonical receipt identity. Clients
+ * send arguments in parsed form (the value they predicted with), so arguments
+ * the schema changes are refused as `invalid-arguments`; otherwise the
+ * predictor and the command would run on different values. It does not call
+ * application commands, open a transaction, or reserve mutation identity, so
+ * invalid requests cannot create receipt rows.
  *
  * @param protocol Protocol whose ID, registry, and argument schemas admit the request.
  * @param envelope Untrusted value received from a transport boundary.
@@ -272,21 +247,11 @@ export async function prepareMutationRequest<
   protocol: Protocol,
   envelope: unknown
 ): Promise<Result<PreparedMutationRequest, MutationExecutorError>> {
-  const mutationNames = new Set(
-    protocol.mutations.map((mutation) => mutation.name)
-  )
-  const parsedEnvelope = parseEnvelope(envelope, protocol.id, mutationNames)
+  const parsedEnvelope = parseEnvelope(envelope, protocol)
   if (!parsedEnvelope.ok) return parsedEnvelope
 
-  const definition =
-    protocol.mutationsByName[parsedEnvelope.value.invocation.name]
-  if (!definition) {
-    return err({ code: "invalid-envelope", reason: "unknown-mutation" })
-  }
-
-  const parsedArguments = await definition.args["~standard"].validate(
-    parsedEnvelope.value.invocation.args
-  )
+  const { definition, args } = parsedEnvelope.value
+  const parsedArguments = await definition.args["~standard"].validate(args)
   if (parsedArguments.issues) {
     return err({
       code: "invalid-arguments",
@@ -299,9 +264,19 @@ export async function prepareMutationRequest<
     name: definition.name,
     args: parsedArguments.value,
   }
-  const prepared = await prepareCanonicalInvocation(protocol.id, invocation)
+  const prepared = await canonicalInvocation(protocol.id, invocation)
   if (!prepared.ok) {
     return err({ code: "canonical-invocation", error: prepared.error })
+  }
+
+  const received = canonicalJson(args)
+  const parsed = canonicalJson(parsedArguments.value)
+  if (!received.ok || !parsed.ok || received.value !== parsed.value) {
+    return err({
+      code: "invalid-arguments",
+      mutation: definition.name,
+      issues: [UNPARSED_ARGUMENTS_ISSUE],
+    })
   }
 
   return ok({

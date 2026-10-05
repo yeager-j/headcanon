@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { cacheTag, refresh, revalidateTag, updateTag } from "next/cache"
 import { forbidden } from "next/navigation"
@@ -18,17 +18,20 @@ import type {
   InvalidationPublicationFailureReporter,
   InvalidationPublisher,
 } from "../invalidation"
-import type {
-  AnyMutationDefinition,
-  MutationRefusalOf,
-  ProtocolDefinition,
+import {
+  findMutation,
+  type AnyMutationDefinition,
+  type MutationRefusalOf,
+  type ProtocolDefinition,
 } from "../protocol"
 import {
-  axisId,
+  defineCanon,
+  revisionEntries,
   type AcceptedStamp,
   type AxisId,
-  type RevisionVector,
+  type Canon,
 } from "../revisions"
+import { sha256Hex } from "../sha256"
 
 /** Maximum axis count supported by one Next cache-tagged versioned base. */
 export const MAX_VERSIONED_BASE_AXES = 128
@@ -38,30 +41,34 @@ const INVALIDATION_PUBLICATION_TIMEOUT_MS = 1_000
 
 /** Derives the one bounded, versioned cache tag owned by an axis.
  * @param axis Axis address to hash.
- * @returns Stable cache tag for the axis.
+ * @returns A promise for the stable cache tag of the axis.
  */
-export function axisCacheTag(axis: AxisId): string {
-  const digest = createHash("sha256").update(axis, "utf8").digest("hex")
-  return `${AXIS_CACHE_TAG_PREFIX}${digest}`
+export async function axisCacheTag(axis: AxisId): Promise<string> {
+  return `${AXIS_CACHE_TAG_PREFIX}${await sha256Hex(axis)}`
 }
 
-/** Applies every observed axis tag to one Cache Components entry.
- * @param base Versioned base whose revisions identify cache tags.
- * @returns The same base, after registering its cache tags.
+/** Parses a `"use cache"` loader's observation into a canon and applies every
+ * observed axis tag to its Cache Components entry. It is the cached
+ * counterpart of `defineCanon` and runs the same parse.
+ * @param input Loader value and raw axis revisions observed together.
+ * @returns A promise for the frozen canon, after registering its cache tags.
+ * @throws Error when the supplied revision vector is invalid.
  * @throws RangeError when the base exceeds the Next tag limit.
  */
-export function tagVersionedBase<
-  Base extends { readonly revisions: RevisionVector },
->(base: Base): Base {
-  const axes = Object.keys(base.revisions).map(axisId)
+export async function tagVersionedBase<State>(input: {
+  readonly value: State
+  readonly revisions: Readonly<Record<string, number>>
+}): Promise<Canon<State>> {
+  const canon = defineCanon(input)
+  const axes = revisionEntries(canon.revisions).map(([axis]) => axis)
   if (axes.length > MAX_VERSIONED_BASE_AXES) {
     throw new RangeError(
       `A versioned base may observe at most ${MAX_VERSIONED_BASE_AXES} axes; received ${axes.length}`
     )
   }
 
-  cacheTag(...axes.map(axisCacheTag))
-  return base
+  cacheTag(...(await Promise.all(axes.map(axisCacheTag))))
+  return canon
 }
 
 type ExpireAxis = (tag: string) => void
@@ -124,8 +131,8 @@ async function finalizeStamp(
   reportFailure: InvalidationPublicationFailureReporter,
   refreshRoute?: () => void
 ): Promise<void> {
-  for (const rawAxis of Object.keys(stamp.revisions)) {
-    expireAxis(axisCacheTag(axisId(rawAxis)))
+  for (const [axis] of revisionEntries(stamp.revisions)) {
+    expireAxis(await axisCacheTag(axis))
   }
 
   refreshRoute?.()
@@ -457,7 +464,7 @@ function assertCompleteBindings(
     if (registered.has(mutation.name)) {
       throw new Error(`Duplicate mutation binding: ${mutation.name}`)
     }
-    if (protocol.mutationsByName[mutation.name] !== mutation) {
+    if (findMutation(protocol, mutation.name) !== mutation) {
       throw new Error(
         `Mutation binding does not use the protocol definition: ${mutation.name}`
       )

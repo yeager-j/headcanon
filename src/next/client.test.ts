@@ -12,8 +12,8 @@ import {
   defineProtocol,
   revisionVector,
   type Canon,
+  type MutationEnvelope,
 } from "../index"
-import type { MutationEnvelope } from "../react"
 import { createInMemoryInvalidationAdapter } from "../testing"
 import {
   createNextObservedRoot,
@@ -72,9 +72,9 @@ function canon(): Canon<number> {
 }
 
 function accepted() {
-  const revisions = revisionVector({ [valueAxis]: 1 })
-  if (!revisions.ok) throw new Error("Invalid Next client test stamp")
-  return acceptedStamp(revisions.value)
+  const stamp = acceptedStamp({ revisions: { [valueAxis]: 1 } })
+  if (!stamp.ok) throw new Error("Invalid Next client test stamp")
+  return stamp.value
 }
 
 function useRefresh() {
