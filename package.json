@@ -1,39 +1,140 @@
 {
-  "name": "headcanon-repo",
-  "private": true,
+  "name": "headcanon",
+  "version": "0.1.0",
+  "description": "Optimistic mutations for Next.js: believe your writes until canon says otherwise.",
+  "keywords": [
+    "optimistic-updates",
+    "optimistic-ui",
+    "nextjs",
+    "react",
+    "server-actions",
+    "drizzle",
+    "ably"
+  ],
+  "author": "Jackson Yeager",
   "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./ably/channels": {
+      "types": "./dist/ably/channels.d.ts",
+      "default": "./dist/ably/channels.js"
+    },
+    "./ably/client": {
+      "types": "./dist/ably/client.d.ts",
+      "default": "./dist/ably/client.js"
+    },
+    "./ably/server": {
+      "types": "./dist/ably/server.d.ts",
+      "default": "./dist/ably/server.js"
+    },
+    "./drizzle": {
+      "types": "./dist/drizzle.d.ts",
+      "default": "./dist/drizzle.js"
+    },
+    "./drizzle-schema": {
+      "types": "./dist/receipt-table.d.ts",
+      "default": "./dist/receipt-table.js"
+    },
+    "./next/client": {
+      "types": "./dist/next/client.d.ts",
+      "default": "./dist/next/client.js"
+    },
+    "./next/server": {
+      "types": "./dist/next/server.d.ts",
+      "default": "./dist/next/server.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts",
+    "drizzle"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "workspaces": [
-    "packages/headcanon",
     "fixture"
   ],
   "scripts": {
-    "build": "npm run build -w headcanon && npm run build -w headcanon-fixture",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json --resolve-full-paths",
     "lint": "eslint",
     "format": "eslint --fix . && prettier --write .",
-    "typecheck": "npm run build -w headcanon && npm run typecheck --workspaces",
-    "depcheck": "npm run depcheck -w headcanon",
-    "check:public-api-docs": "npm run check:public-api-docs -w headcanon",
-    "check:package": "npm run build -w headcanon && npm run check:package -w headcanon",
-    "test": "npm test -w headcanon",
-    "test:e2e": "npm run test:e2e -w headcanon-fixture"
+    "typecheck": "tsc --noEmit && npm run build && npm run typecheck -w headcanon-fixture",
+    "depcheck": "node depcheck.mjs",
+    "check:public-api-docs": "node scripts/check-public-api-docs.mjs",
+    "check:package": "npm run build && publint && attw --pack . --profile esm-only",
+    "test": "vitest run",
+    "test:e2e": "npm run test:e2e -w headcanon-fixture",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@standard-schema/spec": "^1.1.0",
+    "canonicalize": "^3.0.0",
+    "serializable-result": "^0.1.0"
+  },
+  "peerDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "ably": "^2.22.1",
+    "drizzle-orm": "^0.45.2",
+    "next": "^16.1.6",
+    "react": "^19.2.4",
+    "vitest": "^4.1.6"
+  },
+  "peerDependenciesMeta": {
+    "@testing-library/react": {
+      "optional": true
+    },
+    "ably": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    },
+    "vitest": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@eslint/js": "^9.39.5",
     "@ianvs/prettier-plugin-sort-imports": "^4.7.1",
     "@next/eslint-plugin-next": "^16.3.8",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^24",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "^19.2.3",
+    "ably": "^2.22.1",
+    "drizzle-orm": "^0.45.2",
     "eslint": "^9.39.5",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-unused-imports": "^4.4.1",
     "globals": "^17.13.0",
+    "jsdom": "^29.1.1",
+    "next": "16.1.6",
+    "pg": "^8.22.0",
     "prettier": "~3.8.3",
     "publint": "^0.3.25",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tsc-alias": "^1.9.7",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.71.1"
-  },
-  "engines": {
-    "node": ">=20"
+    "typescript-eslint": "^8.71.1",
+    "vitest": "^4.1.6"
   }
 }

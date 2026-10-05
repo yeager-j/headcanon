@@ -53,6 +53,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
         working-directory: fixture
       - run: npm run build
+      - run: npm run build -w headcanon-fixture
       - run: npm run test:e2e
       - name: Upload Playwright report
         if: failure()
