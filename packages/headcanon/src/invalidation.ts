@@ -7,7 +7,7 @@ import {
   type AxisId,
   type Revision,
   type RevisionValidationError,
-} from "./revisions.js"
+} from "./revisions"
 
 /** One singleton revision notification on a globally stable axis. */
 export interface AxisInvalidation {

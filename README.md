@@ -20,7 +20,7 @@ copy of React and Next.
 npm install
 npm run lint
 npm run typecheck
-npm run depcheck              # bundle-safety and shipped-import gates
+npm run depcheck              # client-entry bundle-safety gate
 npm run check:public-api-docs # every public export has JSDoc
 npm test                      # set HEADCANON_TEST_DATABASE_URL to run the Postgres suite
 npm run check:package         # publint + Are the Types Wrong

@@ -13,12 +13,12 @@ import {
   type MutationAuthorityAdapter,
   type MutationAuthorityRequest,
   type MutationTerminalOutcome,
-} from "./authority.js"
+} from "./authority"
 import {
   headcanonMutationReceipts,
   type StoredMutationTerminalOutcome,
-} from "./receipt-table.js"
-import { acceptedStamp, revisionVector } from "./revisions.js"
+} from "./receipt-table"
+import { acceptedStamp, revisionVector } from "./revisions"
 
 // The receipt table is defined in `./receipt-table` (drizzle-orm only, so schema
 // tooling never loads the authority graph) and published from the dedicated

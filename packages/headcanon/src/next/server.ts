@@ -13,22 +13,22 @@ import {
   type MutationTerminalOutcome,
   type ProtocolIdentity,
   type StampAccumulator,
-} from "../authority.js"
+} from "../authority"
 import type {
   InvalidationPublicationFailureReporter,
   InvalidationPublisher,
-} from "../invalidation.js"
+} from "../invalidation"
 import type {
   AnyMutationDefinition,
   MutationRefusalOf,
   ProtocolDefinition,
-} from "../protocol.js"
+} from "../protocol"
 import {
   axisId,
   type AcceptedStamp,
   type AxisId,
   type RevisionVector,
-} from "../revisions.js"
+} from "../revisions"
 
 /** Maximum axis count supported by one Next cache-tagged versioned base. */
 export const MAX_VERSIONED_BASE_AXES = 128

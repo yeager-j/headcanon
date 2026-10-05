@@ -15,7 +15,7 @@ import {
   type MutationExecutorError,
   type MutationTerminalOutcome,
   type StampAccumulator,
-} from "./authority.js"
+} from "./authority"
 import {
   createNoRealtimeInvalidationAdapter,
   type AxisInvalidation,
@@ -23,14 +23,14 @@ import {
   type InvalidationPublisher,
   type InvalidationStatus,
   type InvalidationSubscription,
-} from "./invalidation.js"
-import { defineMutation, defineProtocol } from "./protocol.js"
+} from "./invalidation"
+import { defineMutation, defineProtocol } from "./protocol"
 import {
   useIncorporation,
   withPollingFallback,
   type IncorporationStatus,
   type RefreshAdapter,
-} from "./refresh.js"
+} from "./refresh"
 import {
   acceptedStamp,
   axisId,
@@ -40,7 +40,7 @@ import {
   type Canon,
   type Revision,
   type RevisionVector,
-} from "./revisions.js"
+} from "./revisions"
 
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   if (left.byteLength !== right.byteLength) return false

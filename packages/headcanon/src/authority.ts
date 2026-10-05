@@ -5,12 +5,12 @@ import {
   prepareCanonicalInvocation,
   type CanonicalInvocation,
   type CanonicalInvocationError,
-} from "./canonical-invocation.js"
+} from "./canonical-invocation"
 import type {
   AnyMutationDefinition,
   MutationInvocation,
   ProtocolDefinition,
-} from "./protocol.js"
+} from "./protocol"
 import {
   acceptedStamp,
   defineCoordinate,
@@ -18,7 +18,7 @@ import {
   type AcceptedStamp,
   type AxisId,
   type Revision,
-} from "./revisions.js"
+} from "./revisions"
 
 /** The transport envelope admitted by a mutation authority executor. */
 export interface MutationEnvelope<Invocation> {

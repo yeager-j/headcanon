@@ -61,20 +61,3 @@ describe("headcanon shared-entry dependency gate", () => {
     expect(depcheck.scanEntryGraph()).toEqual([])
   })
 })
-
-describe("headcanon shipped-specifier gate", () => {
-  it("rejects an extensionless relative import as a negative control", () => {
-    const source = [
-      'import { a } from "./a.js"',
-      'export { b } from "../b"',
-    ].join("\n")
-
-    expect(depcheck.scanShippedSpecifiers("src/x.ts", source)).toEqual([
-      expect.objectContaining({ file: "src/x.ts", line: 2, specifier: "../b" }),
-    ])
-  })
-
-  it("keeps every shipped relative import Node-loadable", () => {
-    expect(depcheck.scanShippedSources()).toEqual([])
-  })
-})

@@ -1,5 +1,8 @@
 {
   "extends": "./tsconfig.json",
+  // Source imports stay extensionless. The build script runs tsc-alias
+  // --resolve-full-paths after tsc to add the `.js` endings that Node ESM
+  // needs; `npm run check:package` fails if any built import lacks one.
   "compilerOptions": {
     "noEmit": false,
     "rootDir": "src",

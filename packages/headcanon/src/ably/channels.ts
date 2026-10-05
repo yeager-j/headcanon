@@ -1,4 +1,4 @@
-import type { AxisId } from "../revisions.js"
+import type { AxisId } from "../revisions"
 
 /** Ably event name used for singleton accepted-axis invalidations. */
 export const ABLY_AXIS_INVALIDATION_EVENT = "headcanon.axis-invalidation.v1"

@@ -1,9 +1,6 @@
-import type { InvalidationPublisher } from "../invalidation.js"
-import { axisId } from "../revisions.js"
-import {
-  ABLY_AXIS_INVALIDATION_EVENT,
-  ablyAxisChannelName,
-} from "./channels.js"
+import type { InvalidationPublisher } from "../invalidation"
+import { axisId } from "../revisions"
+import { ABLY_AXIS_INVALIDATION_EVENT, ablyAxisChannelName } from "./channels"
 
 /** Minimal REST channel contract used for accepted-axis publication. */
 export interface AblyRestChannel {
