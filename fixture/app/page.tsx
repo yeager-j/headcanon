@@ -1,7 +1,6 @@
-import { defineCanon } from "@workspace/headcanon"
-
 import { ITEMS_AXIS } from "@/lib/protocol"
 import { authority } from "@/lib/store"
+import { defineCanon } from "headcanon"
 
 import { FixtureClient } from "./fixture-client"
 

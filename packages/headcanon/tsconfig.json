@@ -1,13 +1,5 @@
 {
-  "extends": "@workspace/typescript-config/base.json",
-  "compilerOptions": {
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "noEmit": true,
-    "paths": {
-      "@workspace/headcanon": ["./src/index.ts"]
-    }
-  },
+  "extends": "../../tsconfig.base.json",
   "include": ["src"],
   "exclude": ["node_modules", "dist"]
 }

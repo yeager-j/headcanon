@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+*.tgz
+*.tsbuildinfo
+.DS_Store
+.env*
+
+# Next.js fixture
+fixture/.next/
+fixture/next-env.d.ts
+fixture/test-results/
+fixture/playwright-report/

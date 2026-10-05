@@ -13,7 +13,7 @@ export {
   type RevisionValidationError,
   type RevisionVector,
   type RevisionVectorValidationError,
-} from "./revisions"
+} from "./revisions.js"
 export {
   defineMutation,
   defineProtocol,
@@ -25,12 +25,12 @@ export {
   type MutationRefusalOf,
   type ProtocolDefinition,
   type ProtocolInvocation,
-} from "./protocol"
+} from "./protocol.js"
 export {
   canonicalInvocation,
   type CanonicalInvocation,
   type CanonicalInvocationError,
-} from "./canonical-invocation"
+} from "./canonical-invocation.js"
 export {
   createStampAccumulator,
   type MutationAuthorityAdapter,
@@ -43,7 +43,7 @@ export {
   type ProtocolIdentity,
   type ReadableStampAccumulator,
   type StampAccumulator,
-} from "./authority"
+} from "./authority.js"
 export {
   axisInvalidation,
   createLazyInvalidationAdapter,
@@ -57,4 +57,4 @@ export {
   type InvalidationStatus,
   type InvalidationSubscription,
   type LazyInvalidationAdapterOptions,
-} from "./invalidation"
+} from "./invalidation.js"

@@ -1,8 +1,7 @@
 import canonicalize from "canonicalize"
+import { err, ok, type Result } from "serializable-result"
 
-import { err, ok, type Result } from "@workspace/result"
-
-import type { MutationInvocation } from "./protocol"
+import type { MutationInvocation } from "./protocol.js"
 
 /**
  * The exact receipt identity material for one parsed protocol invocation.

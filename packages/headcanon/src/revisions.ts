@@ -1,4 +1,4 @@
-import { err, ok, type Result } from "@workspace/result"
+import { err, ok, type Result } from "serializable-result"
 
 declare const axisIdBrand: unique symbol
 declare const revisionBrand: unique symbol

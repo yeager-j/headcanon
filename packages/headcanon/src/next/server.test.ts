@@ -1,7 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
+import { err, ok, type Result } from "serializable-result"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-
-import { err, ok, type Result } from "@workspace/result"
 
 import {
   acceptedStamp,

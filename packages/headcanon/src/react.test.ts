@@ -3,9 +3,8 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { createElement, StrictMode, type ReactNode } from "react"
+import { err, ok, type Result } from "serializable-result"
 import { afterEach, describe, expect, it, vi } from "vitest"
-
-import { err, ok, type Result } from "@workspace/result"
 
 import {
   acceptedStamp,

@@ -1,4 +1,4 @@
-import { err, ok, type Result } from "@workspace/result"
+import { err, ok, type Result } from "serializable-result"
 
 import {
   axisId,
@@ -7,7 +7,7 @@ import {
   type AxisId,
   type Revision,
   type RevisionValidationError,
-} from "./revisions"
+} from "./revisions.js"
 
 /** One singleton revision notification on a globally stable axis. */
 export interface AxisInvalidation {

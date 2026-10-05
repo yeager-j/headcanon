@@ -1,6 +1,6 @@
 // @ts-check
 
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { builtinModules } from "node:module"
 import { dirname, extname, join, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -127,8 +127,9 @@ export function scanSource(file, source, frameworkFree = false) {
 
 function resolveRelativeImport(importer, specifier) {
   const target = resolve(dirname(importer), specifier)
+  // Shipped imports name the emitted `.js` file; the source on disk is `.ts`.
   const candidates = extname(target)
-    ? [target]
+    ? [target, target.replace(/\.js$/, ".ts"), target.replace(/\.js$/, ".tsx")]
     : [
         `${target}.ts`,
         `${target}.tsx`,
@@ -190,15 +191,56 @@ export function scanClientEntries(entries = CLIENT_ENTRIES) {
   return entries.flatMap((entry) => scanEntryGraph(entry))
 }
 
+/**
+ * The build emits files one-to-one and does not rewrite specifiers, so an
+ * extensionless relative import ships as written and Node ESM cannot load it.
+ * NodeNext resolution would catch this at compile time, but `next` publishes
+ * no `exports` map and NodeNext cannot resolve `next/navigation`.
+ */
+export function scanShippedSpecifiers(file, source) {
+  return importSpecifiers(source)
+    .filter(
+      ({ specifier }) =>
+        specifier?.startsWith(".") && !specifier.endsWith(".js")
+    )
+    .map(({ specifier, line }) => ({
+      file,
+      line,
+      specifier,
+      rule: "shipped relative import must name the emitted .js file",
+    }))
+}
+
+function shippedSourceFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) return shippedSourceFiles(full)
+    return entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")
+      ? [full]
+      : []
+  })
+}
+
+export function scanShippedSources(dir = join(ROOT, "src")) {
+  return shippedSourceFiles(dir).flatMap((file) =>
+    scanShippedSpecifiers(
+      relative(ROOT, file).split("\\").join("/"),
+      readFileSync(file, "utf8")
+    )
+  )
+}
+
 function run() {
-  const violations = scanClientEntries()
+  const violations = [...scanClientEntries(), ...scanShippedSources()]
 
   if (violations.length === 0) {
-    console.log("✓ headcanon client entries are bundle-safe.")
+    console.log(
+      "✓ headcanon client entries are bundle-safe and shipped imports are Node-loadable."
+    )
     return
   }
 
-  console.error("✖ headcanon client entry dependency violations:\n")
+  console.error("✖ headcanon dependency violations:\n")
   for (const violation of violations) {
     console.error(
       `  ${violation.file}:${violation.line}  ${violation.specifier ?? violation.rule}\n    └─ ${violation.rule}`

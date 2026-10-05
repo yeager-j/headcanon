@@ -1,8 +1,7 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { act, renderHook } from "@testing-library/react"
+import { err, ok, type Result } from "serializable-result"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-
-import { err, ok, type Result } from "@workspace/result"
 
 import {
   createStampAccumulator,
@@ -16,7 +15,7 @@ import {
   type MutationExecutorError,
   type MutationTerminalOutcome,
   type StampAccumulator,
-} from "./authority"
+} from "./authority.js"
 import {
   createNoRealtimeInvalidationAdapter,
   type AxisInvalidation,
@@ -24,14 +23,14 @@ import {
   type InvalidationPublisher,
   type InvalidationStatus,
   type InvalidationSubscription,
-} from "./invalidation"
-import { defineMutation, defineProtocol } from "./protocol"
+} from "./invalidation.js"
+import { defineMutation, defineProtocol } from "./protocol.js"
 import {
   useIncorporation,
   withPollingFallback,
   type IncorporationStatus,
   type RefreshAdapter,
-} from "./refresh"
+} from "./refresh.js"
 import {
   acceptedStamp,
   axisId,
@@ -41,7 +40,7 @@ import {
   type Canon,
   type Revision,
   type RevisionVector,
-} from "./revisions"
+} from "./revisions.js"
 
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   if (left.byteLength !== right.byteLength) return false

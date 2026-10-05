@@ -1,7 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-
-import { axisId, defineMutation, defineProtocol } from "@workspace/headcanon"
-import { err, ok } from "@workspace/result"
+import { axisId, defineMutation, defineProtocol } from "headcanon"
+import { err, ok } from "serializable-result"
 
 /** The one axis the fixture's collection canon observes. */
 export const ITEMS_AXIS = axisId("fixture/items")

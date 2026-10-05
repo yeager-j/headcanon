@@ -1,14 +1,12 @@
 "use client"
 
-import { useState } from "react"
-
-import type { Canon } from "@workspace/headcanon"
+import { addItem, fixtureProtocol, type FixtureState } from "@/lib/protocol"
+import type { Canon } from "headcanon"
 import {
   createNextPredictedRoot,
   useRouterRefresh,
-} from "@workspace/headcanon/next/client"
-
-import { addItem, fixtureProtocol, type FixtureState } from "@/lib/protocol"
+} from "headcanon/next/client"
+import { useState } from "react"
 
 import { applyFixtureMutation } from "./actions"
 

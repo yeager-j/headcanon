@@ -3,10 +3,19 @@
 > headcanon — optimistic mutations for Next.js: believe your writes until canon
 > says otherwise.
 
-`@workspace/headcanon` provides a framework-independent protocol entry, a
+```sh
+npm install headcanon
+```
+
+`next` and `react` are required peers. The other peers are optional and needed
+only by the entries that use them: `ably` for `headcanon/ably/*`, `drizzle-orm`
+for `headcanon/drizzle` and `headcanon/drizzle-schema`, and `vitest` with
+`@testing-library/react` for `headcanon/testing`.
+
+`headcanon` provides a framework-independent protocol entry, a
 client-only React entry, and explicit Next client/server bindings for optimistic
 mutations. Protocol definitions remain shareable between browser and server
-code; `@workspace/headcanon/react` owns the mounted prediction lifecycle without
+code; `headcanon/react` owns the mounted prediction lifecycle without
 introducing another projected-state store.
 
 ## One complete path
@@ -20,7 +29,7 @@ Keep this definition client-safe and share it between browser and server.
 
 ```ts
 // domain/notes/protocol.ts
-import { defineMutation, defineProtocol } from "@workspace/headcanon"
+import { defineMutation, defineProtocol } from "headcanon"
 
 export const renameNote = defineMutation({
   name: "notes.rename",
@@ -41,11 +50,8 @@ export const notesProtocol = defineProtocol({
 // lib/actions/notes/apply.ts
 "use server"
 
-import { createDrizzleMutationAuthority } from "@workspace/headcanon/drizzle"
-import {
-  bindMutation,
-  createNextMutationAction,
-} from "@workspace/headcanon/next/server"
+import { createDrizzleMutationAuthority } from "headcanon/drizzle"
+import { bindMutation, createNextMutationAction } from "headcanon/next/server"
 
 export const applyNotesMutationAction = createNextMutationAction({
   protocol: notesProtocol,
@@ -66,8 +72,8 @@ export const applyNotesMutationAction = createNextMutationAction({
 // domain/notes/use-note-predictions.ts
 "use client"
 
-import { createNextPredictedRoot } from "@workspace/headcanon/next/client"
-import { createPredictedRootContext } from "@workspace/headcanon/react"
+import { createNextPredictedRoot } from "headcanon/next/client"
+import { createPredictedRootContext } from "headcanon/react"
 
 const useNotePredictions = createNextPredictedRoot({
   protocol: notesProtocol,
@@ -263,11 +269,11 @@ prediction, it is jossed during reducer replay and is never delivered. Headcanon
 does not maintain the synchronous shadow projection that would be required to
 turn that case into an immediate local refusal.
 
-Use `createNextPredictedRoot` from `@workspace/headcanon/next/client` when a raw
+Use `createNextPredictedRoot` from `headcanon/next/client` when a raw
 Server Action may throw Next navigation or authorization control flow. The
 binding runs `unstable_rethrow` before ordinary thrown requests become uncertain
 delivery. The same entry owns `useRouterRefresh`; snapshot refresh remains in
-`@workspace/headcanon/react`.
+`headcanon/react`.
 
 The server binding derives one bounded SHA-256 cache tag per axis,
 `tagVersionedBase` fails closed above Next's 128-tag ceiling, and
@@ -280,13 +286,13 @@ the accepted outcome.
 
 ## Ably invalidations
 
-`@workspace/headcanon/ably/server` turns one accepted stamp into a singleton
+`headcanon/ably/server` turns one accepted stamp into a singleton
 message per axis through an application-supplied Ably REST client. Server and
 client share the deployment-scoped SHA-256 channel derivation from
-`@workspace/headcanon/ably/channels`; payload parsing admits only `eventId`,
+`headcanon/ably/channels`; payload parsing admits only `eventId`,
 `axis`, and a valid revision.
 
-`@workspace/headcanon/ably/client` aggregates every mounted root's observed
+`headcanon/ably/client` aggregates every mounted root's observed
 axes, requests one exact subscribe-only capability through Ably `authorize()`,
 and attaches new channels only after authorization succeeds. Axis-set changes
 and recovered connections enter `reauthorizing`; authorization, attachment, or
@@ -302,7 +308,7 @@ header representation would be impractical.
 
 ## Contract fixtures
 
-The `@workspace/headcanon/testing` entry ships in-memory authority and
+The `headcanon/testing` entry ships in-memory authority and
 invalidation adapters. The authority provides isolated transactional state,
 receipt deduplication, collision detection, terminal-rejection savepoints, and
 controllable contention reruns. The invalidation bus fans accepted vectors into
@@ -315,13 +321,13 @@ behavioral contracts rather than duplicating synchronization assertions.
 
 ## Drizzle/Postgres authority
 
-`@workspace/headcanon/drizzle` exports `createDrizzleMutationAuthority`,
+`headcanon/drizzle` exports `createDrizzleMutationAuthority`,
 `throwMutationContention`, the cycle-safe `matchesPostgresError` matcher, and the
 `DrizzleMutationTx` helper type. The matcher lets application-specific
 contention rules select a SQLSTATE and optional constraint without reimplementing
 wrapped `cause` traversal. The receipt
 table itself is published from the dependency-minimal
-`@workspace/headcanon/drizzle-schema` entry (drizzle-orm only), so an adopter can
+`headcanon/drizzle-schema` entry (drizzle-orm only), so an adopter can
 add it to their Drizzle schema — and let `drizzle-kit` scan it — without the
 authority graph being pulled into schema tooling. Include the table in the
 adopter's schema so its normal migration workflow owns deployment; the equivalent

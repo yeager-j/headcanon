@@ -1,17 +1,16 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-
-import { err, ok, type Result } from "@workspace/result"
+import { err, ok, type Result } from "serializable-result"
 
 import {
   prepareCanonicalInvocation,
   type CanonicalInvocation,
   type CanonicalInvocationError,
-} from "./canonical-invocation"
+} from "./canonical-invocation.js"
 import type {
   AnyMutationDefinition,
   MutationInvocation,
   ProtocolDefinition,
-} from "./protocol"
+} from "./protocol.js"
 import {
   acceptedStamp,
   defineCoordinate,
@@ -19,7 +18,7 @@ import {
   type AcceptedStamp,
   type AxisId,
   type Revision,
-} from "./revisions"
+} from "./revisions.js"
 
 /** The transport envelope admitted by a mutation authority executor. */
 export interface MutationEnvelope<Invocation> {

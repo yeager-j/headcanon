@@ -4,13 +4,13 @@ import {
   type InvalidationAdapter,
   type InvalidationStatus,
   type InvalidationSubscription,
-} from "../invalidation"
-import type { AxisId } from "../revisions"
+} from "../invalidation.js"
+import type { AxisId } from "../revisions.js"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
   ablySubscribeCapability,
-} from "./channels"
+} from "./channels.js"
 
 interface AblyMessage {
   readonly data?: unknown

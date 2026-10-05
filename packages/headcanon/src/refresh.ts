@@ -15,7 +15,7 @@ import type {
   InvalidationAdapter,
   InvalidationStatus,
   InvalidationSubscription,
-} from "./invalidation"
+} from "./invalidation.js"
 import {
   axisId,
   covers,
@@ -26,7 +26,7 @@ import {
   type Canon,
   type Revision,
   type RevisionVector,
-} from "./revisions"
+} from "./revisions.js"
 
 /** Grace period used by snapshot carriers before an acceptance refresh. */
 export const SNAPSHOT_ACCEPTANCE_GRACE_MS = 0
@@ -177,14 +177,14 @@ export interface IncorporationStatus {
   readonly stallReason: RefreshStallReason | null
 }
 
-export { createNoRealtimeInvalidationAdapter } from "./invalidation"
+export { createNoRealtimeInvalidationAdapter } from "./invalidation.js"
 export type {
   AxisInvalidation,
   InvalidationAdapter,
   InvalidationPublisher,
   InvalidationStatus,
   InvalidationSubscription,
-} from "./invalidation"
+} from "./invalidation.js"
 
 interface RefreshState {
   readonly freshness: FreshnessStatus

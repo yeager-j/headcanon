@@ -1,6 +1,8 @@
 {
-  "extends": "@workspace/typescript-config/nextjs.json",
+  "extends": "../tsconfig.base.json",
   "compilerOptions": {
+    "allowJs": true,
+    "jsx": "preserve",
     "paths": {
       "@/*": ["./*"]
     },

@@ -3,9 +3,8 @@ import { and, asc, eq, sql } from "drizzle-orm"
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres"
 import { integer, pgTable, text } from "drizzle-orm/pg-core"
 import { Pool } from "pg"
+import { err, ok } from "serializable-result"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-
-import { err, ok } from "@workspace/result"
 
 import { executePreparedMutation, prepareMutationRequest } from "./authority"
 import {

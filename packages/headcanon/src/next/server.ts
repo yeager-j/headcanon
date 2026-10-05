@@ -2,8 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { cacheTag, refresh, revalidateTag, updateTag } from "next/cache"
 import { forbidden } from "next/navigation"
-
-import { err, ok, type Result } from "@workspace/result"
+import { err, ok, type Result } from "serializable-result"
 
 import {
   executePreparedMutation,
@@ -14,22 +13,22 @@ import {
   type MutationTerminalOutcome,
   type ProtocolIdentity,
   type StampAccumulator,
-} from "../authority"
+} from "../authority.js"
 import type {
   InvalidationPublicationFailureReporter,
   InvalidationPublisher,
-} from "../invalidation"
+} from "../invalidation.js"
 import type {
   AnyMutationDefinition,
   MutationRefusalOf,
   ProtocolDefinition,
-} from "../protocol"
+} from "../protocol.js"
 import {
   axisId,
   type AcceptedStamp,
   type AxisId,
   type RevisionVector,
-} from "../revisions"
+} from "../revisions.js"
 
 /** Maximum axis count supported by one Next cache-tagged versioned base. */
 export const MAX_VERSIONED_BASE_AXES = 128

@@ -15,7 +15,7 @@ import {
  * pulling the executor graph (and its `canonicalize` dependency) into
  * schema-only tooling such as `drizzle-kit`. The adapter imports the table for
  * its queries without re-exporting it; schema consumers use the dedicated
- * `@workspace/headcanon/drizzle-schema` entry.
+ * `headcanon/drizzle-schema` entry.
  */
 
 /** The durable terminal outcome stored per mutation, as serialized JSON. */

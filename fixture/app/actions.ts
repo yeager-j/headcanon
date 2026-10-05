@@ -1,17 +1,15 @@
 "use server"
 
-import { refresh } from "next/cache"
-
+import { addItem, fixtureProtocol, ITEMS_AXIS } from "@/lib/protocol"
+import { authority } from "@/lib/store"
 import {
   acceptedStamp,
   revisionVector,
   type AcceptedStamp,
   type MutationEnvelope,
-} from "@workspace/headcanon"
-import { err, ok, type Result } from "@workspace/result"
-
-import { addItem, fixtureProtocol, ITEMS_AXIS } from "@/lib/protocol"
-import { authority } from "@/lib/store"
+} from "headcanon"
+import { refresh } from "next/cache"
+import { err, ok, type Result } from "serializable-result"
 
 type AddItemInvocation = ReturnType<typeof addItem>
 

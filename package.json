@@ -1,0 +1,39 @@
+{
+  "name": "headcanon-repo",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/headcanon",
+    "fixture"
+  ],
+  "scripts": {
+    "build": "npm run build -w headcanon && npm run build -w headcanon-fixture",
+    "lint": "eslint",
+    "format": "eslint --fix . && prettier --write .",
+    "typecheck": "npm run build -w headcanon && npm run typecheck --workspaces",
+    "depcheck": "npm run depcheck -w headcanon",
+    "check:public-api-docs": "npm run check:public-api-docs -w headcanon",
+    "check:package": "npm run build -w headcanon && npm run check:package -w headcanon",
+    "test": "npm test -w headcanon",
+    "test:e2e": "npm run test:e2e -w headcanon-fixture"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@eslint/js": "^9.39.5",
+    "@ianvs/prettier-plugin-sort-imports": "^4.7.1",
+    "@next/eslint-plugin-next": "^16.3.8",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-unused-imports": "^4.4.1",
+    "globals": "^17.13.0",
+    "prettier": "~3.8.3",
+    "publint": "^0.3.25",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

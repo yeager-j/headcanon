@@ -1,0 +1,6 @@
+dist
+coverage
+package-lock.json
+fixture/.next
+fixture/playwright-report
+fixture/test-results

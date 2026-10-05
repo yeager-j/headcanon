@@ -6,20 +6,19 @@ import {
   type PgTransactionConfig,
 } from "drizzle-orm/pg-core"
 import type { ExtractTablesWithRelations } from "drizzle-orm/relations"
-
-import { err, ok } from "@workspace/result"
+import { err, ok } from "serializable-result"
 
 import {
   createStampAccumulator,
   type MutationAuthorityAdapter,
   type MutationAuthorityRequest,
   type MutationTerminalOutcome,
-} from "./authority"
+} from "./authority.js"
 import {
   headcanonMutationReceipts,
   type StoredMutationTerminalOutcome,
-} from "./receipt-table"
-import { acceptedStamp, revisionVector } from "./revisions"
+} from "./receipt-table.js"
+import { acceptedStamp, revisionVector } from "./revisions.js"
 
 // The receipt table is defined in `./receipt-table` (drizzle-orm only, so schema
 // tooling never loads the authority graph) and published from the dedicated

@@ -20,8 +20,8 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
-  // In CI the root `npm run build` has already produced .next (same pattern
-  // as apps/web); locally the dev server preserves the inner loop.
+  // In CI the root `npm run build` has already produced .next; locally the
+  // dev server (whose `predev` rebuilds the package) preserves the inner loop.
   webServer: {
     command: isCI ? "npm run start" : "npm run dev",
     url: "http://localhost:3900",

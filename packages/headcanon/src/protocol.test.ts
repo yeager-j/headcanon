@@ -1,7 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
+import { ok, type Result } from "serializable-result"
 import { describe, expect, expectTypeOf, it } from "vitest"
-
-import { ok, type Result } from "@workspace/result"
 
 import {
   defineMutation,

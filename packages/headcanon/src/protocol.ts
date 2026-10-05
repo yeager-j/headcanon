@@ -1,6 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-
-import type { Result } from "@workspace/result"
+import type { Result } from "serializable-result"
 
 /** Serializable intent produced by a named mutation's invocation factory. */
 export interface MutationInvocation<Name extends string, Args, Error = never> {

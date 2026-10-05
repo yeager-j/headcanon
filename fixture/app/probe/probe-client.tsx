@@ -1,12 +1,10 @@
 "use client"
 
+import type { addItem } from "@/lib/protocol"
+import type { MutationEnvelope } from "headcanon"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { startTransition, useOptimistic, useRef, useState } from "react"
-
-import type { MutationEnvelope } from "@workspace/headcanon"
-
-import type { addItem } from "@/lib/protocol"
 
 import { applyFixtureMutation } from "../actions"
 

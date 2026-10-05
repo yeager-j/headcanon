@@ -15,10 +15,9 @@ import {
   useState,
   type ReactNode,
 } from "react"
+import { err, ok, type Result } from "serializable-result"
 
-import { err, ok, type Result } from "@workspace/result"
-
-import type { MutationEnvelope } from "./authority"
+import type { MutationEnvelope } from "./authority.js"
 import type {
   AnyMutationDefinition,
   InvocationOf,
@@ -29,21 +28,21 @@ import type {
   MutationRefusalOf,
   ProtocolDefinition,
   ProtocolInvocation,
-} from "./protocol"
+} from "./protocol.js"
 import {
   useIncorporation,
   type IncorporationStatus,
   type InvalidationAdapter,
   type RefreshAdapter,
   type RefreshStallReason,
-} from "./refresh"
+} from "./refresh.js"
 import {
   covers,
   type AcceptedStamp,
   type AxisId,
   type Canon,
   type RevisionVector,
-} from "./revisions"
+} from "./revisions.js"
 
 /** Terminal lifecycle failures surfaced by a predicted root's receipts. */
 export type MutationLifecycleError<Error> =
@@ -1216,5 +1215,5 @@ export {
   type PollingFallbackOptions,
   type RefreshAdapter,
   type RefreshStallReason,
-} from "./refresh"
-export type { MutationEnvelope } from "./authority"
+} from "./refresh.js"
+export type { MutationEnvelope } from "./authority.js"

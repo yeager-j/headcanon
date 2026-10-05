@@ -2,21 +2,20 @@
 
 import { unstable_rethrow, useRouter } from "next/navigation"
 import { useMemo } from "react"
-
-import { err, ok, type Result } from "@workspace/result"
+import { err, ok, type Result } from "serializable-result"
 
 import type {
   MutationEnvelope,
   MutationExecutorError,
   MutationTerminalOutcome,
   ProtocolIdentity,
-} from "../authority"
+} from "../authority.js"
 import type {
   AnyMutationDefinition,
   MutationRefusalOf,
   ProtocolDefinition,
   ProtocolInvocation,
-} from "../protocol"
+} from "../protocol.js"
 import {
   createObservedRoot,
   createPredictedRootWithDeliveryErrorClassifier,
@@ -24,9 +23,9 @@ import {
   type ObservedRootOptions,
   type PredictedRootHook,
   type PredictedRootOptions,
-} from "../react"
-import type { RefreshAdapter } from "../refresh"
-import type { AcceptedStamp } from "../revisions"
+} from "../react.js"
+import type { RefreshAdapter } from "../refresh.js"
+import type { AcceptedStamp } from "../revisions.js"
 
 /** Grace period allowing a Server Action's RSC response to carry acceptance. */
 export const ROUTER_ACCEPTANCE_GRACE_MS = 250

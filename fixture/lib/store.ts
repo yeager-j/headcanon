@@ -1,4 +1,4 @@
-import type { AcceptedStamp } from "@workspace/headcanon"
+import type { AcceptedStamp } from "headcanon"
 
 /**
  * The fixture's whole authority: one in-memory collection plus the receipt
