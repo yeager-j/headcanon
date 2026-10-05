@@ -1,7 +1,12 @@
 import { readFileSync } from "node:fs"
+import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { and, asc, eq, sql } from "drizzle-orm"
-import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres"
-import { integer, pgTable, text } from "drizzle-orm/pg-core"
+import {
+  drizzle,
+  type NodePgDatabase,
+  type NodePgQueryResultHKT,
+} from "drizzle-orm/node-postgres"
+import { integer, pgTable, text, type PgDatabase } from "drizzle-orm/pg-core"
 import { Pool } from "pg"
 import { err, ok } from "serializable-result"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
@@ -9,22 +14,19 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { executePreparedMutation, prepareMutationRequest } from "./authority"
 import {
   createDrizzleMutationAuthority,
-  throwMutationContention,
+  type DrizzleMutationTransaction,
 } from "./drizzle"
+import { defineMutation, defineProtocol } from "./protocol"
 import { headcanonMutationReceipts } from "./receipt-table"
 import {
-  MUTATION_AUTHORITY_CONTRACT_ACTOR,
   MUTATION_AUTHORITY_CONTRACT_AXES,
   MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE,
-  MUTATION_AUTHORITY_CONTRACT_MUTATION,
-  MUTATION_AUTHORITY_CONTRACT_PROTOCOL,
-  mutationAuthorityContractProtocol,
   verifyMutationAuthorityContract,
-  type MutationAuthorityContractArgs,
-  type MutationAuthorityContractDriver,
-  type MutationAuthorityContractRejection,
+  type MutationAuthorityContractAxis,
+  type MutationAuthorityContractHarness,
+  type MutationAuthorityContractRefusal,
   type MutationAuthorityContractState,
-} from "./testing"
+} from "./testing/contracts"
 
 const databaseUrl =
   process.env.HEADCANON_TEST_DATABASE_URL ?? process.env.DATABASE_URL
@@ -51,52 +53,170 @@ const schema = {
 }
 
 type ContractDatabase = NodePgDatabase<typeof schema>
+type ContractTransaction = DrizzleMutationTransaction<
+  NodePgQueryResultHKT,
+  typeof schema
+>
+type ContractExecutor = PgDatabase<NodePgQueryResultHKT, typeof schema>
 
-const PRIMARY = "primary"
-const SECONDARY = "secondary"
-const ROLLBACK = "rollback"
+const CONTRACT_AXES = Object.keys(
+  MUTATION_AUTHORITY_CONTRACT_AXES
+) as readonly MutationAuthorityContractAxis[]
 
-function schemaUrl(url: string, schemaName: string): string {
+/**
+ * Database defaults the adapter must tolerate. It pins its own attempts to
+ * READ COMMITTED; under the other two, a lock-before-snapshot mistake lets a
+ * waiting duplicate rerun the command.
+ */
+const DATABASE_ISOLATION_LEVELS = [
+  "read committed",
+  "repeatable read",
+  "serializable",
+] as const
+type IsolationLevel = (typeof DATABASE_ISOLATION_LEVELS)[number]
+
+function connectionUrl(
+  url: string,
+  schemaName: string,
+  isolation: IsolationLevel
+): string {
   const parsed = new URL(url)
   const existing = parsed.searchParams.get("options")
   parsed.searchParams.set(
     "options",
-    [existing, `-c search_path=${schemaName}`].filter(Boolean).join(" ")
+    [
+      existing,
+      `-c search_path=${schemaName}`,
+      `-c default_transaction_isolation=${isolation.replace(" ", "\\ ")}`,
+    ]
+      .filter(Boolean)
+      .join(" ")
   )
   return parsed.toString()
 }
 
-function contractEnvelope(
-  sequence: number,
-  args: MutationAuthorityContractArgs
-) {
+async function loadState(
+  executor: ContractExecutor
+): Promise<MutationAuthorityContractState> {
+  const rows = await executor.select().from(contractAxes)
+  const effects = await executor
+    .select({ effect: contractEffects.effect })
+    .from(contractEffects)
+    .orderBy(asc(contractEffects.sequence))
+  const byName = new Map(rows.map((row) => [row.axis, row]))
+  const axes = Object.fromEntries(
+    CONTRACT_AXES.map((axis) => {
+      const row = byName.get(axis)
+      if (!row) throw new Error(`Missing contract axis: ${axis}`)
+      return [axis, { value: row.value, revision: row.revision }]
+    })
+  ) as MutationAuthorityContractState["axes"]
+
+  return { axes, effects: effects.map(({ effect }) => effect) }
+}
+
+async function replaceState(
+  db: ContractDatabase,
+  next: MutationAuthorityContractState
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.delete(contractEffects)
+    if (next.effects.length > 0) {
+      await tx
+        .insert(contractEffects)
+        .values(next.effects.map((effect) => ({ effect })))
+    }
+    await tx.delete(contractAxes)
+    await tx.insert(contractAxes).values(
+      CONTRACT_AXES.map((axis) => ({
+        axis,
+        value: next.axes[axis].value,
+        revision: next.axes[axis].revision,
+      }))
+    )
+  })
+}
+
+function contractHarness(
+  db: () => ContractDatabase,
+  isolation: IsolationLevel
+): MutationAuthorityContractHarness<ContractTransaction, ContractDatabase> {
   return {
-    protocol: MUTATION_AUTHORITY_CONTRACT_PROTOCOL,
-    mutationId: `10000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`,
-    invocation: { name: MUTATION_AUTHORITY_CONTRACT_MUTATION, args },
+    name: `drizzle/Postgres (database default ${isolation})`,
+    async create() {
+      const database = db()
+      await database.delete(headcanonMutationReceipts)
+      await replaceState(database, MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE)
+
+      return {
+        authority: createDrizzleMutationAuthority<
+          NodePgQueryResultHKT,
+          typeof schema,
+          string,
+          MutationAuthorityContractRefusal
+        >({ db: database, scope: (actor) => actor }),
+        load: loadState,
+        async writeAxis(tx, axis, expectedRevision, next) {
+          const written = await tx
+            .update(contractAxes)
+            .set(next)
+            .where(
+              and(
+                eq(contractAxes.axis, axis),
+                eq(contractAxes.revision, expectedRevision)
+              )
+            )
+            .returning({ axis: contractAxes.axis })
+          return written.length === 1
+        },
+        async appendEffect(tx, effect) {
+          await tx.insert(contractEffects).values({ effect })
+        },
+        replace: (next) => replaceState(database, next),
+        receiptCount: () => database.$count(headcanonMutationReceipts),
+        hasReceipt: async (mutationId) =>
+          (await database.$count(
+            headcanonMutationReceipts,
+            eq(headcanonMutationReceipts.mutationId, mutationId)
+          )) === 1,
+      }
+    },
   }
 }
 
-function contractArgs(
-  overrides: Partial<MutationAuthorityContractArgs> = {}
-): MutationAuthorityContractArgs {
-  return {
-    amount: 1,
-    axes: ["primary"],
-    behavior: "accept",
-    effect: "effect",
-    maximumPrimary: null,
-    ...overrides,
-  }
+const touchArgs: StandardSchemaV1<unknown, { readonly effect: string }> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon-drizzle-test",
+    validate(value) {
+      return { value: value as { readonly effect: string } }
+    },
+  },
 }
+const touch = defineMutation({
+  name: "drizzle.touch",
+  args: touchArgs,
+  predict(state: null) {
+    return ok(state)
+  },
+})
+const touchProtocol = defineProtocol({
+  id: "test.drizzle.v1",
+  mutations: [touch],
+})
 
 describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
   const schemaName = `headcanon_${process.pid}_${Date.now()}`
   let adminPool: Pool | undefined
-  let pool: Pool | undefined
-  let db: ContractDatabase
+  const pools = new Map<IsolationLevel, Pool>()
+  const databases = new Map<IsolationLevel, ContractDatabase>()
   let schemaCreated = false
-  let serializationFailures = 0
+
+  const database = (isolation: IsolationLevel) => {
+    const db = databases.get(isolation)
+    if (!db) throw new Error(`No database for ${isolation}`)
+    return db
+  }
 
   beforeAll(async () => {
     if (!databaseUrl) return
@@ -105,8 +225,15 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
     await admin.execute(sql.raw(`create schema "${schemaName}"`))
     schemaCreated = true
 
-    pool = new Pool({ connectionString: schemaUrl(databaseUrl, schemaName) })
-    db = drizzle(pool, { schema })
+    for (const isolation of DATABASE_ISOLATION_LEVELS) {
+      const pool = new Pool({
+        connectionString: connectionUrl(databaseUrl, schemaName, isolation),
+      })
+      pools.set(isolation, pool)
+      databases.set(isolation, drizzle(pool, { schema }))
+    }
+
+    const db = database("read committed")
     for (const statement of receiptMigration.split(
       "--> statement-breakpoint"
     )) {
@@ -129,7 +256,7 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
 
   afterAll(async () => {
     if (!databaseUrl) return
-    await pool?.end()
+    await Promise.all([...pools.values()].map((pool) => pool.end()))
     if (adminPool && schemaCreated) {
       const admin = drizzle(adminPool)
       await admin.execute(sql.raw(`drop schema "${schemaName}" cascade`))
@@ -137,116 +264,42 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
     await adminPool?.end()
   })
 
-  async function reset() {
-    serializationFailures = 0
-    await db.transaction(async (tx) => {
-      await tx.delete(headcanonMutationReceipts)
-      await tx.delete(contractEffects)
-      await tx.delete(contractAxes)
-      await tx.insert(contractAxes).values([
-        { axis: PRIMARY, value: 0, revision: 0 },
-        { axis: SECONDARY, value: 0, revision: 0 },
-        { axis: ROLLBACK, value: 0, revision: 0 },
-      ])
-    })
+  it("connects each harness with its database default isolation", async () => {
+    for (const isolation of DATABASE_ISOLATION_LEVELS) {
+      const result = await database(isolation).execute<{
+        default_transaction_isolation: string
+      }>(sql`show default_transaction_isolation`)
+      expect(result.rows[0]?.default_transaction_isolation).toBe(isolation)
+    }
+  })
+
+  for (const isolation of DATABASE_ISOLATION_LEVELS) {
+    verifyMutationAuthorityContract(
+      contractHarness(() => database(isolation), isolation)
+    )
   }
 
-  async function readState(): Promise<MutationAuthorityContractState> {
-    return db.transaction(async (tx) => {
-      const axes = await tx
-        .select()
-        .from(contractAxes)
-        .orderBy(asc(contractAxes.axis))
-      const effects = await tx
-        .select({ effect: contractEffects.effect })
-        .from(contractEffects)
-        .orderBy(asc(contractEffects.sequence))
-      const byName = new Map(axes.map((axis) => [axis.axis, axis]))
-      const primary = byName.get(PRIMARY)
-      const secondary = byName.get(SECONDARY)
-      const rollback = byName.get(ROLLBACK)
-      if (!primary || !secondary || !rollback) {
-        throw new Error("Incomplete contract fixture state")
-      }
-
-      return {
-        primary: primary.value,
-        secondary: secondary.value,
-        rollbackOnly: rollback.value,
-        revisions: {
-          primary: primary.revision,
-          secondary: secondary.revision,
-          rollbackOnly: rollback.revision,
-        },
-        effects: effects.map(({ effect }) => effect),
-      }
-    })
-  }
-
-  async function replaceState(next: MutationAuthorityContractState) {
-    await db.transaction(async (tx) => {
-      await tx.delete(contractEffects)
-      if (next.effects.length > 0) {
-        await tx
-          .insert(contractEffects)
-          .values(next.effects.map((effect) => ({ effect })))
-      }
-      await tx
-        .update(contractAxes)
-        .set({ value: next.primary, revision: next.revisions.primary })
-        .where(eq(contractAxes.axis, PRIMARY))
-      await tx
-        .update(contractAxes)
-        .set({ value: next.secondary, revision: next.revisions.secondary })
-        .where(eq(contractAxes.axis, SECONDARY))
-      await tx
-        .update(contractAxes)
-        .set({
-          value: next.rollbackOnly,
-          revision: next.revisions.rollbackOnly,
-        })
-        .where(eq(contractAxes.axis, ROLLBACK))
-    })
-  }
-
-  const contention = new Array<number>()
-  const attempts = new Map<string, number>()
-
-  async function createDriver(): Promise<MutationAuthorityContractDriver> {
-    await reset()
-    contention.length = 0
-    attempts.clear()
-
+  it("rolls back real Postgres serialization failures without a receipt", async () => {
+    const db = database("read committed")
+    await db.delete(headcanonMutationReceipts)
+    await db.delete(contractEffects)
     const authority = createDrizzleMutationAuthority({
       db,
       scope: (actor: string) => actor,
-      parseRejection(value): MutationAuthorityContractRejection {
-        if (
-          typeof value === "object" &&
-          value !== null &&
-          "code" in value &&
-          (value.code === "precondition" ||
-            value.code === "rejected-after-write")
-        ) {
-          return { code: value.code }
-        }
-        throw new Error("Invalid contract fixture rejection")
-      },
     })
-    const execute = async (envelope: unknown) => {
-      const prepared = await prepareMutationRequest(
-        mutationAuthorityContractProtocol,
-        envelope
-      )
-      if (!prepared.ok) return prepared
-
+    let serializationFailures = 2
+    const execute = async () => {
+      const prepared = await prepareMutationRequest(touchProtocol, {
+        protocol: touchProtocol.id,
+        mutationId: "10000000-0000-4000-8000-000000000100",
+        invocation: touch({ effect: "serialization" }),
+      })
+      if (!prepared.ok) throw new Error("Invalid serialization envelope")
       return executePreparedMutation({
         prepared: prepared.value,
-        actor: MUTATION_AUTHORITY_CONTRACT_ACTOR,
+        actor: "serialization-actor",
         authority,
-        async run(tx, stamp, rawArgs) {
-          const args = rawArgs as MutationAuthorityContractArgs
-          attempts.set(args.effect, (attempts.get(args.effect) ?? 0) + 1)
+        async run(tx) {
           if (serializationFailures > 0) {
             serializationFailures -= 1
             await tx.execute(
@@ -255,172 +308,23 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
               )
             )
           }
-
-          const rows = await tx.select().from(contractAxes)
-          const byName = new Map(rows.map((axis) => [axis.axis, axis]))
-          const primary = byName.get(PRIMARY)
-          if (!primary) throw new Error("Missing primary contract axis")
-          if (
-            args.maximumPrimary !== null &&
-            primary.value > args.maximumPrimary
-          ) {
-            return err({
-              kind: "refused",
-              error: { code: "precondition" },
-            } as const)
-          }
-
-          const writes = args.axes.flatMap((requestedAxis) => {
-            const axis =
-              requestedAxis === "primary"
-                ? PRIMARY
-                : requestedAxis === "secondary"
-                  ? SECONDARY
-                  : ROLLBACK
-            if (axis === ROLLBACK && primary.value !== 0) return []
-            const current = byName.get(axis)
-            if (!current) throw new Error(`Missing contract axis: ${axis}`)
-            return [{ axis, current }]
-          })
-
-          await tx.insert(contractEffects).values({ effect: args.effect })
-          if (
-            args.behavior === "mutate-args-when-zero" &&
-            primary.value === 0
-          ) {
-            const mutableArgs = args as { amount: number }
-            mutableArgs.amount = 100
-          }
-
-          const externalDelta = contention.shift()
-          if (externalDelta !== undefined) {
-            await db
-              .update(contractAxes)
-              .set({
-                value: sql`${contractAxes.value} + ${externalDelta}`,
-                revision: sql`${contractAxes.revision} + 1`,
-              })
-              .where(eq(contractAxes.axis, PRIMARY))
-          }
-
-          for (const { axis, current } of writes) {
-            const [written] = await tx
-              .update(contractAxes)
-              .set({
-                value: current.value + args.amount,
-                revision: current.revision + 1,
-              })
-              .where(
-                and(
-                  eq(contractAxes.axis, axis),
-                  eq(contractAxes.revision, current.revision)
-                )
-              )
-              .returning({ revision: contractAxes.revision })
-            if (!written) throwMutationContention()
-
-            const stampedAxis =
-              axis === PRIMARY
-                ? MUTATION_AUTHORITY_CONTRACT_AXES.primary
-                : axis === SECONDARY
-                  ? MUTATION_AUTHORITY_CONTRACT_AXES.secondary
-                  : MUTATION_AUTHORITY_CONTRACT_AXES.rollback
-            stamp.record(stampedAxis, written.revision)
-          }
-
-          if (args.behavior === "throw") {
-            throw new Error("authority contract exception")
-          }
-          if (args.behavior === "reject") {
-            return err({
-              kind: "refused",
-              error: { code: "rejected-after-write" },
-            } as const)
-          }
+          await tx.insert(contractEffects).values({ effect: "serialization" })
           return ok(undefined)
         },
       })
     }
 
-    return {
-      execute,
-      read: readState,
-      replace: replaceState,
-      contendNext: async (primaryDelta = 0) => {
-        contention.push(primaryDelta)
-      },
-      receiptCount: async () => db.$count(headcanonMutationReceipts),
-      hasReceipt: async (mutationId) =>
-        (await db.$count(
-          headcanonMutationReceipts,
-          and(
-            eq(
-              headcanonMutationReceipts.actorScope,
-              MUTATION_AUTHORITY_CONTRACT_ACTOR
-            ),
-            eq(headcanonMutationReceipts.mutationId, mutationId)
-          )
-        )) === 1,
-      attemptCount: async (mutationId) => {
-        const [receipt] = await db
-          .select({
-            canonicalInvocation: headcanonMutationReceipts.canonicalInvocation,
-          })
-          .from(headcanonMutationReceipts)
-          .where(eq(headcanonMutationReceipts.mutationId, mutationId))
-        if (!receipt) return 0
-        const canonical: unknown = JSON.parse(receipt.canonicalInvocation)
-        if (
-          typeof canonical !== "object" ||
-          canonical === null ||
-          !("invocation" in canonical)
-        ) {
-          throw new Error("Invalid contract receipt invocation")
-        }
-        const invocation = canonical.invocation
-        if (
-          typeof invocation !== "object" ||
-          invocation === null ||
-          !("args" in invocation)
-        ) {
-          throw new Error("Invalid contract receipt arguments")
-        }
-        const args = invocation.args
-        if (
-          typeof args !== "object" ||
-          args === null ||
-          !("effect" in args) ||
-          typeof args.effect !== "string"
-        ) {
-          throw new Error("Invalid contract receipt effect")
-        }
-        return attempts.get(args.effect) ?? 0
-      },
-    }
-  }
-
-  verifyMutationAuthorityContract({
-    name: "drizzle/Postgres",
-    create: createDriver,
-  })
-
-  it("rolls back real Postgres serialization failures without a receipt", async () => {
-    const driver = await createDriver()
-    const envelope = contractEnvelope(
-      100,
-      contractArgs({ effect: "serialization" })
+    await expect(execute()).resolves.toEqual(
+      err({
+        code: "contention",
+        mutationId: "10000000-0000-4000-8000-000000000100",
+      })
     )
-    serializationFailures = 2
+    expect(await db.$count(headcanonMutationReceipts)).toBe(0)
+    expect(await db.$count(contractEffects)).toBe(0)
 
-    await expect(driver.execute(envelope)).resolves.toEqual(
-      err({ code: "contention", mutationId: envelope.mutationId })
-    )
-    expect(await driver.hasReceipt(envelope.mutationId)).toBe(false)
-    expect(await driver.read()).toEqual(
-      MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE
-    )
-
-    await expect(driver.execute(envelope)).resolves.toMatchObject({ ok: true })
-    expect(await driver.hasReceipt(envelope.mutationId)).toBe(true)
+    await expect(execute()).resolves.toMatchObject({ ok: true })
+    expect(await db.$count(headcanonMutationReceipts)).toBe(1)
+    expect(await db.$count(contractEffects)).toBe(1)
   })
 })

@@ -12,7 +12,7 @@ import { acceptedStamp, axisId } from "../revisions"
 import {
   verifyInvalidationContract,
   type InvalidationContractHarness,
-} from "../testing"
+} from "../testing/contracts"
 import { ABLY_AXIS_INVALIDATION_EVENT, ablyAxisChannelName } from "./channels"
 import {
   createAblyInvalidationAdapter,

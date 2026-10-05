@@ -15,6 +15,7 @@ import {
 } from "../index"
 import {
   createInMemoryMutationAuthority,
+  type InMemoryReader,
   type InMemoryTransaction,
 } from "../testing"
 import {
@@ -286,12 +287,13 @@ const protocol = defineProtocol({
 })
 
 type CounterTx = InMemoryTransaction<number>
+type CounterPreflight = InMemoryReader<number>
 type CounterAuthority = MutationAuthorityAdapter<
   CounterTx,
   string,
   unknown,
-  CounterTx
-> & { readonly preflight: CounterTx }
+  CounterPreflight
+>
 
 const stringSchema: StandardSchemaV1<unknown, { readonly value: string }> = {
   "~standard": {
@@ -315,7 +317,7 @@ const _rename = defineMutation({
 const wrongArgsCommand: MutationCommand<
   typeof _rename,
   string,
-  CounterTx,
+  CounterPreflight,
   CounterTx,
   undefined,
   undefined
@@ -344,7 +346,7 @@ describe("Next mutation action", () => {
   type IncrementCommand = MutationCommand<
     typeof increment,
     string,
-    CounterTx,
+    CounterPreflight,
     CounterTx,
     { readonly screened: number },
     { readonly observed: number }
@@ -352,15 +354,9 @@ describe("Next mutation action", () => {
   type IncrementFinalization = NonNullable<IncrementCommand["finalizeAccepted"]>
 
   function createAuthority() {
-    const authority = createInMemoryMutationAuthority<number, string, unknown>({
+    return createInMemoryMutationAuthority<number, string, unknown>({
       initialState: 0,
       scope: (actor) => actor,
-    })
-    return Object.assign(authority, {
-      preflight: {
-        read: () => authority.read(),
-        write: (next: number) => authority.replace(next),
-      } satisfies CounterTx,
     })
   }
 
@@ -429,7 +425,6 @@ describe("Next mutation action", () => {
       `execute:${envelope.mutationId}`,
     ])
     expect(authority.read()).toBe(11)
-    expect(authority.attemptCount("actor", envelope.mutationId)).toBe(2)
   })
 
   it("claims no receipt when screening denies", async () => {
@@ -496,7 +491,7 @@ describe("Next mutation action", () => {
     const first = await execute(refusedEnvelope)
     const duplicate = await execute(refusedEnvelope)
 
-    expect(first).toEqual(ok({ kind: "rejected", error: { code: "refused" } }))
+    expect(first).toEqual(ok({ kind: "refused", error: { code: "refused" } }))
     expect(duplicate).toEqual(first)
     expect(authority.receiptCount()).toBe(1)
   })
@@ -576,16 +571,10 @@ describe("Next mutation action", () => {
   })
 
   it("fails closed when the authority presents a corrupt stored refusal", async () => {
-    const preflight: CounterTx = { read: () => 0, write: vi.fn() }
-    const authority: MutationAuthorityAdapter<
-      CounterTx,
-      string,
-      unknown,
-      CounterTx
-    > & { readonly preflight: CounterTx } = {
-      preflight,
+    const authority: CounterAuthority = {
+      preflight: { read: () => 0 },
       async execute(request) {
-        request.parseRejection?.({ code: "corrupt" })
+        request.parseRefusal?.({ code: "corrupt" })
         throw new Error("corrupt refusal was admitted")
       },
     }

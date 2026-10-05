@@ -9,8 +9,9 @@ npm install headcanon
 
 `next` and `react` are required peers. The other peers are optional and needed
 only by the entries that use them: `ably` for `headcanon/ably/*`, `drizzle-orm`
-for `headcanon/drizzle` and `headcanon/drizzle-schema`, and `vitest` with
-`@testing-library/react` for `headcanon/testing`.
+for `headcanon/drizzle` and `headcanon/drizzle-schema`, `vitest` for
+`headcanon/testing/contracts`, and `vitest` with `@testing-library/react` for
+`headcanon/testing/react`. `headcanon/testing` needs no optional peer.
 
 `headcanon` provides a framework-independent protocol entry, a
 client-only React entry, and explicit Next client/server bindings for optimistic
@@ -207,9 +208,13 @@ context to enforce them.
 - **Authority execution.** `createNextMutationAction` strictly admits envelopes,
   reparses arguments, and selects one exhaustive definition-keyed command before
   entering receipt authority. The authority adapter owns receipt scope,
-  transactional attempts, contention retry, and attempt-local stamp lifetimes;
-  commands own application admission, execution, and repeat-safe accepted
-  projections.
+  transactional attempts, contention retry, and attempt-local stamp lifetimes,
+  and supplies the `preflight` executor that screening reads committed state
+  through; commands own application admission, execution, and repeat-safe
+  accepted projections. A command attempt is accepted, `refused` (a public
+  refusal, recorded and replayed), or `denied` (private); the terminal outcome
+  uses the same names. A command that loses a race calls
+  `throwMutationContention()` from `headcanon`, and every adapter reruns it.
 - **Invalidation vocabulary.** The framework-independent entry defines singleton
   axis invalidations, subscribers, publishers, and the one meaning of each
   `InvalidationStatus` (with `isDegradedInvalidationStatus` for `disabled`,
@@ -328,33 +333,50 @@ must not grant an axis merely because the browser requested its channel. The
 `production` namespace, so adopters can choose native Ably Tokens when a JWT or
 header representation would be impractical.
 
-## Contract fixtures
+## Test doubles and contract suites
 
-The `headcanon/testing` entry ships in-memory authority and
-invalidation adapters. The authority provides isolated transactional state,
-receipt deduplication, collision detection, terminal-rejection savepoints, and
-controllable contention reruns. The invalidation bus fans accepted vectors into
-singleton per-axis entries and follows subscription lifetimes.
+Three entries serve tests. Each states what it needs.
 
-`verifyMutationAuthorityContract`, `verifyInvalidationContract`, and
-`verifyRefreshContract` are reusable black-box suites. Production Drizzle, Ably,
-router-shaped, and snapshot-shaped adapters supply harnesses and run the same
-behavioral contracts rather than duplicating synchronization assertions.
+| Entry                         | Exports                                                                                                       | Needs                                                    |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `headcanon/testing`           | `createInMemoryMutationAuthority`, `createInMemoryInvalidationAdapter`                                        | Nothing: any test runner, a script, or a server module.  |
+| `headcanon/testing/contracts` | `verifyMutationAuthorityContract`, `verifyInvalidationContract`, their harness types, and in-memory harnesses | `vitest`, in the `node` environment.                     |
+| `headcanon/testing/react`     | `verifyRefreshContract`, `RefreshContractHarness`                                                             | `vitest`, `@testing-library/react`, and a DOM (`jsdom`). |
+
+The in-memory authority follows the Drizzle adapter's rules: receipts keyed by
+actor scope and mutation ID, one execution at a time per key while different
+keys interleave, a `preflight` reader that sees only committed state, refusals
+that need the request's `parseRefusal`, and a rerun when a command throws
+`MutationContentionError`. An attempt that wrote state commits only if no other
+commit landed since it began; otherwise it reruns. `contendNext(update)` commits
+`update` during the next attempt so a test can make that attempt lose a race.
+It passes to `createNextMutationAction` as is. The invalidation bus fans
+accepted vectors into singleton per-axis entries and follows subscription
+lifetimes.
+
+Call a `verify*Contract` function at the top level of a vitest file. The
+authority contract owns its fixture command and drives it through
+`executePreparedMutation`; a harness supplies only the adapter and the storage
+its transactions reach (`load`, a compare-and-set `writeAxis`, `appendEffect`,
+`replace`, and receipt counts). The invalidation contract checks the adapter
+alone. Production Drizzle, Ably, router-shaped, and snapshot-shaped adapters
+run these same suites.
 
 ## Drizzle/Postgres authority
 
-`headcanon/drizzle` exports `createDrizzleMutationAuthority`,
-`throwMutationContention`, the cycle-safe `matchesPostgresError` matcher, and the
-`DrizzleMutationTx` helper type. The matcher lets application-specific
-contention rules select a SQLSTATE and optional constraint without reimplementing
-wrapped `cause` traversal. The receipt
+`headcanon/drizzle` exports `createDrizzleMutationAuthority`, the cycle-safe
+`matchesPostgresError` matcher, and the `DrizzleMutationTx` helper type. The
+matcher lets application-specific contention rules (`isContentionError`) select
+a SQLSTATE and optional constraint without reimplementing wrapped `cause`
+traversal. The receipt
 table itself is published from the dependency-minimal
 `headcanon/drizzle-schema` entry (drizzle-orm only), so an adopter can
 add it to their Drizzle schema — and let `drizzle-kit` scan it — without the
 authority graph being pulled into schema tooling. Include the table in the
 adopter's schema so its normal migration workflow owns deployment; the equivalent
 baseline SQL is checked in at `drizzle/0000_headcanon_mutation_receipts.sql` for
-migration review and fixtures.
+migration review and fixtures, and a test fails if it drifts from the table
+definition. Receipts are written once; `created_at` is indexed for pruning.
 
 Commands infer their context when registered through `createNextMutationAction`.
 When a command or Store needs an explicit transaction type, use
@@ -364,15 +386,26 @@ The adapter requires an interactive Postgres Drizzle client: for Neon, use the
 WebSocket `Pool` integration rather than the HTTP query client. It acquires a
 transaction-scoped receipt identity lock before application work, runs each
 command attempt in a nested Drizzle transaction/savepoint, and retries bounded
-contention. Expected rejections must cross the receipt boundary through the
-caller's `parseRejection`; malformed stored outcomes fail closed.
+contention. Refusals cross the receipt boundary only through the request's
+`parseRefusal`, which `createNextMutationAction` derives from each mutation's
+refusal schema; without one, a refusal throws instead of being recorded or
+replayed. Malformed stored outcomes fail closed.
 
-Guarded application writes call `throwMutationContention()` when their
-compare-and-swap affects no row. That aborts the outer attempt, discards its
-domain writes and stamp, and reruns the complete command from current state.
-Unexpected exceptions still propagate without a receipt.
+Every attempt runs at READ COMMITTED, whatever the database default. Under
+REPEATABLE READ or SERIALIZABLE the transaction snapshot is taken by the lock
+statement itself, before the lock is granted, so a duplicate delivery waiting
+on the lock could not see the receipt its twin had just committed and would run
+the command again. The adapter therefore takes no isolation option.
+
+Guarded application writes call `throwMutationContention()` (from `headcanon`)
+when their compare-and-swap affects no row. That aborts the outer attempt,
+discards its domain writes and stamp, and reruns the complete command from
+current state. Unexpected exceptions still propagate without a receipt.
 
 The real-Postgres contract suite runs when `HEADCANON_TEST_DATABASE_URL` or
-`DATABASE_URL` is available. It creates a unique schema, proves receipt/domain
-atomicity, concurrent deduplication, savepoint rejection, attempt-local stamps,
-and SQLSTATE serialization retry, then drops the schema.
+`DATABASE_URL` is available. It creates a unique schema and runs the authority
+contract once for each database default isolation level (read committed,
+repeatable read, serializable): receipt/domain atomicity, concurrent
+deduplication, savepoint rollback of refusals, attempt-local stamps, preflight
+isolation, and fail-closed refusal parsing. It also checks SQLSTATE
+serialization retry, then drops the schema.

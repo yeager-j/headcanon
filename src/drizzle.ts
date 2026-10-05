@@ -3,45 +3,29 @@ import {
   type PgDatabase,
   type PgQueryResultHKT,
   type PgTransaction,
-  type PgTransactionConfig,
 } from "drizzle-orm/pg-core"
 import type { ExtractTablesWithRelations } from "drizzle-orm/relations"
-import { err, ok } from "serializable-result"
+import { ok, type Result } from "serializable-result"
 
-import { hasExactKeys, isPlainRecord } from "./admission"
 import {
+  contentionRetry,
   createStampAccumulator,
+  mutationReceipt,
+  receiptKey,
+  recordTerminalOutcome,
+  replayReceipt,
+  type MutationAttemptFailure,
   type MutationAuthorityAdapter,
-  type MutationAuthorityRequest,
-  type MutationTerminalOutcome,
 } from "./authority"
 import {
   headcanonMutationReceipts,
   type StoredMutationTerminalOutcome,
 } from "./receipt-table"
-import { acceptedStamp } from "./revisions"
 
 // The receipt table is defined in `./receipt-table` (drizzle-orm only, so schema
 // tooling never loads the authority graph) and published from the dedicated
 // `./drizzle-schema` entry. This adapter imports it for its own queries; it does
 // not re-export it, so the table has exactly one public home (UNN-673).
-
-/** Transaction control flow for a guarded write that lost a race. */
-export class MutationContentionError extends Error {
-  constructor() {
-    super("Mutation authority contention")
-    this.name = "MutationContentionError"
-  }
-}
-
-/**
- * Rolls the current attempt back so the authority can retry from current state.
- * @returns Never; throws transaction-control-flow contention.
- * @throws {@link MutationContentionError} to request an authority retry.
- */
-export function throwMutationContention(): never {
-  throw new MutationContentionError()
-}
 
 /** Transaction-capable Drizzle client shape accepted by the authority adapter. */
 export type DrizzleMutationTransaction<
@@ -64,86 +48,19 @@ export interface DrizzleMutationAuthorityOptions<
   QueryResult extends PgQueryResultHKT,
   Schema extends Record<string, unknown>,
   Actor,
-  Rejection,
 > {
   readonly db: PgDatabase<QueryResult, Schema>
   readonly scope: (actor: Actor) => string
-  readonly parseRejection?: (value: unknown) => Rejection
   readonly maxAttempts?: number
-  readonly transaction?: PgTransactionConfig
   readonly isContentionError?: (error: unknown) => boolean
 }
 
-class TerminalDecision<Rejection> extends Error {
-  constructor(
-    readonly decision:
-      | { readonly kind: "refused"; readonly error: Rejection }
-      | { readonly kind: "denied" }
-  ) {
-    super("Terminal mutation decision")
-    this.name = "TerminalDecision"
+/** Rolls back the attempt savepoint of a refused or denied command. */
+class RollBackAttempt extends Error {
+  constructor() {
+    super("Roll back the refused mutation attempt")
+    this.name = "RollBackAttempt"
   }
-}
-
-function parseStoredOutcome<Rejection>(
-  value: unknown,
-  parseRejection?: (value: unknown) => Rejection
-): MutationTerminalOutcome<Rejection> {
-  if (!isPlainRecord(value) || typeof value.kind !== "string") {
-    throw new Error("Invalid mutation receipt outcome")
-  }
-
-  if (value.kind === "accepted") {
-    if (!hasExactKeys(value, ["kind", "stamp"])) {
-      throw new Error("Invalid accepted mutation receipt")
-    }
-    const stamp = acceptedStamp(value.stamp)
-    if (!stamp.ok) {
-      throw new Error(
-        `Invalid accepted mutation receipt stamp (${stamp.error.reason})`
-      )
-    }
-    return Object.freeze({ kind: "accepted", stamp: stamp.value })
-  }
-
-  if (value.kind === "rejected" && hasExactKeys(value, ["kind", "error"])) {
-    if (!parseRejection) {
-      throw new Error("Missing mutation receipt refusal parser")
-    }
-    return Object.freeze({
-      kind: "rejected",
-      error: parseRejection(structuredClone(value.error)),
-    })
-  }
-
-  if (value.kind === "denied" && hasExactKeys(value, ["kind"])) {
-    return Object.freeze({ kind: "denied" })
-  }
-
-  throw new Error("Invalid terminal mutation receipt")
-}
-
-function serializeOutcome<Rejection>(
-  outcome: MutationTerminalOutcome<Rejection>,
-  parseRejection?: (value: unknown) => Rejection
-): {
-  readonly stored: StoredMutationTerminalOutcome
-  readonly terminal: MutationTerminalOutcome<Rejection>
-} {
-  const json = JSON.stringify(outcome)
-  if (json === undefined) {
-    throw new Error("Mutation receipt outcome is not JSON serializable")
-  }
-  const stored: unknown = JSON.parse(json)
-  const terminal = parseStoredOutcome(stored, parseRejection)
-  return { stored: stored as StoredMutationTerminalOutcome, terminal }
-}
-
-function requestLockKey<Actor>(
-  request: MutationAuthorityRequest<Actor>,
-  actorScope: string
-): string {
-  return JSON.stringify([actorScope, request.mutationId])
 }
 
 /** SQLSTATE and optional constraint pattern used to classify contention errors. */
@@ -195,10 +112,6 @@ function isPostgresContention(error: unknown): boolean {
   )
 }
 
-function collision(mutationId: string) {
-  return err({ code: "mutation-id-reused", mutationId } as const)
-}
-
 /**
  * Creates the Postgres authority adapter around an interactive Drizzle client.
  *
@@ -212,7 +125,14 @@ function collision(mutationId: string) {
  * an interactive transaction client and does not decide actor identity,
  * authorization, domain semantics, or projection ownership.
  *
- * @param options Interactive Drizzle client, trusted scope function, retry policy, and optional contention/refusal hooks.
+ * Every attempt runs at READ COMMITTED, whatever the database default. Under
+ * REPEATABLE READ or SERIALIZABLE the snapshot would be taken by the lock
+ * statement itself, before the lock is granted, so a duplicate delivery that
+ * waited on the lock could not see the receipt its twin had just committed
+ * and would run the command again. Commands guard their own writes with
+ * compare-and-set and `throwMutationContention()` from `headcanon` instead.
+ *
+ * @param options Interactive Drizzle client, trusted scope function, retry policy, and optional contention classification.
  * @returns A receipt-owning mutation authority with the database as preflight executor.
  * @throws Error when retry configuration is invalid or the database reports an unexpected failure.
  */
@@ -220,41 +140,32 @@ export function createDrizzleMutationAuthority<
   QueryResult extends PgQueryResultHKT,
   Schema extends Record<string, unknown>,
   Actor,
-  Rejection,
+  Refusal,
 >(
-  options: DrizzleMutationAuthorityOptions<
-    QueryResult,
-    Schema,
-    Actor,
-    Rejection
-  >
+  options: DrizzleMutationAuthorityOptions<QueryResult, Schema, Actor>
 ): MutationAuthorityAdapter<
   DrizzleMutationTransaction<QueryResult, Schema>,
   Actor,
-  Rejection,
+  Refusal,
   PgDatabase<QueryResult, Schema>
-> & { readonly preflight: PgDatabase<QueryResult, Schema> } {
-  const maxAttempts = options.maxAttempts ?? 2
-  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-    throw new Error("maxAttempts must be a positive integer")
-  }
-
-  const retryable = (error: unknown) =>
-    error instanceof MutationContentionError ||
-    isPostgresContention(error) ||
-    options.isContentionError?.(error) === true
+> {
+  const retry = contentionRetry({
+    maxAttempts: options.maxAttempts,
+    isStoreContention: (error) =>
+      isPostgresContention(error) ||
+      options.isContentionError?.(error) === true,
+  })
 
   return {
     preflight: options.db,
-    async execute(request, run) {
+    execute(request, run) {
       const actorScope = options.scope(request.actor)
-      const parseRejection = request.parseRejection ?? options.parseRejection
 
-      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        try {
-          return await options.db.transaction(async (tx) => {
+      return retry(request.mutationId, () =>
+        options.db.transaction(
+          async (tx) => {
             await tx.execute(
-              sql`select pg_advisory_xact_lock(hashtextextended(${requestLockKey(request, actorScope)}, 0))`
+              sql`select pg_advisory_xact_lock(hashtextextended(${receiptKey(actorScope, request.mutationId)}, 0))`
             )
 
             const [recorded] = await tx
@@ -274,61 +185,40 @@ export function createDrizzleMutationAuthority<
                 )
               )
               .for("update")
-
-            if (recorded) {
-              if (
-                recorded.protocol !== request.protocol ||
-                recorded.canonicalInvocation !== request.canonical.json ||
-                recorded.canonicalFingerprint !== request.canonical.sha256
-              ) {
-                return collision(request.mutationId)
-              }
-              return ok(
-                parseStoredOutcome(recorded.terminalOutcome, parseRejection)
-              )
-            }
+            if (recorded) return replayReceipt(recorded, request)
 
             const stamp = createStampAccumulator()
-            let terminal: MutationTerminalOutcome<Rejection>
-
+            let attempted: Result<void, MutationAttemptFailure<Refusal>> = ok(
+              undefined
+            )
             try {
               await tx.transaction(async (attemptTx) => {
-                const attempted = await run(attemptTx, stamp)
-                if (!attempted.ok) throw new TerminalDecision(attempted.error)
+                attempted = await run(attemptTx, stamp)
+                if (!attempted.ok) throw new RollBackAttempt()
               })
-              terminal = { kind: "accepted", stamp: stamp.accepted() }
             } catch (error) {
-              if (!(error instanceof TerminalDecision)) throw error
-              terminal =
-                error.decision.kind === "denied"
-                  ? { kind: "denied" }
-                  : { kind: "rejected", error: error.decision.error }
+              if (!(error instanceof RollBackAttempt)) throw error
             }
 
-            const serialized = serializeOutcome(terminal, parseRejection)
+            const { stored, terminal } = recordTerminalOutcome(
+              attempted,
+              stamp,
+              request.parseRefusal
+            )
+            const receipt = mutationReceipt(request, stored)
             await tx.insert(headcanonMutationReceipts).values({
+              ...receipt,
               actorScope,
               mutationId: request.mutationId,
-              protocol: request.protocol,
-              canonicalInvocation: request.canonical.json,
-              canonicalFingerprint: request.canonical.sha256,
-              terminalOutcome: serialized.stored,
+              terminalOutcome:
+                receipt.terminalOutcome as StoredMutationTerminalOutcome,
             })
 
-            return ok(serialized.terminal)
-          }, options.transaction)
-        } catch (error) {
-          if (!retryable(error)) throw error
-          if (attempt === maxAttempts - 1) {
-            return err({
-              code: "contention",
-              mutationId: request.mutationId,
-            } as const)
-          }
-        }
-      }
-
-      throw new Error("Mutation authority attempt loop did not terminate")
+            return ok(terminal)
+          },
+          { isolationLevel: "read committed" }
+        )
+      )
     },
   }
 }
