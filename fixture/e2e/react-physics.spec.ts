@@ -75,6 +75,9 @@ test("navigation is blocked while an Action is held open and proceeds on settlem
   await expect(page.getByTestId("log")).toContainText("accepted rev=1")
 
   await page.getByRole("link", { name: "go home" }).click()
+  // Proving a navigation does *not* happen needs a bounded wait: no event
+  // signals "still blocked". A local client-side navigation commits in tens
+  // of milliseconds, so one second is well past the point it would have.
   await page.waitForTimeout(1_000)
   expect(new URL(page.url()).pathname).toBe("/probe")
 

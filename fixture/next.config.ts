@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url"
 import type { NextConfig } from "next"
 
 /**
@@ -6,6 +7,10 @@ import type { NextConfig } from "next"
  * `refresh()`. The fixture must reproduce what the app experiences, not an
  * idealized harness.
  */
-const nextConfig: NextConfig = {}
+const nextConfig: NextConfig = {
+  // The workspace root, where npm hoists `next`. Next infers it from a
+  // lockfile, and the repo commits none.
+  turbopack: { root: fileURLToPath(new URL("..", import.meta.url)) },
+}
 
 export default nextConfig
