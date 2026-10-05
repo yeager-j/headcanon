@@ -18,10 +18,13 @@ export interface RefreshContractHarness {
 
 const contractAxis = axisId("headcanon/refresh-contract")
 
-function contractCanon(revision: number): Canon<number> {
+// Each call returns a new state object, as every delivered RSC payload or
+// refetch does, so a void carrier's delivery is distinguishable from a
+// re-render.
+function contractCanon(revision: number): Canon<{ readonly revision: number }> {
   const parsed = revisionVector({ [contractAxis]: revision })
   if (!parsed.ok) throw new Error("Invalid refresh contract canon")
-  return { value: revision, revisions: parsed.value }
+  return { value: { revision }, revisions: parsed.value }
 }
 
 function contractStamp(revision: number) {
@@ -43,7 +46,11 @@ function setupRefreshContract(harness: RefreshContractHarness) {
   const useRefresh = harness.useRefresh
   let acceptanceGraceMs = 0
   const rendered = renderHook(
-    ({ currentCanon }: { readonly currentCanon: Canon<number> }) => {
+    ({
+      currentCanon,
+    }: {
+      readonly currentCanon: ReturnType<typeof contractCanon>
+    }) => {
       const refresh = useRefresh(request)
       acceptanceGraceMs = refresh.acceptanceGraceMs
       return useIncorporation(currentCanon, refresh)

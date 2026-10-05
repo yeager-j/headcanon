@@ -1,21 +1,17 @@
 "use client"
 
 import {
-  useCallback,
+  startTransition,
   useEffect,
   useMemo,
-  useReducer,
-  useRef,
   useState,
-  useTransition,
+  useSyncExternalStore,
 } from "react"
 
-import {
-  isDegradedInvalidationStatus,
-  type AxisInvalidation,
-  type InvalidationAdapter,
-  type InvalidationStatus,
-  type InvalidationSubscription,
+import type {
+  AxisInvalidation,
+  InvalidationAdapter,
+  InvalidationStatus,
 } from "./invalidation"
 import {
   covers,
@@ -25,135 +21,41 @@ import {
   type AcceptedStamp,
   type AxisId,
   type Canon,
-  type Revision,
   type RevisionVector,
 } from "./revisions"
 
 /** Grace period used by snapshot carriers before an acceptance refresh. */
 export const SNAPSHOT_ACCEPTANCE_GRACE_MS = 0
-/** Delay before retrying one refresh that still does not cover an accepted stamp. */
+/** Delay before retrying a refresh that completed without meeting the root's requirements. */
 export const UNCOVERED_REFRESH_RETRY_MS = 1_000
-
-/** Refresh carrier used to obtain a newer authoritative canon. */
-export interface RefreshAdapter {
-  readonly acceptanceGraceMs: number
-  request(): void | Promise<void>
-}
-
-/** Timing and visibility policy for degraded invalidation polling. */
-export interface PollingFallbackOptions {
-  readonly intervalMs: number
-  readonly pauseWhenHidden?: boolean
-}
-
-function pollingStatus(status: InvalidationStatus): InvalidationStatus {
-  return isDegradedInvalidationStatus(status) ? "polling" : status
-}
+/** Refresh attempts a requirement gets before the root reports a stall. */
+const REFRESH_ATTEMPT_LIMIT = 2
 
 /**
- * Preserves bounded liveness through the subscribed root's existing refresh
- * path whenever its primary invalidation transport is unavailable.
+ * Refresh carrier used to obtain a newer authoritative canon.
  *
- * The wrapper reports `polling` while the primary adapter is disabled,
- * reauthorizing, or unavailable, and requests refreshes at the configured
- * interval through `onSubscriptionGap`. It stops the timer on unsubscribe and
- * can pause while the document is hidden. When the primary transport becomes
- * active, polling stops and the original status is forwarded. This is a
- * liveness fallback, not a second data source: the root still obtains state
- * only through its existing refresh carrier.
+ * The root runs at most one `request()` at a time, and how an attempt
+ * completes depends on what `request()` returns:
  *
- * @param primary Push invalidation adapter to wrap.
- * @param options Polling interval and visibility policy.
- * @returns An invalidation adapter with polling fallback.
- * @throws Error when `intervalMs` is not a finite positive number.
+ * - A promise: the attempt completes when it settles. Fulfilment is a
+ *   delivered refresh; rejection is a failed one.
+ * - Nothing (a void carrier such as `router.refresh()`): the attempt completes
+ *   when the root next receives a canon whose state value (compared by
+ *   identity) or revisions differ from the canon it had when the request
+ *   started. A re-render with the same canon, or with a new canon object
+ *   around the same state and revisions, does not count, so a parent that
+ *   rebuilds the canon wrapper on every render does not consume attempts. The
+ *   carrier must deliver a new state object or new revisions, as an RSC
+ *   payload does. A void carrier has no failure signal: an attempt that never
+ *   receives such a canon stays `refreshing`.
+ *
+ * A synchronous throw from `request()` is a failed attempt.
  */
-export function withPollingFallback(
-  primary: InvalidationAdapter,
-  options: PollingFallbackOptions
-): InvalidationAdapter {
-  if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
-    throw new Error("Polling fallback intervalMs must be positive")
-  }
-
-  const pauseWhenHidden = options.pauseWhenHidden ?? true
-
-  return {
-    get initialStatus() {
-      return pollingStatus(primary.initialStatus)
-    },
-    subscribe(subscription) {
-      let polling = isDegradedInvalidationStatus(primary.initialStatus)
-      let stopped = false
-      let interval: ReturnType<typeof setInterval> | null = null
-
-      const hidden = () =>
-        pauseWhenHidden &&
-        typeof document !== "undefined" &&
-        document.visibilityState === "hidden"
-
-      const stopInterval = () => {
-        if (interval === null) return
-        clearInterval(interval)
-        interval = null
-      }
-
-      const requestRefresh = () => {
-        if (!stopped && polling && !hidden()) {
-          subscription.onSubscriptionGap?.()
-        }
-      }
-
-      const startInterval = () => {
-        if (stopped || !polling || hidden() || interval !== null) return
-        interval = setInterval(requestRefresh, options.intervalMs)
-      }
-
-      const reconcileInterval = () => {
-        if (polling) startInterval()
-        else stopInterval()
-      }
-
-      const onStatusChange: InvalidationSubscription["onStatusChange"] = (
-        status
-      ) => {
-        if (status === "active") polling = false
-        else if (isDegradedInvalidationStatus(status)) polling = true
-
-        reconcileInterval()
-        subscription.onStatusChange(polling ? "polling" : status)
-      }
-
-      const onVisibilityChange = () => {
-        if (hidden()) {
-          stopInterval()
-          return
-        }
-
-        requestRefresh()
-        startInterval()
-      }
-
-      const stopPrimary = primary.subscribe({
-        ...subscription,
-        onStatusChange,
-      })
-      reconcileInterval()
-
-      if (pauseWhenHidden && typeof document !== "undefined") {
-        document.addEventListener("visibilitychange", onVisibilityChange)
-      }
-
-      return () => {
-        if (stopped) return
-        stopped = true
-        stopInterval()
-        if (pauseWhenHidden && typeof document !== "undefined") {
-          document.removeEventListener("visibilitychange", onVisibilityChange)
-        }
-        stopPrimary()
-      }
-    },
-  }
+export interface RefreshAdapter {
+  /** Milliseconds to wait after an acceptance before requesting, so canon that travels with the acceptance can arrive first. */
+  readonly acceptanceGraceMs: number
+  /** Starts one refresh. See the interface for how the attempt completes. */
+  request(): void | Promise<void>
 }
 
 /** Reason a root exhausted its bounded refresh recovery budget. */
@@ -162,63 +64,19 @@ export type RefreshStallReason = "behind" | "missing-axis" | "refresh-error"
 /** Freshness lifecycle of the mounted authoritative canon. */
 export type FreshnessStatus = "current" | "grace" | "refreshing" | "stalled"
 
+/**
+ * Freshness of the mounted canon. Only the `stalled` state carries a
+ * `stallReason`, so a current root with a stall reason cannot be expressed.
+ */
+export type FreshnessState =
+  | { readonly freshness: Exclude<FreshnessStatus, "stalled"> }
+  | { readonly freshness: "stalled"; readonly stallReason: RefreshStallReason }
+
 /** Combined freshness and invalidation state exposed by root APIs. */
-export interface IncorporationStatus {
-  readonly freshness: FreshnessStatus
+export type IncorporationStatus = FreshnessState & {
   readonly invalidations: InvalidationStatus
+  /** Required axes the mounted canon does not carry at all. */
   readonly missingAxes: readonly AxisId[]
-  readonly stallReason: RefreshStallReason | null
-}
-
-interface RefreshState {
-  readonly freshness: FreshnessStatus
-  readonly stallReason: RefreshStallReason | null
-}
-
-const CURRENT_REFRESH_STATE: RefreshState = {
-  freshness: "current",
-  stallReason: null,
-}
-
-function maxRevision(
-  target: Map<AxisId, Revision>,
-  revisions: RevisionVector
-): boolean {
-  let changed = false
-
-  for (const [axis, revision] of revisionEntries(revisions)) {
-    const current = target.get(axis)
-    if (current !== undefined && current >= revision) continue
-
-    target.set(axis, revision)
-    changed = true
-  }
-
-  return changed
-}
-
-function revisionsFrom(
-  accepted: ReadonlyMap<string, AcceptedStamp>,
-  observed: ReadonlyMap<AxisId, Revision>,
-  canon: Canon<unknown>
-): RevisionVector {
-  return revisionVectorFrom([
-    ...[...accepted.values()].flatMap((stamp) =>
-      revisionEntries(stamp.revisions)
-    ),
-    ...[...observed].filter(
-      ([axis]) => revisionAt(canon.revisions, axis) !== undefined
-    ),
-  ])
-}
-
-function missingAxes(
-  canon: Canon<unknown>,
-  requirements: RevisionVector
-): readonly AxisId[] {
-  return revisionEntries(requirements)
-    .map(([axis]) => axis)
-    .filter((axis) => revisionAt(canon.revisions, axis) === undefined)
 }
 
 /** Creates the refresh carrier for a snapshot or non-router data source.
@@ -237,358 +95,605 @@ export function useSnapshotRefresh(
   )
 }
 
+// ---------------------------------------------------------------------------
+// State machine. Pure: every decision about requirements, attempts, budget,
+// and freshness is made here, from the state and one event.
+
+/** What starts the next attempt once it elapses. */
+type Wait =
+  | { readonly kind: "grace"; readonly ms: number }
+  | { readonly kind: "scheduled" }
+  | { readonly kind: "retry" }
+
+interface Attempt {
+  /** Clock tick when the attempt started; a later gap is not closed by it. */
+  readonly startedAt: number
+  /** Canon mounted when the attempt started, for void-carrier completion. */
+  readonly canon: Canon<unknown>
+  readonly awaits: "canon" | "request"
+}
+
+interface IncorporationState {
+  readonly canon: Canon<unknown>
+  /** Stamps of accepted mutations canon has not yet covered, by mutation ID. */
+  readonly accepted: ReadonlyMap<string, AcceptedStamp>
+  /** Fresher invalidation revisions canon has not yet covered. */
+  readonly observed: RevisionVector
+  /** Per-axis maximum of `accepted` and `observed`: what canon must cover. */
+  readonly required: RevisionVector
+  /** Clock tick of the latest subscription gap no refresh has closed yet. */
+  readonly gap: number | null
+  readonly clock: number
+  readonly attempt: Attempt | null
+  /** Attempts and failed attempts spent on the current requirements. */
+  readonly attempts: number
+  readonly failures: number
+  /** Pending start of the next attempt. Never set while an attempt runs. */
+  readonly wait: Wait | null
+  readonly freshness: FreshnessState
+  readonly invalidations: InvalidationStatus
+}
+
+type IncorporationEvent =
+  | {
+      readonly type: "acceptance-recorded"
+      readonly mutationId: string
+      readonly stamp: AcceptedStamp
+      readonly graceMs: number
+    }
+  | { readonly type: "acceptance-removed"; readonly mutationId: string }
+  | { readonly type: "invalidated"; readonly invalidation: AxisInvalidation }
+  | { readonly type: "gap-signalled" }
+  | { readonly type: "canon-received"; readonly canon: Canon<unknown> }
+  | { readonly type: "retry-requested" }
+  | { readonly type: "wait-elapsed"; readonly wait: Wait }
+  | { readonly type: "request-returned-promise"; readonly startedAt: number }
+  | {
+      readonly type: "attempt-settled"
+      readonly startedAt: number
+      readonly failed: boolean
+    }
+  | {
+      readonly type: "invalidation-status"
+      readonly status: InvalidationStatus
+    }
+
+const CURRENT: FreshnessState = { freshness: "current" }
+const GRACE: FreshnessState = { freshness: "grace" }
+const REFRESHING: FreshnessState = { freshness: "refreshing" }
+const SCHEDULED: Wait = { kind: "scheduled" }
+const RETRY: Wait = { kind: "retry" }
+
+function initialState(
+  canon: Canon<unknown>,
+  invalidations: InvalidationStatus
+): IncorporationState {
+  const empty = revisionVectorFrom([])
+  return {
+    canon,
+    accepted: new Map(),
+    observed: empty,
+    required: empty,
+    gap: null,
+    clock: 0,
+    attempt: null,
+    attempts: 0,
+    failures: 0,
+    wait: null,
+    freshness: CURRENT,
+    invalidations,
+  }
+}
+
+function missingAxes(
+  revisions: RevisionVector,
+  required: RevisionVector
+): readonly AxisId[] {
+  return revisionEntries(required)
+    .map(([axis]) => axis)
+    .filter((axis) => revisionAt(revisions, axis) === undefined)
+}
+
+function sameRevisions(left: RevisionVector, right: RevisionVector): boolean {
+  return covers(left, right) && covers(right, left)
+}
+
+function withRequirements(
+  state: IncorporationState,
+  accepted: ReadonlyMap<string, AcceptedStamp>,
+  observed: RevisionVector
+): IncorporationState {
+  const required = revisionVectorFrom([
+    ...[...accepted.values()].flatMap((stamp) =>
+      revisionEntries(stamp.revisions)
+    ),
+    ...revisionEntries(observed),
+  ])
+  return {
+    ...state,
+    accepted,
+    observed,
+    // Keeping the reference keeps the published snapshot stable.
+    required: sameRevisions(required, state.required)
+      ? state.required
+      : required,
+  }
+}
+
+function isMet(state: IncorporationState): boolean {
+  return state.gap === null && covers(state.canon.revisions, state.required)
+}
+
+/** The one way a root becomes current: requirements met, budget restored. */
+function becomeCurrent(state: IncorporationState): IncorporationState {
+  return { ...state, attempts: 0, failures: 0, wait: null, freshness: CURRENT }
+}
+
+/** New requirements get a fresh budget; a running attempt counts against it. */
+function freshBudget(state: IncorporationState): IncorporationState {
+  return {
+    ...state,
+    attempts: state.attempt === null ? 0 : 1,
+    failures: 0,
+    wait: state.wait?.kind === "retry" ? null : state.wait,
+  }
+}
+
+/** Starts an attempt at the next microtask unless one runs or is scheduled. */
+function refreshSoon(state: IncorporationState): IncorporationState {
+  if (state.attempt !== null || state.wait?.kind === "scheduled") {
+    return { ...state, freshness: REFRESHING }
+  }
+  return { ...state, wait: SCHEDULED, freshness: REFRESHING }
+}
+
+function stallReason(state: IncorporationState): RefreshStallReason {
+  if (state.failures >= REFRESH_ATTEMPT_LIMIT) return "refresh-error"
+  return missingAxes(state.canon.revisions, state.required).length > 0
+    ? "missing-axis"
+    : "behind"
+}
+
+/**
+ * Whether a canon received while a void request runs is that request's
+ * delivery. See {@link RefreshAdapter}.
+ */
+function deliversNewCanon(
+  requested: Canon<unknown>,
+  received: Canon<unknown>
+): boolean {
+  return (
+    !Object.is(received.value, requested.value) ||
+    !sameRevisions(received.revisions, requested.revisions)
+  )
+}
+
+function startAttempt(state: IncorporationState): IncorporationState {
+  const clock = state.clock + 1
+  return {
+    ...state,
+    clock,
+    attempts: state.attempts + 1,
+    attempt: { startedAt: clock, canon: state.canon, awaits: "canon" },
+    freshness: REFRESHING,
+  }
+}
+
+function settleAttempt(
+  state: IncorporationState,
+  startedAt: number,
+  failed: boolean
+): IncorporationState {
+  if (state.attempt?.startedAt !== startedAt) return state
+
+  const closesGap = !failed && state.gap !== null && state.gap < startedAt
+  const settled: IncorporationState = {
+    ...state,
+    attempt: null,
+    gap: closesGap ? null : state.gap,
+    failures: state.failures + (failed ? 1 : 0),
+  }
+  if (isMet(settled)) return becomeCurrent(settled)
+
+  if (!failed && covers(settled.canon.revisions, settled.required)) {
+    // Only a gap signalled while the attempt ran is left. The attempt could
+    // not close it, so it is a new requirement rather than a failed try.
+    return refreshSoon(freshBudget(settled))
+  }
+  if (settled.attempts >= REFRESH_ATTEMPT_LIMIT) {
+    return {
+      ...settled,
+      freshness: { freshness: "stalled", stallReason: stallReason(settled) },
+    }
+  }
+  return { ...settled, wait: RETRY, freshness: REFRESHING }
+}
+
+function transition(
+  state: IncorporationState,
+  event: IncorporationEvent
+): IncorporationState {
+  switch (event.type) {
+    case "acceptance-recorded": {
+      const accepted = new Map(state.accepted).set(
+        event.mutationId,
+        event.stamp
+      )
+      const recorded = withRequirements(state, accepted, state.observed)
+      if (isMet(recorded)) return recorded
+
+      const budgeted = freshBudget(recorded)
+      if (budgeted.attempt !== null) {
+        return { ...budgeted, freshness: REFRESHING }
+      }
+      if (budgeted.wait !== null) return budgeted
+      if (event.graceMs > 0) {
+        return {
+          ...budgeted,
+          wait: { kind: "grace", ms: event.graceMs },
+          freshness: GRACE,
+        }
+      }
+      return refreshSoon(budgeted)
+    }
+
+    case "acceptance-removed": {
+      if (!state.accepted.has(event.mutationId)) return state
+      const accepted = new Map(state.accepted)
+      accepted.delete(event.mutationId)
+      const removed = withRequirements(state, accepted, state.observed)
+      return isMet(removed) ? becomeCurrent(removed) : removed
+    }
+
+    case "invalidated": {
+      const { axis, revision } = event.invalidation
+      const canonRevision = revisionAt(state.canon.revisions, axis)
+      if (canonRevision === undefined || revision <= canonRevision) {
+        return state
+      }
+      // Own writes arrive as invalidations too; an accepted stamp already
+      // requires them, so only a revision beyond every requirement is news.
+      const requiredRevision = revisionAt(state.required, axis)
+      if (requiredRevision !== undefined && revision <= requiredRevision) {
+        return state
+      }
+
+      const observed = revisionVectorFrom([
+        ...revisionEntries(state.observed),
+        [axis, revision],
+      ])
+      return refreshSoon(
+        freshBudget(withRequirements(state, state.accepted, observed))
+      )
+    }
+
+    case "gap-signalled": {
+      const clock = state.clock + 1
+      // A repeated signal moves the open gap forward without a new budget.
+      if (state.gap !== null) return { ...state, clock, gap: clock }
+      return refreshSoon(freshBudget({ ...state, clock, gap: clock }))
+    }
+
+    case "canon-received": {
+      if (event.canon === state.canon) return state
+
+      // An observed revision is no longer required once canon covers it or
+      // no longer carries its axis (the root stops observing that axis).
+      const stillObserved = revisionEntries(state.observed).filter(
+        ([axis, revision]) => {
+          const canonRevision = revisionAt(event.canon.revisions, axis)
+          return canonRevision !== undefined && canonRevision < revision
+        }
+      )
+      const observed =
+        stillObserved.length === revisionEntries(state.observed).length
+          ? state.observed
+          : revisionVectorFrom(stillObserved)
+      const received = withRequirements(
+        { ...state, canon: event.canon },
+        state.accepted,
+        observed
+      )
+      const { attempt } = received
+      if (
+        attempt?.awaits === "canon" &&
+        deliversNewCanon(attempt.canon, event.canon)
+      ) {
+        return settleAttempt(received, attempt.startedAt, false)
+      }
+      return isMet(received) ? becomeCurrent(received) : received
+    }
+
+    case "retry-requested":
+      return isMet(state)
+        ? becomeCurrent(state)
+        : refreshSoon(freshBudget(state))
+
+    case "wait-elapsed": {
+      if (event.wait !== state.wait) return state
+      const elapsed = { ...state, wait: null }
+      return isMet(elapsed) ? becomeCurrent(elapsed) : startAttempt(elapsed)
+    }
+
+    case "request-returned-promise":
+      return state.attempt?.startedAt === event.startedAt
+        ? { ...state, attempt: { ...state.attempt, awaits: "request" } }
+        : state
+
+    case "attempt-settled":
+      return settleAttempt(state, event.startedAt, event.failed)
+
+    case "invalidation-status":
+      return state.invalidations === event.status
+        ? state
+        : { ...state, invalidations: event.status }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime. Runs the machine's waits and attempts and publishes snapshots. It
+// owns timers and the carrier call; it makes no decisions of its own.
+
+interface IncorporationSnapshot {
+  readonly freshness: FreshnessState
+  readonly invalidations: InvalidationStatus
+  readonly required: RevisionVector
+}
+
+function snapshotOf(state: IncorporationState): IncorporationSnapshot {
+  return {
+    freshness: state.freshness,
+    invalidations: state.invalidations,
+    required: state.required,
+  }
+}
+
+function createIncorporation(
+  canon: Canon<unknown>,
+  carrier: RefreshAdapter,
+  invalidationStatus: InvalidationStatus
+) {
+  let state = initialState(canon, invalidationStatus)
+  let currentCarrier = carrier
+  let connected = false
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let snapshot = snapshotOf(state)
+  const listeners = new Set<() => void>()
+
+  const cancelTimer = () => {
+    if (timer === null) return
+    clearTimeout(timer)
+    timer = null
+  }
+
+  const arm = (wait: Wait | null) => {
+    cancelTimer()
+    if (!connected || wait === null) return
+
+    // The machine ignores a wait that is no longer its current one, so a
+    // superseded microtask needs no cancellation.
+    const elapse = () => {
+      if (connected) dispatch({ type: "wait-elapsed", wait })
+    }
+    if (wait.kind === "scheduled") {
+      queueMicrotask(elapse)
+      return
+    }
+    timer = setTimeout(
+      elapse,
+      wait.kind === "grace" ? wait.ms : UNCOVERED_REFRESH_RETRY_MS
+    )
+  }
+
+  const run = ({ startedAt }: Attempt) => {
+    const settle = (failed: boolean) =>
+      dispatch({ type: "attempt-settled", startedAt, failed })
+
+    // A dedicated transition keeps the carrier's navigation work (such as
+    // `router.refresh()`) out of urgent updates. Its `isPending` is not used:
+    // React 19 entangles it with any open optimistic Action.
+    startTransition(async () => {
+      let completion: void | Promise<void>
+      try {
+        completion = currentCarrier.request()
+      } catch {
+        settle(true)
+        return
+      }
+      if (completion === undefined) return
+
+      dispatch({ type: "request-returned-promise", startedAt })
+      try {
+        await completion
+      } catch {
+        settle(true)
+        return
+      }
+      settle(false)
+    })
+  }
+
+  const publish = () => {
+    const next = snapshotOf(state)
+    if (
+      next.freshness === snapshot.freshness &&
+      next.invalidations === snapshot.invalidations &&
+      next.required === snapshot.required
+    ) {
+      return
+    }
+    snapshot = next
+    for (const listener of listeners) listener()
+  }
+
+  function dispatch(event: IncorporationEvent) {
+    const previous = state
+    state = transition(previous, event)
+    if (state.wait !== previous.wait) arm(state.wait)
+    if (
+      state.attempt !== null &&
+      state.attempt.startedAt !== previous.attempt?.startedAt
+    ) {
+      run(state.attempt)
+    }
+    publish()
+  }
+
+  return {
+    /** Starts running waits; the returned cleanup stops them. */
+    connect() {
+      connected = true
+      arm(state.wait)
+      return () => {
+        connected = false
+        cancelTimer()
+      }
+    },
+    setCarrier(next: RefreshAdapter) {
+      currentCarrier = next
+    },
+    receiveCanon(next: Canon<unknown>) {
+      dispatch({ type: "canon-received", canon: next })
+    },
+    recordAcceptance(mutationId: string, stamp: AcceptedStamp) {
+      dispatch({
+        type: "acceptance-recorded",
+        mutationId,
+        stamp,
+        graceMs: currentCarrier.acceptanceGraceMs,
+      })
+    },
+    removeAcceptance(mutationId: string) {
+      dispatch({ type: "acceptance-removed", mutationId })
+    },
+    retryRefresh() {
+      dispatch({ type: "retry-requested" })
+    },
+    observeInvalidation(invalidation: AxisInvalidation) {
+      dispatch({ type: "invalidated", invalidation })
+    },
+    signalGap() {
+      dispatch({ type: "gap-signalled" })
+    },
+    reportInvalidationStatus(status: InvalidationStatus) {
+      dispatch({ type: "invalidation-status", status })
+    },
+    subscribe(listener: () => void) {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+    getSnapshot() {
+      return snapshot
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hook.
+
 /** Imperative incorporation controls shared by predicted and observed roots. */
 export interface IncorporationCoordinator {
   readonly status: IncorporationStatus
+  /** Gives unmet requirements a fresh attempt budget and refreshes now. */
   readonly retryRefresh: () => void
+  /** Requires canon to cover an accepted mutation's stamp. */
   readonly recordAcceptance: (mutationId: string, stamp: AcceptedStamp) => void
+  /** Drops an acceptance's requirement, normally once canon covers it. */
   readonly removeAcceptance: (mutationId: string) => void
 }
 
+/**
+ * Keeps one mounted canon fresh: tracks what canon must reach, requests
+ * refreshes through the carrier, and reports freshness.
+ *
+ * Requirements: canon must cover every recorded acceptance's stamp and every
+ * invalidation fresher than both canon and those stamps, and every
+ * subscription gap must be closed by a successful refresh that started after
+ * it. Freshness is `current` exactly when those requirements are met.
+ *
+ * Guarantees:
+ * - At most one carrier request runs at a time; requests that arrive in the
+ *   same tick, or while one runs, coalesce.
+ * - An acceptance waits `acceptanceGraceMs` before its first request.
+ * - New requirements get a budget of two attempts. An attempt that completes
+ *   without meeting them is retried after {@link UNCOVERED_REFRESH_RETRY_MS};
+ *   after the second the root reports `stalled` with a reason: `refresh-error`
+ *   when both attempts failed, `missing-axis` when canon lacks a required
+ *   axis, and `behind` otherwise.
+ * - A stall lasts until requirements are met, `retryRefresh()` is called, or
+ *   a new requirement arrives (an acceptance, a fresher invalidation, or a
+ *   gap while none is open). Accepted predictions stay mounted throughout.
+ * - Attempts complete as {@link RefreshAdapter} describes.
+ * - The returned functions keep their identity for the mounted lifetime.
+ *
+ * @param canon Latest authoritative canon the root renders.
+ * @param refresh Refresh carrier; the latest one is used for each request.
+ * @param invalidations Optional push-invalidation adapter for canon's axes.
+ * @returns Incorporation status and the controls the root calls.
+ */
 export function useIncorporation<State>(
   canon: Canon<State>,
   refresh: RefreshAdapter,
   invalidations?: InvalidationAdapter
 ): IncorporationCoordinator {
-  const refreshRef = useRef(refresh)
-  // Latest-value refs written during render. Known debt for the
-  // useIncorporation rework (review P3-08): a discarded concurrent render can
-  // leave an uncommitted value here.
-  // eslint-disable-next-line react-hooks/refs
-  refreshRef.current = refresh
-  const canonRef = useRef<Canon<unknown>>(canon)
-  // eslint-disable-next-line react-hooks/refs -- see refreshRef above
-  canonRef.current = canon
-  const mountedRef = useRef(false)
-  const acceptedRef = useRef(new Map<string, AcceptedStamp>())
-  const observedRef = useRef(new Map<AxisId, Revision>())
-  const activeRefreshRef = useRef(false)
-  const activeCompletionRef = useRef<"canon" | "request" | null>(null)
-  const requestedCanonRef = useRef<Canon<unknown> | null>(null)
-  const attemptsRef = useRef(0)
-  const failedAttemptsRef = useRef(0)
-  const graceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const scheduledRefreshRef = useRef(false)
-  const scheduledGapRefreshRef = useRef(false)
-  const pendingGapRefreshRef = useRef(false)
-  const startRefreshRef = useRef<(closeSubscriptionGap?: boolean) => void>(
-    () => undefined
-  )
-  const [refreshState, setRefreshState] = useState(CURRENT_REFRESH_STATE)
-  const [invalidationStatus, setInvalidationStatus] =
-    useState<InvalidationStatus>(invalidations?.initialStatus ?? "disabled")
-  const [, renderRequirements] = useReducer(
-    (revision: number) => revision + 1,
-    0
-  )
-  const [, startRefreshTransition] = useTransition()
-
-  const clearGraceTimer = useCallback(() => {
-    if (graceTimerRef.current === null) return
-    clearTimeout(graceTimerRef.current)
-    graceTimerRef.current = null
-  }, [])
-
-  const clearRetryTimer = useCallback(() => {
-    if (retryTimerRef.current === null) return
-    clearTimeout(retryTimerRef.current)
-    retryTimerRef.current = null
-  }, [])
-
-  const requirements = useCallback(
-    () =>
-      revisionsFrom(acceptedRef.current, observedRef.current, canonRef.current),
-    []
+  const [incorporation] = useState(() =>
+    createIncorporation(
+      canon,
+      refresh,
+      invalidations?.initialStatus ?? "disabled"
+    )
   )
 
-  const isCovered = useCallback(() => {
-    return covers(canonRef.current.revisions, requirements())
-  }, [requirements])
+  useEffect(() => incorporation.connect(), [incorporation])
+  useEffect(() => incorporation.setCarrier(refresh), [incorporation, refresh])
+  useEffect(() => incorporation.receiveCanon(canon), [incorporation, canon])
 
-  const resetAttemptBudget = useCallback(() => {
-    attemptsRef.current = activeRefreshRef.current ? 1 : 0
-    failedAttemptsRef.current = 0
-    clearRetryTimer()
-  }, [clearRetryTimer])
-
-  const scheduleRefresh = useCallback((closeSubscriptionGap = false) => {
-    if (closeSubscriptionGap) scheduledGapRefreshRef.current = true
-    if (activeRefreshRef.current) {
-      if (closeSubscriptionGap) pendingGapRefreshRef.current = true
-      return
-    }
-    if (scheduledRefreshRef.current) return
-
-    scheduledRefreshRef.current = true
-    setRefreshState({ freshness: "refreshing", stallReason: null })
-    queueMicrotask(() => {
-      scheduledRefreshRef.current = false
-      const closesGap = scheduledGapRefreshRef.current
-      scheduledGapRefreshRef.current = false
-      if (mountedRef.current) startRefreshRef.current(closesGap)
-    })
-  }, [])
-
-  const completeRefresh = useCallback(
-    (failed: boolean) => {
-      if (!activeRefreshRef.current || !mountedRef.current) return
-
-      if (failed) failedAttemptsRef.current += 1
-      activeRefreshRef.current = false
-      activeCompletionRef.current = null
-      requestedCanonRef.current = null
-
-      if (pendingGapRefreshRef.current) {
-        pendingGapRefreshRef.current = false
-        scheduleRefresh(true)
-        return
-      }
-
-      if (isCovered()) {
-        attemptsRef.current = 0
-        failedAttemptsRef.current = 0
-        setRefreshState(CURRENT_REFRESH_STATE)
-        return
-      }
-
-      if (attemptsRef.current >= 2) {
-        const absentAxes = missingAxes(canonRef.current, requirements())
-        setRefreshState({
-          freshness: "stalled",
-          stallReason:
-            failedAttemptsRef.current >= 2
-              ? "refresh-error"
-              : absentAxes.length > 0
-                ? "missing-axis"
-                : "behind",
-        })
-        return
-      }
-
-      retryTimerRef.current = setTimeout(() => {
-        retryTimerRef.current = null
-        startRefreshRef.current()
-      }, UNCOVERED_REFRESH_RETRY_MS)
-    },
-    [isCovered, requirements, scheduleRefresh]
-  )
-
-  const startRefresh = useCallback(
-    (closeSubscriptionGap = false) => {
-      if (activeRefreshRef.current) {
-        if (closeSubscriptionGap) pendingGapRefreshRef.current = true
-        return
-      }
-      if ((!closeSubscriptionGap && isCovered()) || !mountedRef.current) {
-        if (isCovered()) setRefreshState(CURRENT_REFRESH_STATE)
-        return
-      }
-
-      clearGraceTimer()
-      clearRetryTimer()
-      activeRefreshRef.current = true
-      activeCompletionRef.current = "canon"
-      requestedCanonRef.current = canonRef.current
-      attemptsRef.current += 1
-      setRefreshState({ freshness: "refreshing", stallReason: null })
-
-      // React 19 entangles isPending across overlapping async Actions. The held
-      // optimistic Action would therefore hide this transition's settled edge.
-      // A returned Promise owns completion; a void carrier completes when it
-      // delivers the next canon through this hook's input.
-      startRefreshTransition(async () => {
-        let completion: void | Promise<void>
-        try {
-          completion = refreshRef.current.request()
-        } catch {
-          completeRefresh(true)
-          return
-        }
-
-        if (completion === undefined) return
-        activeCompletionRef.current = "request"
-        try {
-          await completion
-          completeRefresh(false)
-        } catch {
-          completeRefresh(true)
-        }
-      })
-    },
-    [clearGraceTimer, clearRetryTimer, completeRefresh, isCovered]
-  )
-  // eslint-disable-next-line react-hooks/refs -- latest-value ref; see refreshRef
-  startRefreshRef.current = startRefresh
-
-  const beginAcceptanceRefresh = useCallback(() => {
-    if (isCovered()) return
-
-    resetAttemptBudget()
-    if (activeRefreshRef.current) return
-
-    const graceMs = refreshRef.current.acceptanceGraceMs
-    if (graceMs === 0) {
-      scheduleRefresh()
-      return
-    }
-
-    if (graceTimerRef.current !== null) return
-    setRefreshState({ freshness: "grace", stallReason: null })
-    graceTimerRef.current = setTimeout(() => {
-      graceTimerRef.current = null
-      scheduleRefresh()
-    }, graceMs)
-  }, [isCovered, resetAttemptBudget, scheduleRefresh])
-
-  const recordAcceptance = useCallback(
-    (mutationId: string, stamp: AcceptedStamp) => {
-      acceptedRef.current.set(mutationId, stamp)
-      maxRevision(observedRef.current, stamp.revisions)
-      renderRequirements()
-      beginAcceptanceRefresh()
-    },
-    [beginAcceptanceRefresh]
-  )
-
-  const removeAcceptance = useCallback(
-    (mutationId: string) => {
-      if (!acceptedRef.current.delete(mutationId)) return
-      renderRequirements()
-      if (!isCovered()) return
-
-      clearGraceTimer()
-      clearRetryTimer()
-      attemptsRef.current = 0
-      failedAttemptsRef.current = 0
-      setRefreshState(CURRENT_REFRESH_STATE)
-    },
-    [clearGraceTimer, clearRetryTimer, isCovered]
-  )
-
-  const observeInvalidation = useCallback(
-    (invalidation: AxisInvalidation) => {
-      const canonRevision = revisionAt(
-        canonRef.current.revisions,
-        invalidation.axis
-      )
-      if (
-        canonRevision === undefined ||
-        invalidation.revision <= canonRevision
-      ) {
-        return
-      }
-
-      const observedRevision = observedRef.current.get(invalidation.axis)
-      if (
-        observedRevision !== undefined &&
-        invalidation.revision <= observedRevision
-      ) {
-        return
-      }
-
-      observedRef.current.set(invalidation.axis, invalidation.revision)
-      renderRequirements()
-      resetAttemptBudget()
-      clearGraceTimer()
-      scheduleRefresh()
-    },
-    [clearGraceTimer, resetAttemptBudget, scheduleRefresh]
-  )
-
-  const retryRefresh = useCallback(() => {
-    if (isCovered()) {
-      setRefreshState(CURRENT_REFRESH_STATE)
-      return
-    }
-
-    resetAttemptBudget()
-    clearGraceTimer()
-    scheduleRefresh()
-  }, [clearGraceTimer, isCovered, resetAttemptBudget, scheduleRefresh])
-
-  const updateInvalidationStatus = useCallback((status: InvalidationStatus) => {
-    // Recovery supersedes queued fallback ticks. A real attachment-gap signal
-    // follows the active status and schedules its own authoritative refresh.
-    if (status === "active") pendingGapRefreshRef.current = false
-    setInvalidationStatus(status)
-  }, [])
-
-  const observedAxesKey = JSON.stringify(
+  const axesKey = JSON.stringify(
     revisionEntries(canon.revisions)
       .map(([axis]) => axis)
       .sort()
   )
-  const observedAxes = useMemo(
-    () => JSON.parse(observedAxesKey) as AxisId[],
-    [observedAxesKey]
-  )
+  const axes = useMemo(() => JSON.parse(axesKey) as AxisId[], [axesKey])
 
   useEffect(() => {
-    // Resets the status for a new adapter. Known debt for the
-    // useIncorporation rework (review P3-08).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setInvalidationStatus(invalidations?.initialStatus ?? "disabled")
+    // The adapter's `initialStatus` is the status a subscription made now
+    // starts in, so it is read again for every subscription.
+    incorporation.reportInvalidationStatus(
+      invalidations?.initialStatus ?? "disabled"
+    )
     if (!invalidations) return
 
     return invalidations.subscribe({
-      axes: observedAxes,
-      onInvalidation: observeInvalidation,
-      onStatusChange: updateInvalidationStatus,
-      onSubscriptionGap: () => scheduleRefresh(true),
+      axes,
+      onInvalidation: incorporation.observeInvalidation,
+      onStatusChange: incorporation.reportInvalidationStatus,
+      onSubscriptionGap: incorporation.signalGap,
     })
-  }, [
-    invalidations,
-    observeInvalidation,
-    observedAxes,
-    scheduleRefresh,
-    updateInvalidationStatus,
-  ])
+  }, [axes, incorporation, invalidations])
 
-  useEffect(() => {
-    if (
-      activeRefreshRef.current &&
-      activeCompletionRef.current === "canon" &&
-      requestedCanonRef.current !== canon
-    ) {
-      completeRefresh(false)
-    }
+  const snapshot = useSyncExternalStore(
+    incorporation.subscribe,
+    incorporation.getSnapshot,
+    incorporation.getSnapshot
+  )
+  const status = useMemo<IncorporationStatus>(
+    () => ({
+      ...snapshot.freshness,
+      invalidations: snapshot.invalidations,
+      missingAxes: missingAxes(canon.revisions, snapshot.required),
+    }),
+    [canon.revisions, snapshot]
+  )
 
-    if (!isCovered()) return
-
-    clearGraceTimer()
-    clearRetryTimer()
-    attemptsRef.current = 0
-    failedAttemptsRef.current = 0
-    // Marks the refresh current once new canon covers it. Known debt for the
-    // useIncorporation rework (review P3-08).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setRefreshState(CURRENT_REFRESH_STATE)
-  }, [canon, clearGraceTimer, clearRetryTimer, completeRefresh, isCovered])
-
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-      clearGraceTimer()
-      clearRetryTimer()
-    }
-  }, [clearGraceTimer, clearRetryTimer])
-
-  // Reads acceptance bookkeeping held in refs during render. Known debt for
-  // the useIncorporation rework (review P3-08).
-  // eslint-disable-next-line react-hooks/refs
-  const currentRequirements = requirements()
-
-  return {
-    status: {
-      freshness: refreshState.freshness,
-      invalidations: invalidationStatus,
-      missingAxes: missingAxes(canon, currentRequirements),
-      stallReason: refreshState.stallReason,
-    },
-    retryRefresh,
-    recordAcceptance,
-    removeAcceptance,
-  }
+  return useMemo(
+    () => ({
+      status,
+      retryRefresh: incorporation.retryRefresh,
+      recordAcceptance: incorporation.recordAcceptance,
+      removeAcceptance: incorporation.removeAcceptance,
+    }),
+    [incorporation, status]
+  )
 }

@@ -12,6 +12,7 @@ import {
   defineMutation,
   defineProtocol,
   revisionVector,
+  withPollingFallback,
   type AcceptedStamp,
   type AxisInvalidation,
   type Canon,
@@ -20,6 +21,7 @@ import {
   type MutationEnvelope,
   type Revision,
 } from "./index"
+import { ROUTER_ACCEPTANCE_GRACE_MS } from "./next/client"
 import {
   createObservedRoot,
   createPredictedRoot,
@@ -28,9 +30,9 @@ import {
   type RefreshAdapter,
 } from "./react"
 import {
+  SNAPSHOT_ACCEPTANCE_GRACE_MS,
   UNCOVERED_REFRESH_RETRY_MS,
   useIncorporation,
-  withPollingFallback,
 } from "./refresh"
 import { createInMemoryInvalidationAdapter } from "./testing"
 import { verifyRefreshContract } from "./testing/react"
@@ -161,7 +163,7 @@ verifyRefreshContract({
   name: "router-shaped",
   completion: "canon",
   useRefresh(request) {
-    return { acceptanceGraceMs: 250, request }
+    return { acceptanceGraceMs: ROUTER_ACCEPTANCE_GRACE_MS, request }
   },
 })
 verifyRefreshContract({
@@ -169,7 +171,7 @@ verifyRefreshContract({
   completion: "request",
   useRefresh(request) {
     return {
-      acceptanceGraceMs: 0,
+      acceptanceGraceMs: SNAPSHOT_ACCEPTANCE_GRACE_MS,
       request: async () => request(),
     }
   },
@@ -177,18 +179,22 @@ verifyRefreshContract({
 
 describe("refresh incorporation", () => {
   it("uses acceptance grace only for the router-shaped carrier", async () => {
-    const router = setupPredictedRefresh({ acceptanceGraceMs: 250 })
+    const router = setupPredictedRefresh({
+      acceptanceGraceMs: ROUTER_ACCEPTANCE_GRACE_MS,
+    })
     await flushMicrotasks()
 
     expect(router.result.current.status.freshness).toBe("grace")
     expect(router.request).not.toHaveBeenCalled()
-    await advance(249)
+    await advance(ROUTER_ACCEPTANCE_GRACE_MS - 1)
     expect(router.request).not.toHaveBeenCalled()
     await advance(1)
     expect(router.request).toHaveBeenCalledOnce()
     router.unmount()
 
-    const snapshot = setupPredictedRefresh({ acceptanceGraceMs: 0 })
+    const snapshot = setupPredictedRefresh({
+      acceptanceGraceMs: SNAPSHOT_ACCEPTANCE_GRACE_MS,
+    })
     await flushMicrotasks()
     expect(snapshot.request).toHaveBeenCalledOnce()
     expect(snapshot.result.current.status.freshness).toBe("refreshing")
@@ -197,29 +203,72 @@ describe("refresh incorporation", () => {
   it("waits for a void carrier to deliver canon before consuming an attempt", async () => {
     const { request, result, rerender } = setupPredictedRefresh({
       acceptanceGraceMs: 0,
+      acceptedStamp: stamp({ [valueAxis]: 3 }),
       request: () => undefined,
     })
     await flushMicrotasks()
 
     expect(request).toHaveBeenCalledOnce()
-    await advance(5_000)
+    await advance(5 * UNCOVERED_REFRESH_RETRY_MS)
     expect(request).toHaveBeenCalledOnce()
     expect(result.current.status.freshness).toBe("refreshing")
 
-    rerender({ currentCanon: canon(0, 0) })
+    // A lagging delivery: newer revisions that still do not cover the stamp.
+    rerender({ currentCanon: canon(1, 1) })
     await flushMicrotasks()
-    await advance(999)
+    await advance(UNCOVERED_REFRESH_RETRY_MS - 1)
     expect(request).toHaveBeenCalledOnce()
     await advance(1)
     expect(request).toHaveBeenCalledTimes(2)
     expect(result.current.status.freshness).toBe("refreshing")
 
-    rerender({ currentCanon: canon(0, 0) })
+    rerender({ currentCanon: canon(2, 2) })
     await flushMicrotasks()
     expect(result.current.status).toMatchObject({
       freshness: "stalled",
       stallReason: "behind",
     })
+  })
+
+  it("does not consume a void attempt on a same-canon or rebuilt-canon re-render", async () => {
+    const state = { items: ["a"] }
+    const mounted: Canon<typeof state> = {
+      value: state,
+      revisions: revisions({ [valueAxis]: 0 }),
+    }
+    const request = vi.fn(() => undefined)
+    const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+    const { result, rerender } = renderHook(
+      ({ currentCanon }: { readonly currentCanon: Canon<typeof state> }) =>
+        useIncorporation(currentCanon, refresh),
+      { initialProps: { currentCanon: mounted } }
+    )
+    act(() => result.current.recordAcceptance("m1", stamp({ [valueAxis]: 1 })))
+    await flushMicrotasks()
+    expect(request).toHaveBeenCalledOnce()
+
+    // An unrelated parent re-render passes the same canon object.
+    rerender({ currentCanon: mounted })
+    await flushMicrotasks()
+    // A parent that rebuilds the canon wrapper around the same state.
+    rerender({
+      currentCanon: { value: state, revisions: revisions({ [valueAxis]: 0 }) },
+    })
+    await flushMicrotasks()
+    await advance(5 * UNCOVERED_REFRESH_RETRY_MS)
+    expect(request).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("refreshing")
+
+    // The carrier delivers: a new state object, still behind the stamp.
+    rerender({
+      currentCanon: {
+        value: { items: ["a"] },
+        revisions: revisions({ [valueAxis]: 0 }),
+      },
+    })
+    await flushMicrotasks()
+    await advance(UNCOVERED_REFRESH_RETRY_MS)
+    expect(request).toHaveBeenCalledTimes(2)
   })
 
   it("owns stalled-freshness listener cleanup until the root recovers", async () => {
@@ -231,7 +280,7 @@ describe("refresh incorporation", () => {
     })
 
     await flushMicrotasks()
-    await advance(1_000)
+    await advance(UNCOVERED_REFRESH_RETRY_MS)
     await flushMicrotasks()
 
     expect(result.current.status.freshness).toBe("stalled")
@@ -248,7 +297,7 @@ describe("refresh incorporation", () => {
   it("deduplicates an own-write invalidation against recorded acceptance", async () => {
     const invalidations = controlledInvalidations()
     const { request, result } = setupPredictedRefresh({
-      acceptanceGraceMs: 250,
+      acceptanceGraceMs: ROUTER_ACCEPTANCE_GRACE_MS,
       invalidations: invalidations.adapter,
     })
     await flushMicrotasks()
@@ -273,7 +322,7 @@ describe("refresh incorporation", () => {
     })
 
     await flushMicrotasks()
-    await advance(1_000)
+    await advance(UNCOVERED_REFRESH_RETRY_MS)
 
     expect(result.current.status).toMatchObject({
       freshness: "stalled",
@@ -291,7 +340,7 @@ describe("refresh incorporation", () => {
     expect(result.current.status.pending).toBe(1)
     expect(request).toHaveBeenCalledOnce()
 
-    await advance(1_000)
+    await advance(UNCOVERED_REFRESH_RETRY_MS)
 
     expect(request).toHaveBeenCalledTimes(2)
     expect(result.current.status.pending).toBe(1)
@@ -307,7 +356,7 @@ describe("refresh incorporation", () => {
     })
 
     await flushMicrotasks()
-    await advance(1_000)
+    await advance(UNCOVERED_REFRESH_RETRY_MS)
 
     expect(request).toHaveBeenCalledTimes(2)
     expect(result.current.status).toMatchObject({
@@ -532,7 +581,7 @@ describe("createObservedRoot", () => {
 
     act(() => invalidate(1, "first"))
     await flushMicrotasks()
-    await advance(1_000)
+    await advance(UNCOVERED_REFRESH_RETRY_MS)
     expect(result.current.status.freshness).toBe("stalled")
     expect(request).toHaveBeenCalledTimes(2)
 
@@ -544,6 +593,85 @@ describe("createObservedRoot", () => {
     await flushMicrotasks()
     expect(request).toHaveBeenCalledTimes(3)
     expect(result.current.status.freshness).toBe("refreshing")
+  })
+})
+
+describe("subscription gaps", () => {
+  function setupGap(request: () => void | Promise<void>) {
+    const invalidations = controlledInvalidations()
+    const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+    const rendered = renderHook(() =>
+      useIncorporation(canon(0, 0), refresh, invalidations.adapter)
+    )
+    const signalGap = () =>
+      act(() => invalidations.subscriptions[0]?.onSubscriptionGap?.())
+    return { ...rendered, signalGap }
+  }
+
+  it("keeps a gap open after a failed refresh and retries it on request", async () => {
+    const request = vi.fn(async () => {
+      throw new Error("refresh failed")
+    })
+    const { result, signalGap } = setupGap(request)
+
+    signalGap()
+    await flushMicrotasks()
+    expect(request).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).not.toBe("current")
+
+    act(() => result.current.retryRefresh())
+    await flushMicrotasks()
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(result.current.status.freshness).not.toBe("current")
+  })
+
+  it("bounds gap refreshes by the attempt budget and recovers on retry", async () => {
+    let fail = true
+    const request = vi.fn(async () => {
+      if (fail) throw new Error("refresh failed")
+    })
+    const { result, signalGap } = setupGap(request)
+
+    signalGap()
+    await flushMicrotasks()
+    await advance(UNCOVERED_REFRESH_RETRY_MS)
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(result.current.status).toMatchObject({
+      freshness: "stalled",
+      stallReason: "refresh-error",
+    })
+
+    // The open gap is the same requirement: repeating it buys no new budget.
+    signalGap()
+    await advance(5 * UNCOVERED_REFRESH_RETRY_MS)
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(result.current.status.freshness).toBe("stalled")
+
+    fail = false
+    act(() => result.current.retryRefresh())
+    await flushMicrotasks()
+    expect(request).toHaveBeenCalledTimes(3)
+    expect(result.current.status.freshness).toBe("current")
+  })
+
+  it("does not let a refresh that started before a gap close it", async () => {
+    const completions: Array<() => void> = []
+    const request = vi.fn(
+      () => new Promise<void>((resolve) => completions.push(resolve))
+    )
+    const { result, signalGap } = setupGap(request)
+
+    signalGap()
+    await flushMicrotasks()
+    signalGap()
+    act(() => completions.shift()?.())
+    await flushMicrotasks()
+
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(result.current.status.freshness).toBe("refreshing")
+    act(() => completions.shift()?.())
+    await flushMicrotasks()
+    expect(result.current.status.freshness).toBe("current")
   })
 })
 
@@ -665,11 +793,18 @@ describe("polling fallback", () => {
     await flushMicrotasks()
     expect(request).toHaveBeenCalledTimes(2)
 
+    // Ticks while the second refresh runs are gaps it cannot close: they may
+    // stand for invalidations missed before recovery. So one more refresh
+    // follows even though the primary is active again, and then polling stops.
     await advance(400)
     act(() => primary.setStatus("active"))
     act(() => completions.shift()?.())
     await flushMicrotasks()
-    expect(request).toHaveBeenCalledTimes(2)
+    expect(request).toHaveBeenCalledTimes(3)
+    act(() => completions.shift()?.())
+    await advance(400)
+    expect(request).toHaveBeenCalledTimes(3)
+    expect(rendered.result.current.status.freshness).toBe("current")
     rendered.unmount()
   })
 
