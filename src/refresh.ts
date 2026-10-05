@@ -10,17 +10,18 @@ import {
   useTransition,
 } from "react"
 
-import type {
-  AxisInvalidation,
-  InvalidationAdapter,
-  InvalidationStatus,
-  InvalidationSubscription,
+import {
+  isDegradedInvalidationStatus,
+  type AxisInvalidation,
+  type InvalidationAdapter,
+  type InvalidationStatus,
+  type InvalidationSubscription,
 } from "./invalidation"
 import {
-  axisId,
   covers,
-  defineCoordinate,
   revisionAt,
+  revisionEntries,
+  revisionVectorFrom,
   type AcceptedStamp,
   type AxisId,
   type Canon,
@@ -45,16 +46,8 @@ export interface PollingFallbackOptions {
   readonly pauseWhenHidden?: boolean
 }
 
-function needsPollingFallback(status: InvalidationStatus): boolean {
-  return (
-    status === "disabled" ||
-    status === "reauthorizing" ||
-    status === "unavailable"
-  )
-}
-
 function pollingStatus(status: InvalidationStatus): InvalidationStatus {
-  return needsPollingFallback(status) ? "polling" : status
+  return isDegradedInvalidationStatus(status) ? "polling" : status
 }
 
 /**
@@ -89,7 +82,7 @@ export function withPollingFallback(
       return pollingStatus(primary.initialStatus)
     },
     subscribe(subscription) {
-      let polling = needsPollingFallback(primary.initialStatus)
+      let polling = isDegradedInvalidationStatus(primary.initialStatus)
       let stopped = false
       let interval: ReturnType<typeof setInterval> | null = null
 
@@ -124,7 +117,7 @@ export function withPollingFallback(
         status
       ) => {
         if (status === "active") polling = false
-        else if (needsPollingFallback(status)) polling = true
+        else if (isDegradedInvalidationStatus(status)) polling = true
 
         reconcileInterval()
         subscription.onStatusChange(polling ? "polling" : status)
@@ -177,15 +170,6 @@ export interface IncorporationStatus {
   readonly stallReason: RefreshStallReason | null
 }
 
-export { createNoRealtimeInvalidationAdapter } from "./invalidation"
-export type {
-  AxisInvalidation,
-  InvalidationAdapter,
-  InvalidationPublisher,
-  InvalidationStatus,
-  InvalidationSubscription,
-} from "./invalidation"
-
 interface RefreshState {
   readonly freshness: FreshnessStatus
   readonly stallReason: RefreshStallReason | null
@@ -202,8 +186,7 @@ function maxRevision(
 ): boolean {
   let changed = false
 
-  for (const [rawAxis, revision] of Object.entries(revisions)) {
-    const axis = axisId(rawAxis)
+  for (const [axis, revision] of revisionEntries(revisions)) {
     const current = target.get(axis)
     if (current !== undefined && current >= revision) continue
 
@@ -219,33 +202,22 @@ function revisionsFrom(
   observed: ReadonlyMap<AxisId, Revision>,
   canon: Canon<unknown>
 ): RevisionVector {
-  const revisions = {} as Record<AxisId, Revision>
-
-  for (const stamp of accepted.values()) {
-    for (const [rawAxis, revision] of Object.entries(stamp.revisions)) {
-      const axis = axisId(rawAxis)
-      const current = revisionAt(revisions, axis)
-      if (current === undefined || revision > current)
-        defineCoordinate(revisions, axis, revision)
-    }
-  }
-
-  for (const [axis, revision] of observed) {
-    if (revisionAt(canon.revisions, axis) === undefined) continue
-    const current = revisionAt(revisions, axis)
-    if (current === undefined || revision > current)
-      defineCoordinate(revisions, axis, revision)
-  }
-
-  return revisions
+  return revisionVectorFrom([
+    ...[...accepted.values()].flatMap((stamp) =>
+      revisionEntries(stamp.revisions)
+    ),
+    ...[...observed].filter(
+      ([axis]) => revisionAt(canon.revisions, axis) !== undefined
+    ),
+  ])
 }
 
 function missingAxes(
   canon: Canon<unknown>,
   requirements: RevisionVector
 ): readonly AxisId[] {
-  return Object.keys(requirements)
-    .map(axisId)
+  return revisionEntries(requirements)
+    .map(([axis]) => axis)
     .filter((axis) => revisionAt(canon.revisions, axis) === undefined)
 }
 
@@ -331,7 +303,7 @@ export function useIncorporation<State>(
   )
 
   const isCovered = useCallback(() => {
-    return covers(canonRef.current, { revisions: requirements() })
+    return covers(canonRef.current.revisions, requirements())
   }, [requirements])
 
   const resetAttemptBudget = useCallback(() => {
@@ -542,10 +514,13 @@ export function useIncorporation<State>(
     setInvalidationStatus(status)
   }, [])
 
-  const rawObservedAxes = Object.keys(canon.revisions).sort()
-  const observedAxesKey = JSON.stringify(rawObservedAxes)
+  const observedAxesKey = JSON.stringify(
+    revisionEntries(canon.revisions)
+      .map(([axis]) => axis)
+      .sort()
+  )
   const observedAxes = useMemo(
-    () => (JSON.parse(observedAxesKey) as string[]).map(axisId),
+    () => JSON.parse(observedAxesKey) as AxisId[],
     [observedAxesKey]
   )
 

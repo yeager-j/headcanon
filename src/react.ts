@@ -18,21 +18,22 @@ import {
 import { err, ok, type Result } from "serializable-result"
 
 import type { MutationEnvelope } from "./authority"
-import type {
-  AnyMutationDefinition,
-  InvocationOf,
-  MutationContext,
-  MutationDefinition,
-  MutationErrorOf,
-  MutationInvocation,
-  MutationRefusalOf,
-  ProtocolDefinition,
-  ProtocolInvocation,
+import type { InvalidationAdapter } from "./invalidation"
+import {
+  findMutation,
+  type AnyMutationDefinition,
+  type InvocationOf,
+  type MutationContext,
+  type MutationDefinition,
+  type MutationErrorOf,
+  type MutationInvocation,
+  type MutationRefusalOf,
+  type ProtocolDefinition,
+  type ProtocolInvocation,
 } from "./protocol"
 import {
   useIncorporation,
   type IncorporationStatus,
-  type InvalidationAdapter,
   type RefreshAdapter,
   type RefreshStallReason,
 } from "./refresh"
@@ -593,9 +594,10 @@ export function createPredictedRootWithDeliveryErrorClassifier<
     invocation as MutationInvocation<string, unknown>
 
   const mutationFor = (invocation: Invocation): RuntimeMutation<State, Error> =>
-    options.protocol.mutationsByName[
+    findMutation(
+      options.protocol,
       runtimeInvocation(invocation).name
-    ] as unknown as RuntimeMutation<State, Error>
+    ) as unknown as RuntimeMutation<State, Error>
 
   return function usePredictedRoot({
     canon,
@@ -690,10 +692,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
         }
 
         const acceptedStamp = frame.acceptedById.get(update.envelope.mutationId)
-        if (
-          acceptedStamp &&
-          covers({ revisions: frame.revisions }, acceptedStamp)
-        ) {
+        if (acceptedStamp && covers(frame.revisions, acceptedStamp.revisions)) {
           return replayedFrame
         }
 
@@ -899,7 +898,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
         if (
           entry.delivery !== "accepted" ||
           !entry.acceptedStamp ||
-          !covers(canon, entry.acceptedStamp)
+          !covers(canon.revisions, entry.acceptedStamp.revisions)
         ) {
           continue
         }
@@ -1203,19 +1202,14 @@ export function createObservedRoot(options: ObservedRootOptions) {
   }
 }
 
+// The invalidation vocabulary and `MutationEnvelope` have one public home,
+// the framework-independent `headcanon` entry.
 export {
-  createNoRealtimeInvalidationAdapter,
   useSnapshotRefresh,
   withPollingFallback,
-  type AxisInvalidation,
   type FreshnessStatus,
   type IncorporationStatus,
-  type InvalidationAdapter,
-  type InvalidationPublisher,
-  type InvalidationSubscription,
-  type InvalidationStatus,
   type PollingFallbackOptions,
   type RefreshAdapter,
   type RefreshStallReason,
 } from "./refresh"
-export type { MutationEnvelope } from "./authority"

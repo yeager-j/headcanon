@@ -2,12 +2,13 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { ablyAxisChannelName } from "../ably/channels"
 import {
   acceptedStamp,
   axisId,
   defineMutation,
   defineProtocol,
-  revisionVector,
+  revisionEntries,
   type AcceptedStamp,
   type InvalidationPublisher,
   type MutationAuthorityAdapter,
@@ -48,15 +49,15 @@ vi.mock("next/cache", () => nextCache)
 vi.mock("next/navigation", () => ({ forbidden }))
 
 function stamp(entries: Record<string, number>): AcceptedStamp {
-  const revisions = revisionVector(entries)
-  if (!revisions.ok) throw new Error("Invalid Next server test stamp")
-  return acceptedStamp(revisions.value)
+  const parsed = acceptedStamp({ revisions: entries })
+  if (!parsed.ok) throw new Error("Invalid Next server test stamp")
+  return parsed.value
 }
 
 function recordingPublisher(events: string[]): InvalidationPublisher {
   return {
     publish(eventId, accepted) {
-      for (const [axis, revision] of Object.entries(accepted.revisions)) {
+      for (const [axis, revision] of revisionEntries(accepted.revisions)) {
         events.push(`publish:${eventId}:${axis}:${revision}`)
       }
     },
@@ -72,40 +73,63 @@ afterEach(() => {
 })
 
 describe("axis cache tags", () => {
-  it("derives a bounded, versioned SHA-256 tag without exposing the axis", () => {
+  it("derives a bounded, versioned SHA-256 tag without exposing the axis", async () => {
     const axis = axisId(`secret/${"x".repeat(1_000)}`)
-    const tag = axisCacheTag(axis)
+    const tag = await axisCacheTag(axis)
 
     expect(tag).toMatch(/^headcanon:axis:v1:[0-9a-f]{64}$/)
     expect(tag.length).toBeLessThanOrEqual(256)
     expect(tag).not.toContain(axis)
-    expect(axisCacheTag(axis)).toBe(tag)
+    expect(await axisCacheTag(axis)).toBe(tag)
   })
 
-  it("tags every observed axis in one cacheTag call and preserves identity", () => {
-    const base = {
-      value: "canon",
-      revisions: stamp({ "entity/one": 1, "entity/two": 2 }).revisions,
-    }
+  it("hashes an axis exactly as the Ably channel derivation does", async () => {
+    const axis = axisId("entity/shared")
+    const channel = await ablyAxisChannelName("production", axis)
 
-    expect(tagVersionedBase(base)).toBe(base)
-    expect(nextCache.cacheTag).toHaveBeenCalledOnce()
-    expect(nextCache.cacheTag).toHaveBeenCalledWith(
-      axisCacheTag(axisId("entity/one")),
-      axisCacheTag(axisId("entity/two"))
+    expect(await axisCacheTag(axis)).toBe(
+      `headcanon:axis:v1:${channel.split(":").at(-1)}`
     )
   })
 
-  it("fails before cacheTag can accept a partial 129-axis entry", () => {
+  it("parses the loader's observation and tags every axis in one call", async () => {
+    const canon = await tagVersionedBase({
+      value: "canon",
+      revisions: { "entity/one": 1, "entity/two": 2 },
+    })
+
+    expect(canon).toEqual({
+      value: "canon",
+      revisions: { "entity/one": 1, "entity/two": 2 },
+    })
+    expect(Object.isFrozen(canon)).toBe(true)
+    expect(nextCache.cacheTag).toHaveBeenCalledOnce()
+    expect(nextCache.cacheTag).toHaveBeenCalledWith(
+      await axisCacheTag(axisId("entity/one")),
+      await axisCacheTag(axisId("entity/two"))
+    )
+  })
+
+  it("rejects an invalid revision like defineCanon, before tagging", async () => {
+    await expect(
+      tagVersionedBase({ value: null, revisions: { "entity/one": -1 } })
+    ).rejects.toThrow(
+      'defineCanon received an invalid revision vector: invalid-revision-vector at axis "entity/one" (negative)'
+    )
+    expect(nextCache.cacheTag).not.toHaveBeenCalled()
+  })
+
+  it("fails before cacheTag can accept a partial 129-axis entry", async () => {
     const revisions = Object.fromEntries(
       Array.from({ length: MAX_VERSIONED_BASE_AXES + 1 }, (_, index) => [
         `axis/${index}`,
         index,
       ])
     )
-    const base = { value: null, revisions: stamp(revisions).revisions }
 
-    expect(() => tagVersionedBase(base)).toThrow(RangeError)
+    await expect(tagVersionedBase({ value: null, revisions })).rejects.toThrow(
+      RangeError
+    )
     expect(nextCache.cacheTag).not.toHaveBeenCalled()
   })
 })
@@ -131,8 +155,8 @@ describe("Next commit finalization", () => {
     )
 
     expect(events.slice(0, 2)).toEqual([
-      `update:${axisCacheTag(first)}`,
-      `update:${axisCacheTag(second)}`,
+      `update:${await axisCacheTag(first)}`,
+      `update:${await axisCacheTag(second)}`,
     ])
     expect(events[2]).toBe("refresh")
     const published = events.slice(3, 5)
@@ -144,8 +168,8 @@ describe("Next commit finalization", () => {
     await announceExternalCommit(accepted, { publish: vi.fn() }, vi.fn())
 
     expect(nextCache.revalidateTag.mock.calls).toEqual([
-      [axisCacheTag(first), { expire: 0 }],
-      [axisCacheTag(second), { expire: 0 }],
+      [await axisCacheTag(first), { expire: 0 }],
+      [await axisCacheTag(second), { expire: 0 }],
     ])
     expect(nextCache.updateTag).not.toHaveBeenCalled()
     expect(nextCache.refresh).not.toHaveBeenCalled()
@@ -199,8 +223,9 @@ describe("Next commit finalization", () => {
     const settled = vi.fn()
     void finalization.then(settled)
 
+    // Axis tags are hashed with WebCrypto, so expiry follows an async hop.
+    await vi.waitFor(() => expect(nextCache.refresh).toHaveBeenCalledOnce())
     expect(nextCache.updateTag).toHaveBeenCalledTimes(2)
-    expect(nextCache.refresh).toHaveBeenCalledOnce()
     await Promise.resolve()
     expect(settled).not.toHaveBeenCalled()
 

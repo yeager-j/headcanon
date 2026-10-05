@@ -2,7 +2,14 @@
 
 import { describe, expect, it } from "vitest"
 
-import { acceptedStamp, axisId, covers, revisionVector } from "./revisions"
+import {
+  acceptedStamp,
+  axisId,
+  covers,
+  revisionAt,
+  revisionEntries,
+  revisionVector,
+} from "./revisions"
 import {
   assertMutationAuthorityContractAccumulation,
   assertMutationAuthorityContractRollback,
@@ -31,8 +38,14 @@ describe("contract negative controls", () => {
     return parsed.value
   }
 
+  function stamp(entries: Record<string, number>) {
+    const parsed = acceptedStamp({ revisions: entries })
+    if (!parsed.ok) throw new Error("Invalid negative-control stamp")
+    return parsed.value
+  }
+
   it("makes the accumulation assertion fail for a last-axis-only mutant", () => {
-    const lastAxisOnly = acceptedStamp(vector({ [second]: 1 }))
+    const lastAxisOnly = stamp({ [second]: 1 })
     const committedState = {
       ...MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE,
       primary: 1,
@@ -60,16 +73,16 @@ describe("contract negative controls", () => {
   })
 
   it("makes the coverage assertion fail for partial multi-axis canon", () => {
-    const stamp = acceptedStamp(vector({ [first]: 1, [second]: 1 }))
+    const accepted = stamp({ [first]: 1, [second]: 1 })
     const partialCanon = { value: null, revisions: vector({ [first]: 1 }) }
-    const anyAxisCovers: typeof covers = (canon, accepted) =>
-      Object.entries(accepted.revisions).some(
-        ([rawAxis, acceptedRevision]) =>
-          (canon.revisions[axisId(rawAxis)] ?? -1) >= acceptedRevision
+    const anyAxisCovers: typeof covers = (revisions, required) =>
+      revisionEntries(required).some(
+        ([axis, requiredRevision]) =>
+          (revisionAt(revisions, axis) ?? -1) >= requiredRevision
       )
 
     const coverageProperty = (implementation: typeof covers) =>
-      !implementation(partialCanon, stamp)
+      !implementation(partialCanon.revisions, accepted.revisions)
 
     expect(coverageProperty(covers)).toBe(true)
     expect(coverageProperty(anyAxisCovers)).toBe(false)

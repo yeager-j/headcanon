@@ -1,5 +1,5 @@
 import type { InvalidationPublisher } from "../invalidation"
-import { axisId } from "../revisions"
+import { revisionEntries } from "../revisions"
 import { ABLY_AXIS_INVALIDATION_EVENT, ablyAxisChannelName } from "./channels"
 
 /** Minimal REST channel contract used for accepted-axis publication. */
@@ -35,15 +35,12 @@ export function createAblyInvalidationPublisher(options: {
   return {
     async publish(eventId, stamp) {
       const entries = await Promise.all(
-        Object.entries(stamp.revisions).map(
-          async ([rawAxis, stampedRevision]) => {
-            const axis = axisId(rawAxis)
-            return {
-              axis,
-              channelName: await ablyAxisChannelName(options.namespace, axis),
-              revision: stampedRevision,
-            }
-          }
+        revisionEntries(stamp.revisions).map(
+          async ([axis, stampedRevision]) => ({
+            axis,
+            channelName: await ablyAxisChannelName(options.namespace, axis),
+            revision: stampedRevision,
+          })
         )
       )
       await Promise.all(

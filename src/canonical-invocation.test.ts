@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { canonicalJson } from "./canonical-invocation"
 import { canonicalInvocation, type MutationInvocation } from "./index"
 
 function invocation(args: unknown): MutationInvocation<"test.mutate", unknown> {
@@ -10,7 +11,7 @@ async function canonical(args: unknown) {
   const result = await canonicalInvocation("test.protocol.v1", invocation(args))
   if (!result.ok)
     throw new Error(`Canonicalization failed: ${result.error.code}`)
-  return result.value
+  return result.value.canonical
 }
 
 afterEach(() => {
@@ -160,6 +161,35 @@ describe("canonicalInvocation", () => {
     expect(digest).not.toHaveBeenCalled()
   })
 
+  it.each([
+    [
+      "non-enumerable property",
+      Object.defineProperty({}, "hidden", { value: 1 }),
+      { reason: "non-enumerable-property", path: ["hidden"] },
+    ],
+    [
+      "accessor property",
+      Object.defineProperty({}, "computed", { enumerable: true, get: () => 1 }),
+      { reason: "accessor-property", path: ["computed"] },
+    ],
+    [
+      "symbol key",
+      { [Symbol("hidden")]: 1 },
+      { reason: "symbol-key", path: [] },
+    ],
+  ] as const)("rejects an object with a %s", async (_label, args, expected) => {
+    await expect(
+      canonicalInvocation("test.protocol.v1", invocation(args))
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "invalid-json-value",
+        reason: expected.reason,
+        path: ["invocation", "args", ...expected.path],
+      },
+    })
+  })
+
   it("rejects accessor-backed array entries without invoking them", async () => {
     const getter = vi.fn(() => "value")
     const args: string[] = []
@@ -179,5 +209,58 @@ describe("canonicalInvocation", () => {
     })
     expect(getter).not.toHaveBeenCalled()
     expect(digest).not.toHaveBeenCalled()
+  })
+
+  it("returns the isolated invocation that the identity describes", async () => {
+    const args = { tags: ["a", "b"], nested: { count: 1 } }
+    const result = await canonicalInvocation(
+      "test.protocol.v1",
+      invocation(args)
+    )
+    if (!result.ok) throw new Error("Canonicalization failed")
+    const isolated = result.value.invocation
+
+    expect(isolated).toEqual({ name: "test.mutate", args })
+    expect(isolated.args).not.toBe(args)
+    expect(Object.getPrototypeOf(isolated.args)).toBeNull()
+    expect(
+      Object.getPrototypeOf((isolated.args as typeof args).nested)
+    ).toBeNull()
+    // What was hashed is what a command receives: its JSON is the identity's.
+    expect(JSON.parse(JSON.stringify(isolated))).toEqual(
+      JSON.parse(result.value.canonical.json).invocation
+    )
+
+    args.nested.count = 2
+    expect((isolated.args as typeof args).nested.count).toBe(1)
+  })
+})
+
+describe("canonicalJson", () => {
+  it.each([
+    null,
+    true,
+    0,
+    -0,
+    1e21,
+    "text \u20ac \ud83d\ude00",
+    [],
+    [3, [2, [1]]],
+    {},
+    { z: { b: [null, false], a: "x" }, a: 1e-7 },
+  ])("is idempotent over its own output (%#)", (value) => {
+    const first = canonicalJson(value)
+    if (!first.ok) throw new Error("Canonicalization failed")
+
+    expect(canonicalJson(JSON.parse(first.value))).toEqual({
+      ok: true,
+      value: first.value,
+    })
+  })
+
+  it("compares JSON data, not key order or prototypes", () => {
+    const nullPrototype = Object.assign(Object.create(null), { b: 1, a: 2 })
+
+    expect(canonicalJson(nullPrototype)).toEqual(canonicalJson({ a: 2, b: 1 }))
   })
 })

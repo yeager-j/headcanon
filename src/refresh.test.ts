@@ -12,17 +12,17 @@ import {
   defineProtocol,
   revisionVector,
   type AcceptedStamp,
+  type AxisInvalidation,
   type Canon,
+  type InvalidationAdapter,
+  type InvalidationSubscription,
+  type MutationEnvelope,
   type Revision,
 } from "./index"
 import {
   createObservedRoot,
   createPredictedRoot,
   useSnapshotRefresh,
-  type AxisInvalidation,
-  type InvalidationAdapter,
-  type InvalidationSubscription,
-  type MutationEnvelope,
   type PredictedRootRecoveryListeners,
   type RefreshAdapter,
 } from "./react"
@@ -68,7 +68,9 @@ function canon(value: number, revision: number): Canon<number> {
 }
 
 function stamp(entries: Record<string, number>): AcceptedStamp {
-  return acceptedStamp(revisions(entries))
+  const parsed = acceptedStamp({ revisions: entries })
+  if (!parsed.ok) throw new Error("Invalid refresh test stamp")
+  return parsed.value
 }
 
 function flushMicrotasks() {
@@ -449,14 +451,13 @@ describe("createObservedRoot", () => {
         initialProps: {
           currentCanon: {
             value: 0,
-            revisions: revisions({ "": 0, a: 0, b: 0 }),
+            revisions: revisions({ a: 0, b: 0 }),
           },
         },
       }
     )
 
     expect(invalidations.subscriptions[0]?.axes).toEqual([
-      axisId(""),
       axisId("a"),
       axisId("b"),
     ])

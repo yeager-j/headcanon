@@ -34,6 +34,8 @@ import {
 import {
   acceptedStamp,
   axisId,
+  revisionAt,
+  revisionEntries,
   revisionVector,
   type AcceptedStamp,
   type AxisId,
@@ -310,12 +312,10 @@ export function createInMemoryInvalidationAdapter(): InMemoryInvalidationAdapter
       return () => subscriptions.delete(subscription)
     },
     publish(eventId, stamp) {
-      for (const [rawAxis, stampedRevision] of Object.entries(
-        stamp.revisions
-      )) {
+      for (const [axis, stampedRevision] of revisionEntries(stamp.revisions)) {
         const invalidation = Object.freeze({
           eventId,
-          axis: axisId(rawAxis),
+          axis,
           revision: stampedRevision,
         })
         published.push(invalidation)
@@ -776,7 +776,7 @@ export function verifyMutationAuthorityContract(
         primary: 12,
         effects: ["once-after-retry"],
       })
-      expect(stamp.revisions[PRIMARY_AXIS]).toBe(2)
+      expect(revisionAt(stamp.revisions, PRIMARY_AXIS)).toBe(2)
       expect(await driver.attemptCount(envelope.mutationId)).toBe(2)
     })
 
@@ -1042,7 +1042,9 @@ function invalidationCanon(
 }
 
 function invalidationStamp(entries: Record<string, number>): AcceptedStamp {
-  return acceptedStamp(invalidationVector(entries))
+  const parsed = acceptedStamp({ revisions: entries })
+  if (!parsed.ok) throw new Error("Invalid invalidation contract stamp")
+  return parsed.value
 }
 
 /** Runs the reusable black-box invalidation contract against one adapter.
@@ -1387,9 +1389,9 @@ function contractCanon(revision: number): Canon<number> {
 }
 
 function contractStamp(revision: number) {
-  const parsed = revisionVector({ [contractAxis]: revision })
+  const parsed = acceptedStamp({ revisions: { [contractAxis]: revision } })
   if (!parsed.ok) throw new Error("Invalid refresh contract stamp")
-  return acceptedStamp(parsed.value)
+  return parsed.value
 }
 
 async function flushMicrotasks() {

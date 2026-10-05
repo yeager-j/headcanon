@@ -8,6 +8,7 @@ import {
 import type { ExtractTablesWithRelations } from "drizzle-orm/relations"
 import { err, ok } from "serializable-result"
 
+import { hasExactKeys, isPlainRecord } from "./admission"
 import {
   createStampAccumulator,
   type MutationAuthorityAdapter,
@@ -18,7 +19,7 @@ import {
   headcanonMutationReceipts,
   type StoredMutationTerminalOutcome,
 } from "./receipt-table"
-import { acceptedStamp, revisionVector } from "./revisions"
+import { acceptedStamp } from "./revisions"
 
 // The receipt table is defined in `./receipt-table` (drizzle-orm only, so schema
 // tooling never loads the authority graph) and published from the dedicated
@@ -84,23 +85,6 @@ class TerminalDecision<Rejection> extends Error {
   }
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false
-  }
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-function hasExactly(value: Record<string, unknown>, keys: readonly string[]) {
-  const actual = Object.keys(value).sort()
-  const expected = [...keys].sort()
-  return (
-    actual.length === expected.length &&
-    actual.every((key, index) => key === expected[index])
-  )
-}
-
 function parseStoredOutcome<Rejection>(
   value: unknown,
   parseRejection?: (value: unknown) => Rejection
@@ -110,24 +94,19 @@ function parseStoredOutcome<Rejection>(
   }
 
   if (value.kind === "accepted") {
-    if (
-      !hasExactly(value, ["kind", "stamp"]) ||
-      !isPlainRecord(value.stamp) ||
-      !hasExactly(value.stamp, ["revisions"])
-    ) {
+    if (!hasExactKeys(value, ["kind", "stamp"])) {
       throw new Error("Invalid accepted mutation receipt")
     }
-    const revisions = revisionVector(value.stamp.revisions)
-    if (!revisions.ok) {
-      throw new Error("Invalid accepted mutation receipt revisions")
+    const stamp = acceptedStamp(value.stamp)
+    if (!stamp.ok) {
+      throw new Error(
+        `Invalid accepted mutation receipt stamp (${stamp.error.reason})`
+      )
     }
-    return Object.freeze({
-      kind: "accepted",
-      stamp: acceptedStamp(revisions.value),
-    })
+    return Object.freeze({ kind: "accepted", stamp: stamp.value })
   }
 
-  if (value.kind === "rejected" && hasExactly(value, ["kind", "error"])) {
+  if (value.kind === "rejected" && hasExactKeys(value, ["kind", "error"])) {
     if (!parseRejection) {
       throw new Error("Missing mutation receipt refusal parser")
     }
@@ -137,7 +116,7 @@ function parseStoredOutcome<Rejection>(
     })
   }
 
-  if (value.kind === "denied" && hasExactly(value, ["kind"])) {
+  if (value.kind === "denied" && hasExactKeys(value, ["kind"])) {
     return Object.freeze({ kind: "denied" })
   }
 

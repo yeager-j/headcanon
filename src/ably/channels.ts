@@ -1,15 +1,10 @@
 import type { AxisId } from "../revisions"
+import { sha256Hex } from "../sha256"
 
 /** Ably event name used for singleton accepted-axis invalidations. */
 export const ABLY_AXIS_INVALIDATION_EVENT = "headcanon.axis-invalidation.v1"
 
 const AXIS_CHANNEL_VERSION = "headcanon:axis:v1"
-
-function bytesToHex(bytes: ArrayBuffer): string {
-  return Array.from(new Uint8Array(bytes), (byte) =>
-    byte.toString(16).padStart(2, "0")
-  ).join("")
-}
 
 function normalizedNamespace(namespace: string): string {
   const normalized = namespace.trim().replace(/:+$/u, "")
@@ -28,11 +23,7 @@ export async function ablyAxisChannelName(
   namespace: string,
   axis: AxisId
 ): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(axis)
-  )
-  return `${normalizedNamespace(namespace)}:${AXIS_CHANNEL_VERSION}:${bytesToHex(digest)}`
+  return `${normalizedNamespace(namespace)}:${AXIS_CHANNEL_VERSION}:${await sha256Hex(axis)}`
 }
 
 /** Builds a sorted, duplicate-free subscribe-only Ably capability claim.

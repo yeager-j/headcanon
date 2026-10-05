@@ -1,7 +1,9 @@
 import { err, ok, type Result } from "serializable-result"
 
+import { hasExactKeys, isPlainRecord } from "./admission"
 import {
   axisId,
+  isAxisAddress,
   revision,
   type AcceptedStamp,
   type AxisId,
@@ -16,13 +18,48 @@ export interface AxisInvalidation {
   readonly revision: Revision
 }
 
-/** Lifecycle state reported by an invalidation transport. */
+/**
+ * What a root may assume about push invalidations right now. This is the one
+ * definition of each status; transports and wrappers only choose when to
+ * report it.
+ *
+ * - `active`: the transport is attached for every subscribed axis and delivers
+ *   their invalidations.
+ * - `reauthorizing`: the transport is acquiring authorization or attachment
+ *   for the current axis set — including first-time initialization — and may
+ *   miss invalidations until it reports `active`.
+ * - `unavailable`: the transport failed; invalidations are being missed until
+ *   it recovers or is retried.
+ * - `disabled`: the root deliberately has no push transport (configuration,
+ *   not a failure).
+ * - `polling`: reported only by a polling fallback wrapper while its primary
+ *   transport is degraded; refreshes are requested on an interval instead.
+ *
+ * `disabled`, `reauthorizing`, and `unavailable` are the degraded statuses
+ * (see {@link isDegradedInvalidationStatus}).
+ */
 export type InvalidationStatus =
   | "disabled"
   | "active"
   | "reauthorizing"
   | "polling"
   | "unavailable"
+
+/**
+ * Returns whether push delivery cannot be trusted in a status, so a root needs
+ * another liveness source such as polling.
+ * @param status Status reported by an invalidation adapter.
+ * @returns Whether the status is `disabled`, `reauthorizing`, or `unavailable`.
+ */
+export function isDegradedInvalidationStatus(
+  status: InvalidationStatus
+): boolean {
+  return (
+    status === "disabled" ||
+    status === "reauthorizing" ||
+    status === "unavailable"
+  )
+}
 
 /** Root-owned subscription callbacks for a set of revision axes. */
 export interface InvalidationSubscription {
@@ -32,8 +69,18 @@ export interface InvalidationSubscription {
   readonly onSubscriptionGap?: () => void
 }
 
-/** Synchronous subscription seam implemented by push or fallback transports. */
+/**
+ * Synchronous subscription seam implemented by push or fallback transports.
+ *
+ * A consumer reads `initialStatus` immediately before each `subscribe` call:
+ * it is the status the new subscription starts in, so it may change over the
+ * adapter's lifetime (implement it as a getter when it does). After that, the
+ * adapter reports every change through `onStatusChange`, possibly
+ * synchronously inside `subscribe`. Reporting the current status again is
+ * allowed and must be harmless to consumers.
+ */
 export interface InvalidationAdapter {
+  /** Status a subscription made now starts in; read at subscribe time. */
   readonly initialStatus: InvalidationStatus
   subscribe(subscription: InvalidationSubscription): () => void
 }
@@ -45,9 +92,16 @@ export interface LazyInvalidationAdapterOptions {
 }
 
 /**
- * Adapts an asynchronously-created transport to the synchronous root seam.
- * Initialization happens at most once. Early subscriptions are buffered, and
- * cancelling one before readiness prevents it from ever reaching the transport.
+ * Adapts an asynchronously-created transport to the synchronous root seam,
+ * for example one that lazily imports a realtime SDK.
+ *
+ * Initialization happens at most once, on the first subscription. Until it
+ * completes, the adapter reports `reauthorizing` and buffers subscriptions;
+ * cancelling one before readiness prevents it from ever reaching the
+ * transport. When the inner adapter is ready, each buffered subscription
+ * receives the inner adapter's `initialStatus` (when it differs) and is then
+ * subscribed to it, and `initialStatus` forwards the inner adapter's from then
+ * on. A `null` result or a rejected initialization reports `unavailable`.
  * @param options Initialization callback and optional diagnostics handler.
  * @returns An invalidation adapter that buffers subscriptions until ready.
  */
@@ -83,6 +137,11 @@ export function createLazyInvalidationAdapter(
 
       state = "ready"
       for (const entry of buffered) {
+        const status = inner.initialStatus
+        if (!entry.cancelled && status !== "reauthorizing") {
+          entry.subscription.onStatusChange(status)
+        }
+        // The status callback may have cancelled this subscription.
         if (!entry.cancelled) {
           entry.unsubscribe = inner.subscribe(entry.subscription)
         }
@@ -94,7 +153,10 @@ export function createLazyInvalidationAdapter(
   }
 
   return {
-    initialStatus: "reauthorizing",
+    get initialStatus() {
+      if (state === "ready" && inner) return inner.initialStatus
+      return state === "unavailable" ? "unavailable" : "reauthorizing"
+    },
     subscribe(subscription) {
       if (state === "ready" && inner) return inner.subscribe(subscription)
       if (state === "unavailable") {
@@ -158,7 +220,10 @@ export type InvalidationPublicationFailureReporter = (
   failure: InvalidationPublicationFailure
 ) => void
 
-/** Fail-closed reasons an untrusted axis invalidation payload was rejected. */
+/**
+ * Fail-closed reasons an untrusted axis invalidation payload was rejected.
+ * An invalid revision nests the revision parser's error under `error`.
+ */
 export type AxisInvalidationValidationError =
   | {
       readonly code: "invalid-axis-invalidation"
@@ -169,24 +234,12 @@ export type AxisInvalidationValidationError =
         | "invalid-axis"
       readonly value: unknown
     }
-  | (Omit<RevisionValidationError, "code"> & {
-      readonly code: "invalid-axis-invalidation-revision"
-    })
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false
-  }
-
-  const prototype = Object.getPrototypeOf(value)
-  if (prototype !== Object.prototype && prototype !== null) return false
-
-  return Reflect.ownKeys(value).every((key) => {
-    if (typeof key === "symbol") return false
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    return descriptor?.enumerable === true && "value" in descriptor
-  })
-}
+  | {
+      readonly code: "invalid-axis-invalidation"
+      readonly reason: "invalid-revision"
+      readonly value: unknown
+      readonly error: RevisionValidationError
+    }
 
 /**
  * Parses one untrusted realtime payload without admitting domain data.
@@ -204,14 +257,7 @@ export function axisInvalidation(
     })
   }
 
-  const keys = Reflect.ownKeys(value)
-  if (
-    keys.length !== 3 ||
-    !keys.every(
-      (key) =>
-        typeof key === "string" && ["eventId", "axis", "revision"].includes(key)
-    )
-  ) {
+  if (!hasExactKeys(value, ["eventId", "axis", "revision"])) {
     return err({
       code: "invalid-axis-invalidation",
       reason: "unexpected-field",
@@ -226,7 +272,7 @@ export function axisInvalidation(
       value,
     })
   }
-  if (typeof value.axis !== "string" || value.axis.length === 0) {
+  if (!isAxisAddress(value.axis)) {
     return err({
       code: "invalid-axis-invalidation",
       reason: "invalid-axis",
@@ -237,8 +283,10 @@ export function axisInvalidation(
   const parsedRevision = revision(value.revision)
   if (!parsedRevision.ok) {
     return err({
-      ...parsedRevision.error,
-      code: "invalid-axis-invalidation-revision",
+      code: "invalid-axis-invalidation",
+      reason: "invalid-revision",
+      value,
+      error: parsedRevision.error,
     })
   }
 

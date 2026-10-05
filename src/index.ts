@@ -5,8 +5,10 @@ export {
   defineCanon,
   revision,
   revisionAt,
+  revisionEntries,
   revisionVector,
   type AcceptedStamp,
+  type AcceptedStampValidationError,
   type AxisId,
   type Canon,
   type Revision,
@@ -17,6 +19,7 @@ export {
 export {
   defineMutation,
   defineProtocol,
+  type AnyMutationDefinition,
   type InvocationOf,
   type MutationDefinition,
   type MutationErrorOf,
@@ -30,7 +33,10 @@ export {
   canonicalInvocation,
   type CanonicalInvocation,
   type CanonicalInvocationError,
+  type PreparedCanonicalInvocation,
 } from "./canonical-invocation"
+// `createStampAccumulator` is framework-independent: it is the only way a
+// custom `MutationAuthorityAdapter` mints the accepted stamp for an attempt.
 export {
   createStampAccumulator,
   type MutationAuthorityAdapter,
@@ -48,6 +54,7 @@ export {
   axisInvalidation,
   createLazyInvalidationAdapter,
   createNoRealtimeInvalidationAdapter,
+  isDegradedInvalidationStatus,
   type AxisInvalidationValidationError,
   type AxisInvalidation,
   type InvalidationAdapter,

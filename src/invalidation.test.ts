@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest"
 import {
   axisInvalidation,
   createLazyInvalidationAdapter,
+  createNoRealtimeInvalidationAdapter,
+  isDegradedInvalidationStatus,
   type InvalidationAdapter,
   type InvalidationStatus,
   type InvalidationSubscription,
@@ -52,6 +54,50 @@ describe("axisInvalidation", () => {
 
     expect(axisInvalidation(hidden).ok).toBe(false)
     expect(axisInvalidation(symbol).ok).toBe(false)
+  })
+
+  it("nests an invalid revision's error under its own code", () => {
+    const payload = { eventId: "event-1", axis: "entity/one", revision: -1 }
+
+    expect(axisInvalidation(payload)).toEqual({
+      ok: false,
+      error: {
+        code: "invalid-axis-invalidation",
+        reason: "invalid-revision",
+        value: payload,
+        error: { code: "invalid-revision", reason: "negative", value: -1 },
+      },
+    })
+  })
+})
+
+describe("isDegradedInvalidationStatus", () => {
+  it.each([
+    ["disabled", true],
+    ["reauthorizing", true],
+    ["unavailable", true],
+    ["active", false],
+    ["polling", false],
+  ] as const)("classifies %s as degraded: %s", (status, degraded) => {
+    expect(isDegradedInvalidationStatus(status)).toBe(degraded)
+  })
+})
+
+describe("createNoRealtimeInvalidationAdapter", () => {
+  it("reports disabled and never delivers", () => {
+    const statuses: InvalidationStatus[] = []
+    const adapter = createNoRealtimeInvalidationAdapter()
+
+    expect(adapter.initialStatus).toBe("disabled")
+    const unsubscribe = adapter.subscribe({
+      ...subscription(statuses),
+      onInvalidation: () => {
+        throw new Error("no-realtime adapter delivered an invalidation")
+      },
+    })
+    unsubscribe()
+
+    expect(statuses).toEqual(["disabled"])
   })
 })
 
@@ -134,6 +180,91 @@ describe("createLazyInvalidationAdapter", () => {
     expect(subscribed).toHaveLength(0)
   })
 
+  it("forwards the inner adapter's status after readiness", async () => {
+    const readiness = deferred<InvalidationAdapter | null>()
+    const statuses: InvalidationStatus[] = []
+    // A valid inner adapter that reports changes only, never its start status.
+    const inner: InvalidationAdapter = {
+      initialStatus: "active",
+      subscribe: () => () => undefined,
+    }
+    const adapter = createLazyInvalidationAdapter({
+      initialize: () => readiness.promise,
+    })
+
+    expect(adapter.initialStatus).toBe("reauthorizing")
+    adapter.subscribe(subscription(statuses))
+    readiness.resolve(inner)
+    await readiness.promise
+    await Promise.resolve()
+
+    expect(statuses).toEqual(["active"])
+    expect(adapter.initialStatus).toBe("active")
+  })
+
+  it("reads the inner adapter's status at subscribe time", async () => {
+    let innerStatus: InvalidationStatus = "active"
+    const adapter = createLazyInvalidationAdapter({
+      initialize: () =>
+        Promise.resolve({
+          get initialStatus() {
+            return innerStatus
+          },
+          subscribe: () => () => undefined,
+        }),
+    })
+
+    adapter.subscribe(subscription([]))
+    await Promise.resolve()
+    await Promise.resolve()
+    innerStatus = "unavailable"
+
+    expect(adapter.initialStatus).toBe("unavailable")
+  })
+
+  it("releases the inner subscription when unsubscribed after readiness", async () => {
+    const released: string[] = []
+    const adapter = createLazyInvalidationAdapter({
+      initialize: () =>
+        Promise.resolve({
+          initialStatus: "active",
+          subscribe: () => () => released.push("inner"),
+        }),
+    })
+
+    const buffered = adapter.subscribe(subscription([]))
+    await Promise.resolve()
+    await Promise.resolve()
+    const direct = adapter.subscribe(subscription([]))
+    buffered()
+    direct()
+
+    expect(released).toEqual(["inner", "inner"])
+  })
+
+  it("does not subscribe when the forwarded status cancels the subscription", async () => {
+    const subscribed: InvalidationSubscription[] = []
+    const adapter = createLazyInvalidationAdapter({
+      initialize: () =>
+        Promise.resolve({
+          initialStatus: "active",
+          subscribe(value) {
+            subscribed.push(value)
+            return () => undefined
+          },
+        }),
+    })
+    let unsubscribe = () => undefined as void
+    unsubscribe = adapter.subscribe({
+      ...subscription([]),
+      onStatusChange: () => unsubscribe(),
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(subscribed).toHaveLength(0)
+  })
+
   it.each(["unavailable", "rejected"] as const)(
     "reports unavailable when initialization is %s",
     async (outcome) => {
@@ -154,6 +285,7 @@ describe("createLazyInvalidationAdapter", () => {
       adapter.subscribe(subscription(statuses))
 
       expect(statuses).toEqual(["unavailable", "unavailable"])
+      expect(adapter.initialStatus).toBe("unavailable")
       expect(errors).toEqual(outcome === "rejected" ? [error] : [])
     }
   )

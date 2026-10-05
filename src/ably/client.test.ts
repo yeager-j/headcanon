@@ -8,7 +8,7 @@ import {
   type AxisInvalidation,
   type InvalidationSubscription,
 } from "../invalidation"
-import { acceptedStamp, axisId, revisionVector } from "../revisions"
+import { acceptedStamp, axisId } from "../revisions"
 import {
   verifyInvalidationContract,
   type InvalidationContractHarness,
@@ -381,10 +381,10 @@ describe("Ably invalidation capability lifecycle", () => {
       rest: service.rest,
       namespace: "preview",
     })
-    const revisions = revisionVector({ [axisA]: 2, [axisB]: 4 })
-    if (!revisions.ok) throw new Error("Invalid Ably publisher test vector")
+    const stamp = acceptedStamp({ revisions: { [axisA]: 2, [axisB]: 4 } })
+    if (!stamp.ok) throw new Error("Invalid Ably publisher test stamp")
 
-    await publisher.publish("shared-event", acceptedStamp(revisions.value))
+    await publisher.publish("shared-event", stamp.value)
 
     expect(service.published).toEqual([
       { eventId: "shared-event", axis: axisA, revision: 2 },
