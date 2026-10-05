@@ -63,7 +63,7 @@
     "drizzle"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "workspaces": [
     "fixture"
@@ -72,12 +72,14 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json --resolve-full-paths",
     "lint": "eslint",
     "format": "eslint --fix . && prettier --write .",
-    "typecheck": "tsc --noEmit && npm run build && npm run typecheck -w headcanon-fixture",
-    "depcheck": "node depcheck.mjs",
+    "typecheck": "tsc --noEmit",
+    "check:bundle-safety": "node scripts/check-bundle-safety.mjs",
     "check:public-api-docs": "node scripts/check-public-api-docs.mjs",
     "check:package": "npm run build && publint && attw --pack . --profile esm-only",
+    "check:fixture": "npm run build && npm run typecheck -w headcanon-fixture",
     "test": "vitest run",
-    "test:e2e": "npm run test:e2e -w headcanon-fixture",
+    "test:e2e": "npm run build && npm run test:e2e -w headcanon-fixture",
+    "dev:fixture": "npm run build && npm run dev -w headcanon-fixture",
     "prepack": "npm run build"
   },
   "dependencies": {

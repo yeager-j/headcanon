@@ -7,25 +7,38 @@ The package documentation is in [`README.md`](README.md).
 | Path      | What it is                                                                                                 |
 | --------- | ---------------------------------------------------------------------------------------------------------- |
 | `src`     | The source of the published `headcanon` package.                                                           |
+| `scripts` | The repo gates (`check-*.mjs`) and their tests.                                                            |
 | `fixture` | A private Next.js App Router app. Its Playwright suite tests the client lifecycle through the real router. |
 
 The repo root is the package and an npm workspace root. The fixture is its only
-workspace and depends on the package through `file:..`, so both share one
-installed copy of React and Next. `files` in `package.json` keeps the fixture
-out of the published tarball.
+workspace and depends on the package through `file:..`, so both resolve one
+installed copy of React and Next; `npm test` fails if they do not. `files` in
+`package.json` keeps the fixture out of the published tarball.
+
+`package.json#exports` is the one list of public entries. The gates read it, so
+a new export is checked with no edit to them. Every export ships to browsers
+unless `scripts/check-bundle-safety.mjs` lists it as server-only.
 
 ## Commands
+
+Node 22 or later. The fixture uses the package's built `dist/`; each root
+script that needs it builds it first, and fixture scripts never do.
 
 ```sh
 npm install
 npm run lint
-npm run typecheck
-npm run depcheck              # client-entry bundle-safety gate
+npm run typecheck             # the package and gate scripts; no build
+npm run check:bundle-safety   # browser entries import nothing server-only
 npm run check:public-api-docs # every public export has JSDoc
 npm test                      # set HEADCANON_TEST_DATABASE_URL to run the Postgres suite
-npm run check:package         # publint + Are the Types Wrong
-npm run test:e2e              # the fixture's Playwright suite; locally it rebuilds the package first
+npm run check:package         # builds; publint + Are the Types Wrong
+npm run check:fixture         # builds; type-checks the fixture with its generated route types
+npm run test:e2e              # builds the package and fixture; Playwright against `next start`
+npm run dev:fixture           # builds; the fixture's dev server on port 3900
 ```
+
+The e2e suite never retries: it is the control for an intermittent deadlock. A
+failure keeps its Playwright trace in `fixture/test-results/`.
 
 ## Publishing
 

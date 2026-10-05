@@ -964,6 +964,8 @@ export function createPredictedRootWithDeliveryErrorClassifier<
     useEffect(() => {
       const token = {}
       activeTokenRef.current = token
+      // The ledger is one Map for the root's lifetime, mutated in place.
+      const ledger = ledgerRef.current
 
       return () => {
         activeTokenRef.current = null
@@ -983,7 +985,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
           // entry may already have committed, and its receipt — not a second
           // send — is what would resolve it.
           const undelivered = queueRef.current
-            .map((mutationId) => ledgerRef.current.get(mutationId))
+            .map((mutationId) => ledger.get(mutationId))
             .filter((entry) => entry?.delivery === "queued")
           void undelivered.reduce(
             (chain, entry) =>
@@ -995,7 +997,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
             Promise.resolve<void>(undefined)
           )
 
-          for (const entry of ledgerRef.current.values()) {
+          for (const entry of ledger.values()) {
             // `unknown` stays honest for a farewell send: it left, but no
             // mounted root remains to learn whether the authority accepted it.
             const outcome = entry.acceptedStamp ? "accepted" : "unknown"
@@ -1007,7 +1009,7 @@ export function createPredictedRootWithDeliveryErrorClassifier<
             entry.canonized.resolve(err(lifecycleError))
             entry.releaseAction.resolve()
           }
-          ledgerRef.current.clear()
+          ledger.clear()
           queueRef.current = []
         })
       }

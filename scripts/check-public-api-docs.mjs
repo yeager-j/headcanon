@@ -1,129 +1,159 @@
-import { readdirSync } from "node:fs"
-import { extname, join, relative, resolve } from "node:path"
-import process from "node:process"
+// @ts-check
+
+import { join, relative } from "node:path"
+import { pathToFileURL } from "node:url"
 import ts from "typescript"
 
-const packageRoot = resolve(import.meta.dirname, "..")
-const sourceRoot = join(packageRoot, "src")
-const entryPoints = [
-  "index.ts",
-  "ably/channels.ts",
-  "ably/client.ts",
-  "ably/server.ts",
-  "drizzle.ts",
-  "receipt-table.ts",
-  "next/client.ts",
-  "next/server.ts",
-  "react.ts",
-  "testing.ts",
-]
+import { packageEntries, ROOT } from "./package-entries.mjs"
 
-const sourceFiles = []
-function collect(directory) {
-  for (const name of readdirSync(directory, { withFileTypes: true })) {
-    const file = join(directory, name.name)
-    if (name.isDirectory()) collect(file)
-    else if (extname(file) === ".ts" && !file.endsWith(".test.ts")) {
-      sourceFiles.push(file)
+/** @param {string} tsconfig */
+function compilerOptions(tsconfig) {
+  const parsed = ts.getParsedCommandLineOfConfigFile(
+    tsconfig,
+    {},
+    {
+      ...ts.sys,
+      onUnRecoverableConfigFileDiagnostic(diagnostic) {
+        throw new Error(
+          ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")
+        )
+      },
+    }
+  )
+  if (!parsed) throw new Error(`Cannot read ${tsconfig}.`)
+  return parsed.options
+}
+
+/**
+ * Checks that every declaration exported from a public entry has JSDoc, and
+ * that every exported callable documents each parameter and its return.
+ * TypeScript's own rule matches a destructured parameter to the `@param` tag
+ * at its position, so it needs no synthetic `@param __0`.
+ *
+ * @param {object} [options] What to check.
+ * @param {import("./package-entries.mjs").PackageEntry[]} [options.entries]
+ *   The public entries; the walk starts from these and follows their exports.
+ * @param {string} [options.root] The package root; only declarations under
+ *   its `src/` are checked, and reports are relative to it.
+ * @param {string} [options.tsconfig] The tsconfig whose compiler options the
+ *   check uses.
+ * @returns {{ failures: string[], declarations: number }} One message per
+ *   missing piece of documentation, and how many declarations were checked.
+ */
+export function checkPublicApiDocs({
+  entries = packageEntries(),
+  root = ROOT,
+  tsconfig = join(root, "tsconfig.build.json"),
+} = {}) {
+  const sourceRoot = join(root, "src")
+  const program = ts.createProgram(
+    entries.map(({ source }) => source),
+    compilerOptions(tsconfig)
+  )
+  const checker = program.getTypeChecker()
+  /** @type {string[]} */
+  const failures = []
+  const visited = new Set()
+
+  /**
+   * @param {ts.Declaration} declaration
+   * @param {string} message
+   */
+  function report(declaration, message) {
+    const sourceFile = declaration.getSourceFile()
+    const position = sourceFile.getLineAndCharacterOfPosition(
+      declaration.getStart(sourceFile)
+    )
+    failures.push(
+      `${relative(root, sourceFile.fileName)}:${position.line + 1} ${message}`
+    )
+  }
+
+  /**
+   * @param {ts.Symbol} symbol
+   * @param {ts.Declaration} declaration
+   */
+  function checkCallable(symbol, declaration) {
+    const signatures = checker
+      .getTypeAtLocation(declaration)
+      .getCallSignatures()
+    if (signatures.length === 0) return
+
+    const tags = ts.getJSDocTags(declaration)
+    const paramTags = tags.filter(ts.isJSDocParameterTag)
+    const paramNames = new Set(paramTags.map((tag) => tag.name.getText()))
+    for (const signature of signatures) {
+      signature.parameters.forEach((parameter, index) => {
+        const node = parameter.valueDeclaration
+        const destructured =
+          node !== undefined &&
+          ts.isParameter(node) &&
+          !ts.isIdentifier(node.name)
+        if (destructured && index >= paramTags.length) {
+          report(
+            declaration,
+            `${symbol.name} is missing @param for parameter ${index + 1}`
+          )
+        } else if (!destructured && !paramNames.has(parameter.getName())) {
+          report(
+            declaration,
+            `${symbol.name} is missing @param ${parameter.getName()}`
+          )
+        }
+      })
+    }
+    if (!tags.some((tag) => tag.tagName.text === "returns")) {
+      report(declaration, `${symbol.name} is missing @returns`)
     }
   }
-}
-collect(sourceRoot)
 
-const program = ts.createProgram(sourceFiles, {
-  allowJs: false,
-  module: ts.ModuleKind.ESNext,
-  moduleResolution: ts.ModuleResolutionKind.Bundler,
-  noEmit: true,
-  skipLibCheck: true,
-  strict: true,
-  target: ts.ScriptTarget.ES2022,
-})
-const checker = program.getTypeChecker()
-const failures = []
-const visited = new Set()
+  for (const { source } of entries) {
+    const sourceFile = program.getSourceFile(source)
+    const moduleSymbol = sourceFile && checker.getSymbolAtLocation(sourceFile)
+    if (!moduleSymbol) throw new Error(`${source} is not a module.`)
 
-function definingSymbol(symbol) {
-  return symbol.flags & ts.SymbolFlags.Alias
-    ? checker.getAliasedSymbol(symbol)
-    : symbol
-}
+    for (const exported of checker.getExportsOfModule(moduleSymbol)) {
+      const symbol =
+        exported.flags & ts.SymbolFlags.Alias
+          ? checker.getAliasedSymbol(exported)
+          : exported
+      const declaration = symbol.declarations?.find((candidate) =>
+        candidate.getSourceFile().fileName.startsWith(sourceRoot)
+      )
+      if (!declaration || visited.has(declaration)) continue
+      visited.add(declaration)
 
-function sourceDeclaration(symbol) {
-  return symbol.declarations?.find((declaration) =>
-    declaration.getSourceFile().fileName.startsWith(sourceRoot)
-  )
-}
-
-function report(declaration, message) {
-  const sourceFile = declaration.getSourceFile()
-  const position = sourceFile.getLineAndCharacterOfPosition(
-    declaration.getStart(sourceFile)
-  )
-  failures.push(
-    `${relative(packageRoot, sourceFile.fileName)}:${position.line + 1} ${message}`
-  )
-}
-
-function tagsFor(declaration) {
-  return ts.getJSDocTags(declaration)
-}
-
-function hasDocumentation(symbol) {
-  return ts.displayPartsToString(symbol.getDocumentationComment(checker)).trim()
-}
-
-function callableSignatures(declaration) {
-  const type = checker.getTypeAtLocation(declaration)
-  return type.getCallSignatures()
-}
-
-function checkCallable(symbol, declaration) {
-  const signatures = callableSignatures(declaration)
-  if (signatures.length === 0) return
-
-  const tags = tagsFor(declaration)
-  const paramNames = new Set(
-    tags
-      .filter((tag) => tag.tagName.text === "param")
-      .map((tag) => tag.name?.getText())
-  )
-  for (const signature of signatures) {
-    for (const parameter of signature.parameters) {
-      const name = parameter.getName()
-      if (!paramNames.has(name)) {
-        report(declaration, `${symbol.name} is missing @param ${name}`)
+      const documentation = ts
+        .displayPartsToString(symbol.getDocumentationComment(checker))
+        .trim()
+      if (!documentation) {
+        report(declaration, `${symbol.name} is missing public JSDoc`)
+        continue
       }
+      checkCallable(symbol, declaration)
     }
   }
-  if (!tags.some((tag) => tag.tagName.text === "returns")) {
-    report(declaration, `${symbol.name} is missing @returns`)
+
+  return { failures, declarations: visited.size }
+}
+
+function run() {
+  const entries = packageEntries()
+  const { failures, declarations } = checkPublicApiDocs({ entries })
+
+  if (failures.length > 0) {
+    console.error(failures.join("\n"))
+    process.exitCode = 1
+  } else {
+    console.log(
+      `✓ ${declarations} public declarations across ${entries.length} entries have JSDoc.`
+    )
   }
 }
 
-for (const entryPoint of entryPoints) {
-  const fileName = join(sourceRoot, entryPoint)
-  const sourceFile = program.getSourceFile(fileName)
-  const moduleSymbol = checker.getSymbolAtLocation(sourceFile)
-  for (const exported of checker.getExportsOfModule(moduleSymbol)) {
-    const symbol = definingSymbol(exported)
-    const declaration = sourceDeclaration(symbol)
-    if (!declaration || visited.has(declaration)) continue
-    visited.add(declaration)
-
-    if (!hasDocumentation(symbol)) {
-      report(declaration, `${symbol.name} is missing public JSDoc`)
-      continue
-    }
-    checkCallable(symbol, declaration)
-  }
-}
-
-if (failures.length > 0) {
-  globalThis.console.error(failures.join("\n"))
-  process.exitCode = 1
-} else {
-  globalThis.console.log(
-    `Checked ${visited.size} public declarations across ${entryPoints.length} entry points.`
-  )
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  run()
 }

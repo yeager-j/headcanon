@@ -1,6 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
   "compilerOptions": {
+    // Type-checks the `// @ts-check` gate scripts in scripts/ and lets their
+    // tests import them.
+    "allowJs": true,
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
@@ -14,6 +17,6 @@
     "strict": true,
     "noEmit": true
   },
-  "include": ["src"],
+  "include": ["src", "scripts"],
   "exclude": ["node_modules", "dist", "fixture"]
 }

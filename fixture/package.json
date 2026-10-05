@@ -5,12 +5,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "npm --prefix .. run build",
     "dev": "next dev --port 3900",
     "build": "next build",
     "start": "next start --port 3900",
-    "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test"
+    "typecheck": "next typegen && tsc --noEmit",
+    "test:e2e": "next build && playwright test"
   },
   "dependencies": {
     "headcanon": "file:..",

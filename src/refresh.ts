@@ -279,8 +279,13 @@ export function useIncorporation<State>(
   invalidations?: InvalidationAdapter
 ): IncorporationCoordinator {
   const refreshRef = useRef(refresh)
+  // Latest-value refs written during render. Known debt for the
+  // useIncorporation rework (review P3-08): a discarded concurrent render can
+  // leave an uncommitted value here.
+  // eslint-disable-next-line react-hooks/refs
   refreshRef.current = refresh
   const canonRef = useRef<Canon<unknown>>(canon)
+  // eslint-disable-next-line react-hooks/refs -- see refreshRef above
   canonRef.current = canon
   const mountedRef = useRef(false)
   const acceptedRef = useRef(new Map<string, AcceptedStamp>())
@@ -441,6 +446,7 @@ export function useIncorporation<State>(
     },
     [clearGraceTimer, clearRetryTimer, completeRefresh, isCovered]
   )
+  // eslint-disable-next-line react-hooks/refs -- latest-value ref; see refreshRef
   startRefreshRef.current = startRefresh
 
   const beginAcceptanceRefresh = useCallback(() => {
@@ -539,11 +545,14 @@ export function useIncorporation<State>(
   const rawObservedAxes = Object.keys(canon.revisions).sort()
   const observedAxesKey = JSON.stringify(rawObservedAxes)
   const observedAxes = useMemo(
-    () => rawObservedAxes.map(axisId),
+    () => (JSON.parse(observedAxesKey) as string[]).map(axisId),
     [observedAxesKey]
   )
 
   useEffect(() => {
+    // Resets the status for a new adapter. Known debt for the
+    // useIncorporation rework (review P3-08).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setInvalidationStatus(invalidations?.initialStatus ?? "disabled")
     if (!invalidations) return
 
@@ -576,6 +585,9 @@ export function useIncorporation<State>(
     clearRetryTimer()
     attemptsRef.current = 0
     failedAttemptsRef.current = 0
+    // Marks the refresh current once new canon covers it. Known debt for the
+    // useIncorporation rework (review P3-08).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRefreshState(CURRENT_REFRESH_STATE)
   }, [canon, clearGraceTimer, clearRetryTimer, completeRefresh, isCovered])
 
@@ -588,13 +600,16 @@ export function useIncorporation<State>(
     }
   }, [clearGraceTimer, clearRetryTimer])
 
+  // Reads acceptance bookkeeping held in refs during render. Known debt for
+  // the useIncorporation rework (review P3-08).
+  // eslint-disable-next-line react-hooks/refs
   const currentRequirements = requirements()
 
   return {
     status: {
       freshness: refreshState.freshness,
       invalidations: invalidationStatus,
-      missingAxes: missingAxes(canonRef.current, currentRequirements),
+      missingAxes: missingAxes(canon, currentRequirements),
       stallReason: refreshState.stallReason,
     },
     retryRefresh,

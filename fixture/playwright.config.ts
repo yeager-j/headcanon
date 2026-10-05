@@ -8,11 +8,14 @@ export default defineConfig({
   // resets it. Parallel workers would race the reset.
   workers: 1,
   forbidOnly: isCI,
-  retries: isCI ? 2 : 0,
+  // No retries: this suite is the control for an intermittent held-open-Action
+  // deadlock, and a retry would let a hang that fails one run in three pass.
+  retries: 0,
   reporter: isCI ? [["github"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL: "http://localhost:3900",
-    trace: "on-first-retry",
+    // Without retries, the first failure is the only one, so keep its trace.
+    trace: "retain-on-failure",
   },
   projects: [
     {
@@ -20,12 +23,14 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
-  // In CI the root `npm run build` has already produced .next; locally the
-  // dev server (whose `predev` rebuilds the package) preserves the inner loop.
+  // Always the production server, locally and in CI, so both run the same
+  // React scheduling. `npm run test:e2e` builds the package and the fixture
+  // first; that script is the one place that decides a build exists. A server
+  // already on the port is an error, not something to reuse silently.
   webServer: {
-    command: isCI ? "npm run start" : "npm run dev",
+    command: "npm run start",
     url: "http://localhost:3900",
-    reuseExistingServer: !isCI,
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 })
