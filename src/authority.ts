@@ -14,6 +14,7 @@ import {
   type ProtocolDefinition,
 } from "./protocol"
 import {
+  acceptedStamp,
   revision,
   revisionVectorFrom,
   stampRecordedRevisions,
@@ -72,16 +73,20 @@ export function createStampAccumulator(): ReadableStampAccumulator {
   }
 }
 
-/** A command attempt either exposes a public refusal or records a private denial. */
-export type MutationAttemptFailure<Rejection> =
-  | { readonly kind: "refused"; readonly error: Rejection }
+/**
+ * How a command attempt ends without acceptance: a public refusal, recorded
+ * and replayed to the caller, or a private denial that is never exposed as a
+ * refusal. A failed attempt is also its terminal outcome, so both stages use
+ * one vocabulary.
+ */
+export type MutationAttemptFailure<Refusal> =
+  | { readonly kind: "refused"; readonly error: Refusal }
   | { readonly kind: "denied" }
 
 /** A terminal outcome which is safe to record and reproduce on redelivery. */
-export type MutationTerminalOutcome<Rejection> =
+export type MutationTerminalOutcome<Refusal> =
   | { readonly kind: "accepted"; readonly stamp: AcceptedStamp }
-  | { readonly kind: "rejected"; readonly error: Rejection }
-  | { readonly kind: "denied" }
+  | MutationAttemptFailure<Refusal>
 
 declare const protocolIdentity: unique symbol
 
@@ -104,12 +109,18 @@ export type MutationAuthorityAdapterError =
   | { readonly code: "contention"; readonly mutationId: string }
 
 /** Trusted context and canonical identity supplied to a mutation authority adapter. */
-export interface MutationAuthorityRequest<Actor, Rejection = unknown> {
+export interface MutationAuthorityRequest<Actor, Refusal = unknown> {
   readonly actor: Actor
   readonly mutationId: string
   readonly protocol: string
   readonly canonical: CanonicalInvocation
-  readonly parseRejection?: (value: unknown) => Rejection
+  /**
+   * Parses a recorded refusal back into the protocol's refusal type. Every
+   * refusal crosses the receipt boundary through it, on first execution and
+   * on replay. Without it, adapters fail closed: a refusal throws instead of
+   * being recorded or replayed unparsed.
+   */
+  readonly parseRefusal?: (value: unknown) => Refusal
 }
 
 /**
@@ -117,25 +128,233 @@ export interface MutationAuthorityRequest<Actor, Rejection = unknown> {
  *
  * The callback may run more than once. An adapter must discard both its
  * transactional effects and its stamp accumulator whenever an attempt rolls
- * back.
+ * back, and must rerun an attempt that throws contention (see
+ * {@link isMutationContention}).
  */
 export interface MutationAuthorityAdapter<
   Transaction,
   Actor,
-  Rejection,
-  Preflight = Transaction,
+  Refusal,
+  Preflight,
 > {
-  /** Executor used for fail-closed admission before a receipt is claimed. */
-  readonly preflight?: Preflight
+  /**
+   * Executor for fail-closed screening before a receipt is claimed. It reads
+   * committed state only: it never observes an in-flight attempt's writes,
+   * and reading through it claims no receipt.
+   */
+  readonly preflight: Preflight
   execute(
-    request: MutationAuthorityRequest<Actor, Rejection>,
+    request: MutationAuthorityRequest<Actor, Refusal>,
     run: (
       tx: Transaction,
       stamp: StampAccumulator
-    ) => Promise<Result<void, MutationAttemptFailure<Rejection>>>
+    ) => Promise<Result<void, MutationAttemptFailure<Refusal>>>
   ): Promise<
-    Result<MutationTerminalOutcome<Rejection>, MutationAuthorityAdapterError>
+    Result<MutationTerminalOutcome<Refusal>, MutationAuthorityAdapterError>
   >
+}
+
+/** Transaction control flow for a guarded write that lost a race. */
+export class MutationContentionError extends Error {
+  constructor() {
+    super("Mutation authority contention")
+    this.name = "MutationContentionError"
+  }
+}
+
+/**
+ * Rolls the current attempt back so the authority can retry from current state.
+ * @returns Never; throws transaction-control-flow contention.
+ * @throws {@link MutationContentionError} to request an authority retry.
+ */
+export function throwMutationContention(): never {
+  throw new MutationContentionError()
+}
+
+/**
+ * Decides whether a value thrown by an attempt asks the authority to rerun it.
+ * A {@link MutationContentionError} always does; an adapter adds the failures
+ * its store reports for lost races, such as SQLSTATE codes.
+ * @param error The value an attempt threw.
+ * @param isStoreContention The adapter's store-specific classification.
+ * @returns Whether the attempt lost a race and must rerun from fresh state.
+ */
+export function isMutationContention(
+  error: unknown,
+  isStoreContention?: (error: unknown) => boolean
+): boolean {
+  return (
+    error instanceof MutationContentionError ||
+    isStoreContention?.(error) === true
+  )
+}
+
+/** Attempts an authority makes when no `maxAttempts` is configured. */
+export const DEFAULT_MUTATION_MAX_ATTEMPTS = 2
+
+/**
+ * Builds an adapter's bounded contention retry. The policy is validated once,
+ * when the adapter is created.
+ * @param options Attempt ceiling and the adapter's store-specific contention classification.
+ * @returns A runner that reruns one attempt while it throws contention, and returns `contention` when the ceiling is reached.
+ * @throws Error when `maxAttempts` is not a positive integer.
+ */
+export function contentionRetry(options: {
+  readonly maxAttempts?: number
+  readonly isStoreContention?: (error: unknown) => boolean
+}): <Value>(
+  mutationId: string,
+  attempt: () => Promise<Result<Value, MutationAuthorityAdapterError>>
+) => Promise<Result<Value, MutationAuthorityAdapterError>> {
+  const maxAttempts = options.maxAttempts ?? DEFAULT_MUTATION_MAX_ATTEMPTS
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error("maxAttempts must be a positive integer")
+  }
+
+  return async (mutationId, attempt) => {
+    for (let attempted = 1; ; attempted += 1) {
+      try {
+        return await attempt()
+      } catch (error) {
+        if (!isMutationContention(error, options.isStoreContention)) {
+          throw error
+        }
+        if (attempted >= maxAttempts) {
+          return err({ code: "contention", mutationId })
+        }
+      }
+    }
+  }
+}
+
+/**
+ * The receipt identity of one mutation: its ID within a trusted actor scope.
+ * Adapters key receipts, and the locks that serialize them, by this value.
+ * @param scope Trusted actor scope.
+ * @param mutationId Client-generated mutation UUID.
+ * @returns A string that differs for every distinct (scope, mutationId) pair.
+ */
+export function receiptKey(scope: string, mutationId: string): string {
+  return JSON.stringify([scope, mutationId])
+}
+
+/** One recorded receipt, in the form every adapter stores. */
+export interface MutationReceipt {
+  readonly protocol: string
+  readonly canonicalInvocation: string
+  readonly canonicalFingerprint: string
+  /** The JSON form produced by {@link recordTerminalOutcome}. */
+  readonly terminalOutcome: unknown
+}
+
+/**
+ * Builds the receipt to store for a request's terminal outcome.
+ * @param request The request whose identity the receipt records.
+ * @param terminalOutcome The stored JSON form from {@link recordTerminalOutcome}.
+ * @returns The receipt fields every adapter stores.
+ */
+export function mutationReceipt(
+  request: MutationAuthorityRequest<unknown, unknown>,
+  terminalOutcome: unknown
+): MutationReceipt {
+  return {
+    protocol: request.protocol,
+    canonicalInvocation: request.canonical.json,
+    canonicalFingerprint: request.canonical.sha256,
+    terminalOutcome,
+  }
+}
+
+/**
+ * Decides a redelivery against the receipt recorded under its key: identical
+ * canonical identity replays the recorded outcome; anything else is a reused
+ * mutation ID.
+ * @param receipt The receipt already recorded under the request's receipt key.
+ * @param request The redelivered request.
+ * @returns The replayed terminal outcome, or `mutation-id-reused`.
+ * @throws Error when the recorded outcome is malformed, or holds a refusal that the request cannot parse.
+ */
+export function replayReceipt<Refusal>(
+  receipt: MutationReceipt,
+  request: MutationAuthorityRequest<unknown, Refusal>
+): Result<MutationTerminalOutcome<Refusal>, MutationAuthorityAdapterError> {
+  if (
+    receipt.protocol !== request.protocol ||
+    receipt.canonicalInvocation !== request.canonical.json ||
+    receipt.canonicalFingerprint !== request.canonical.sha256
+  ) {
+    return err({ code: "mutation-id-reused", mutationId: request.mutationId })
+  }
+  return ok(parseStoredOutcome(receipt.terminalOutcome, request.parseRefusal))
+}
+
+function parseStoredOutcome<Refusal>(
+  value: unknown,
+  parseRefusal?: (value: unknown) => Refusal
+): MutationTerminalOutcome<Refusal> {
+  if (!isPlainRecord(value) || typeof value.kind !== "string") {
+    throw new Error("Invalid mutation receipt outcome")
+  }
+
+  if (value.kind === "accepted") {
+    if (!hasExactKeys(value, ["kind", "stamp"])) {
+      throw new Error("Invalid accepted mutation receipt")
+    }
+    const stamp = acceptedStamp(value.stamp)
+    if (!stamp.ok) {
+      throw new Error(
+        `Invalid accepted mutation receipt stamp (${stamp.error.reason})`
+      )
+    }
+    return Object.freeze({ kind: "accepted", stamp: stamp.value })
+  }
+
+  if (value.kind === "refused" && hasExactKeys(value, ["kind", "error"])) {
+    if (!parseRefusal) {
+      throw new Error("Missing mutation receipt refusal parser")
+    }
+    return Object.freeze({
+      kind: "refused",
+      error: parseRefusal(structuredClone(value.error)),
+    })
+  }
+
+  if (value.kind === "denied" && hasExactKeys(value, ["kind"])) {
+    return Object.freeze({ kind: "denied" })
+  }
+
+  throw new Error("Invalid terminal mutation receipt")
+}
+
+/**
+ * Turns a finished attempt into its terminal outcome and the JSON form to
+ * record. An accepted attempt publishes its stamp; a refused or denied attempt
+ * is its own outcome. The outcome comes back through the same parse a replay
+ * uses, so the first caller and every redelivery see the same value, and a
+ * refusal without a parser fails closed before anything is recorded.
+ * @param attempted What the command attempt returned.
+ * @param stamp The attempt's accumulator.
+ * @param parseRefusal The request's refusal parser.
+ * @returns The terminal outcome and its JSON form for the receipt.
+ * @throws Error when the outcome is not JSON serializable, or holds a refusal that cannot be parsed.
+ */
+export function recordTerminalOutcome<Refusal>(
+  attempted: Result<void, MutationAttemptFailure<Refusal>>,
+  stamp: ReadableStampAccumulator,
+  parseRefusal?: (value: unknown) => Refusal
+): {
+  readonly stored: unknown
+  readonly terminal: MutationTerminalOutcome<Refusal>
+} {
+  const outcome: MutationTerminalOutcome<Refusal> = attempted.ok
+    ? { kind: "accepted", stamp: stamp.accepted() }
+    : attempted.error
+  const json = JSON.stringify(outcome)
+  if (json === undefined) {
+    throw new Error("Mutation receipt outcome is not JSON serializable")
+  }
+  const stored: unknown = JSON.parse(json)
+  return { stored, terminal: parseStoredOutcome(stored, parseRefusal) }
 }
 
 /** Failures returned before or while admitting a mutation into authority execution. */
@@ -295,8 +514,9 @@ export async function prepareMutationRequest<
  * attempts, and contention retry. The `run` callback owns application policy
  * and writes for the current attempt; it may be invoked more than once, so it
  * must be safe to rerun against fresh transaction state. A returned refusal or
- * denial becomes a terminal receipt outcome, while adapter contention remains
- * an expected error for the caller to retry.
+ * denial becomes the terminal receipt outcome. A thrown
+ * {@link MutationContentionError} reruns the attempt; contention that outlasts
+ * the adapter's attempts is an expected error for the caller to retry.
  *
  * @param options Prepared identity, trusted actor, authority adapter, refusal parser, and application runner.
  * @returns A promise for the terminal outcome or a typed executor/authority failure.
@@ -304,7 +524,7 @@ export async function prepareMutationRequest<
 export function executePreparedMutation<
   Transaction,
   Actor,
-  Rejection,
+  Refusal,
   Preflight,
 >(options: {
   readonly prepared: PreparedMutationRequest
@@ -312,23 +532,23 @@ export function executePreparedMutation<
   readonly authority: MutationAuthorityAdapter<
     Transaction,
     Actor,
-    Rejection,
+    Refusal,
     Preflight
   >
-  readonly parseRejection?: (value: unknown) => Rejection
+  readonly parseRefusal?: (value: unknown) => Refusal
   readonly run: (
     tx: Transaction,
     stamp: StampAccumulator,
     args: unknown
-  ) => Promise<Result<void, MutationAttemptFailure<Rejection>>>
-}): Promise<Result<MutationTerminalOutcome<Rejection>, MutationExecutorError>> {
+  ) => Promise<Result<void, MutationAttemptFailure<Refusal>>>
+}): Promise<Result<MutationTerminalOutcome<Refusal>, MutationExecutorError>> {
   return options.authority.execute(
     {
       actor: options.actor,
       mutationId: options.prepared.mutationId,
       protocol: options.prepared.protocol,
       canonical: options.prepared.canonical,
-      parseRejection: options.parseRejection,
+      parseRefusal: options.parseRefusal,
     },
     (tx, stamp) =>
       options.run(tx, stamp, structuredClone(options.prepared.args))

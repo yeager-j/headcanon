@@ -233,10 +233,10 @@ describe("Next action golden path", () => {
     await expect(receipt.value.accepted).resolves.toEqual(ok(stamp))
   })
 
-  it("maps a rejected terminal outcome onto the domain refusal", async () => {
+  it("maps a refused terminal outcome onto the domain refusal", async () => {
     const refusal: TestError = { code: "refused" }
     const action: GuardedAction = async () =>
-      ok({ kind: "rejected", error: refusal })
+      ok({ kind: "refused", error: refusal })
     const useRoot = createNextPredictedRoot({
       protocol: actionProtocol,
       action,

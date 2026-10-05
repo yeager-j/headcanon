@@ -1,101 +1,215 @@
-// @vitest-environment jsdom
-
+import { execFileSync } from "node:child_process"
+import { err, ok } from "serializable-result"
 import { describe, expect, it } from "vitest"
 
 import {
-  acceptedStamp,
-  axisId,
-  covers,
-  revisionAt,
-  revisionEntries,
-  revisionVector,
-} from "./revisions"
-import {
-  assertMutationAuthorityContractAccumulation,
-  assertMutationAuthorityContractRollback,
-  assertRefreshContractStalled,
-  createInMemoryInvalidationContractHarness,
-  createInMemoryMutationAuthorityContractHarness,
-  MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE,
-  verifyInvalidationContract,
-  verifyMutationAuthorityContract,
-  verifyPollingFallbackContract,
-} from "./testing"
+  throwMutationContention,
+  type MutationAuthorityRequest,
+} from "./authority"
+import { createInMemoryMutationAuthority } from "./testing"
 
-verifyMutationAuthorityContract(
-  createInMemoryMutationAuthorityContractHarness()
-)
-verifyInvalidationContract(createInMemoryInvalidationContractHarness())
-verifyPollingFallbackContract()
+type Refusal = { readonly code: "refused" }
 
-describe("contract negative controls", () => {
-  const first = axisId("negative-control/first")
-  const second = axisId("negative-control/second")
-
-  function vector(entries: Record<string, number>) {
-    const parsed = revisionVector(entries)
-    if (!parsed.ok) throw new Error("Invalid negative-control vector")
-    return parsed.value
+function parseRefusal(value: unknown): Refusal {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "code" in value &&
+    value.code === "refused"
+  ) {
+    return { code: "refused" }
   }
+  throw new Error("Invalid test refusal")
+}
 
-  function stamp(entries: Record<string, number>) {
-    const parsed = acceptedStamp({ revisions: entries })
-    if (!parsed.ok) throw new Error("Invalid negative-control stamp")
-    return parsed.value
+function request(sequence: number): MutationAuthorityRequest<string, Refusal> {
+  const json = JSON.stringify({ sequence })
+  return {
+    actor: "actor",
+    mutationId: `20000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`,
+    protocol: "test.in-memory.v1",
+    canonical: {
+      json,
+      bytes: new TextEncoder().encode(json),
+      sha256: `fingerprint-${sequence}`,
+    },
+    parseRefusal,
   }
+}
 
-  it("makes the accumulation assertion fail for a last-axis-only mutant", () => {
-    const lastAxisOnly = stamp({ [second]: 1 })
-    const committedState = {
-      ...MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE,
-      primary: 1,
-      secondary: 1,
-      revisions: { primary: 1, secondary: 1, rollbackOnly: 0 },
-      effects: ["multi-axis"],
-    }
+function counter(options: { readonly maxAttempts?: number } = {}) {
+  return createInMemoryMutationAuthority<number, string, Refusal>({
+    initialState: 0,
+    scope: (actor) => actor,
+    ...options,
+  })
+}
 
-    expect(() =>
-      assertMutationAuthorityContractAccumulation(lastAxisOnly, committedState)
-    ).toThrow()
+describe("in-memory mutation authority", () => {
+  it("reruns a command that throws contention, as production adapters do", async () => {
+    const authority = counter()
+    let attempts = 0
+
+    const outcome = await authority.execute(request(1), async (tx) => {
+      attempts += 1
+      tx.write(tx.read() + 1)
+      if (attempts === 1) throwMutationContention()
+      return ok(undefined)
+    })
+
+    expect(outcome).toMatchObject({ ok: true, value: { kind: "accepted" } })
+    expect(attempts).toBe(2)
+    expect(authority.read()).toBe(1)
   })
 
-  it("makes the rollback assertion fail when attempt-local work leaks", () => {
-    const leakingMutant = {
-      ...MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE,
-      primary: 1,
-      revisions: { primary: 1, secondary: 0, rollbackOnly: 0 },
-      effects: ["first-attempt"],
-    }
+  it("returns contention without a receipt when every attempt throws contention", async () => {
+    const authority = counter({ maxAttempts: 3 })
+    let attempts = 0
 
-    expect(() =>
-      assertMutationAuthorityContractRollback(leakingMutant)
-    ).toThrow()
+    const outcome = await authority.execute(request(2), async (tx) => {
+      attempts += 1
+      tx.write(tx.read() + 1)
+      return throwMutationContention()
+    })
+
+    expect(outcome).toEqual(
+      err({ code: "contention", mutationId: request(2).mutationId })
+    )
+    expect(attempts).toBe(3)
+    expect(authority.read()).toBe(0)
+    expect(authority.hasReceipt("actor", request(2).mutationId)).toBe(false)
   })
 
-  it("makes the coverage assertion fail for partial multi-axis canon", () => {
-    const accepted = stamp({ [first]: 1, [second]: 1 })
-    const partialCanon = { value: null, revisions: vector({ [first]: 1 }) }
-    const anyAxisCovers: typeof covers = (revisions, required) =>
-      revisionEntries(required).some(
-        ([axis, requiredRevision]) =>
-          (revisionAt(revisions, axis) ?? -1) >= requiredRevision
-      )
+  it("consumes queued contention in the next attempt even when it refuses", async () => {
+    const authority = counter()
+    authority.contendNext((current) => current + 10)
 
-    const coverageProperty = (implementation: typeof covers) =>
-      !implementation(partialCanon.revisions, accepted.revisions)
+    const refused = await authority.execute(request(3), async () =>
+      err({ kind: "refused", error: { code: "refused" } })
+    )
+    let attempts = 0
+    const accepted = await authority.execute(request(4), async (tx) => {
+      attempts += 1
+      tx.write(tx.read() + 1)
+      return ok(undefined)
+    })
 
-    expect(coverageProperty(covers)).toBe(true)
-    expect(coverageProperty(anyAxisCovers)).toBe(false)
+    expect(attempts).toBe(1)
+    expect(authority.read()).toBe(11)
+    expect(refused).toEqual(ok({ kind: "refused", error: { code: "refused" } }))
+    expect(accepted).toMatchObject({ ok: true, value: { kind: "accepted" } })
   })
 
-  it("makes the stall assertion fail for a never-stalling mutant", () => {
-    const neverStalls = {
-      freshness: "refreshing" as const,
-      invalidations: "disabled" as const,
-      missingAxes: [],
-      stallReason: null,
-    }
+  it("lets different mutation IDs interleave while one ID runs at a time", async () => {
+    const authority = counter()
+    const events: string[] = []
+    let releaseFirst: () => void = () => undefined
+    const firstMayFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
 
-    expect(() => assertRefreshContractStalled(neverStalls)).toThrow()
+    const first = authority.execute(request(5), async () => {
+      events.push("first:start")
+      await firstMayFinish
+      events.push("first:end")
+      return ok(undefined)
+    })
+    const duplicate = authority.execute(request(5), async () => {
+      events.push("duplicate")
+      return ok(undefined)
+    })
+    const other = authority.execute(request(6), async () => {
+      events.push("other")
+      return ok(undefined)
+    })
+    await other
+
+    expect(events).toEqual(["first:start", "other"])
+    releaseFirst()
+    expect(await duplicate).toEqual(await first)
+    expect(events).toEqual(["first:start", "other", "first:end"])
+  })
+
+  it("reruns an attempt that another mutation's commit overtook", async () => {
+    const authority = counter()
+    let releaseSlow: () => void = () => undefined
+    const slowMayWrite = new Promise<void>((resolve) => {
+      releaseSlow = resolve
+    })
+    let slowAttempts = 0
+
+    const slow = authority.execute(request(7), async (tx) => {
+      slowAttempts += 1
+      const current = tx.read()
+      if (slowAttempts === 1) await slowMayWrite
+      tx.write(current + 1)
+      return ok(undefined)
+    })
+    await authority.execute(request(8), async (tx) => {
+      tx.write(tx.read() + 10)
+      return ok(undefined)
+    })
+    releaseSlow()
+
+    expect(await slow).toMatchObject({ ok: true })
+    expect(slowAttempts).toBe(2)
+    expect(authority.read()).toBe(11)
+  })
+
+  it("passes its committed-state reader to screening as preflight", async () => {
+    const authority = counter()
+    let screenedMidAttempt: number | undefined
+
+    await authority.execute(request(9), async (tx) => {
+      tx.write(5)
+      screenedMidAttempt = authority.preflight.read()
+      return ok(undefined)
+    })
+
+    expect(screenedMidAttempt).toBe(0)
+    expect(authority.preflight.read()).toBe(5)
+  })
+})
+
+describe("headcanon/testing entry", () => {
+  it("imports in plain Node without vitest or Testing Library", () => {
+    // Resolves the extensionless source imports and refuses any test
+    // framework, so a stray import fails here rather than in an adopter's
+    // Jest run or Next server module.
+    const hook = `
+      export async function resolve(specifier, context, next) {
+        if (specifier === "vitest" || specifier.startsWith("vitest/") ||
+            specifier.startsWith("@testing-library/")) {
+          throw new Error("headcanon/testing imported " + specifier)
+        }
+        if (specifier.startsWith(".") && !/\\.[cm]?[jt]sx?$/.test(specifier)) {
+          return next(specifier + ".ts", context)
+        }
+        return next(specifier, context)
+      }`
+    const script = `
+      import { register } from "node:module"
+      register("data:text/javascript," + encodeURIComponent(${JSON.stringify(hook)}))
+      const testing = await import(${JSON.stringify(new URL("./testing.ts", import.meta.url).href)})
+      const authority = testing.createInMemoryMutationAuthority({
+        initialState: 0,
+        scope: (actor) => actor,
+      })
+      const invalidations = testing.createInMemoryInvalidationAdapter()
+      console.log(JSON.stringify([authority.read(), invalidations.published]))`
+
+    const output = execFileSync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "--no-warnings",
+        "--input-type=module",
+        "--eval",
+        script,
+      ],
+      { encoding: "utf8" }
+    )
+
+    expect(output.trim()).toBe("[0,[]]")
   })
 })

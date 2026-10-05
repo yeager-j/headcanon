@@ -24,10 +24,15 @@ export type StoredMutationTerminalOutcome =
       readonly kind: "accepted"
       readonly stamp: { readonly revisions: unknown }
     }
-  | { readonly kind: "rejected"; readonly error: unknown }
+  | { readonly kind: "refused"; readonly error: unknown }
   | { readonly kind: "denied" }
 
-/** Durable authority outcomes keyed by trusted actor scope and mutation UUID. */
+/**
+ * Durable authority outcomes keyed by trusted actor scope and mutation UUID.
+ * The adapter writes each receipt once and never updates it. `created_at` is
+ * indexed so an application can prune receipts older than any redelivery it
+ * still accepts.
+ */
 export const headcanonMutationReceipts = pgTable(
   "headcanon_mutation_receipts",
   {
@@ -44,15 +49,9 @@ export const headcanonMutationReceipts = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .defaultNow()
-      .notNull(),
   },
   (receipt) => [
     primaryKey({ columns: [receipt.actorScope, receipt.mutationId] }),
-    index("headcanon_mutation_receipts_fingerprint_idx").on(
-      receipt.canonicalFingerprint
-    ),
     index("headcanon_mutation_receipts_created_at_idx").on(receipt.createdAt),
   ]
 )

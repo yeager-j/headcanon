@@ -14,7 +14,7 @@ import { sha256Hex } from "../sha256"
 import {
   verifyInvalidationContract,
   type InvalidationContractHarness,
-} from "../testing"
+} from "../testing/contracts"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,

@@ -197,11 +197,13 @@ export type MutationAdmission<Evidence> =
   | { readonly kind: "allowed"; readonly evidence: Evidence }
   | { readonly kind: "denied" }
 
-/** The application command's terminal decision inside one authority attempt. */
+/**
+ * The application command's terminal decision inside one authority attempt.
+ * A refusal or denial is the attempt failure the authority records as is.
+ */
 export type MutationCommandDecision<Refusal> =
   | { readonly kind: "accepted" }
-  | { readonly kind: "refused"; readonly error: Refusal }
-  | { readonly kind: "denied" }
+  | MutationAttemptFailure<Refusal>
 
 /** Marks transactional admission as allowed and carries its trusted evidence.
  * @param evidence Trusted evidence produced during admission.
@@ -519,7 +521,7 @@ export function createNextMutationAction<
     Actor,
     unknown,
     Preflight
-  > & { readonly preflight: Preflight }
+  >
   readonly commands: Commands &
     CompleteBindings<Protocol, Commands> &
     CompatibleBindings<Commands, Actor, Preflight, Transaction>
@@ -580,7 +582,7 @@ export function createNextMutationAction<
         Refusal,
         Preflight
       >,
-      parseRejection: (value) =>
+      parseRefusal: (value) =>
         parseMutationRefusal<Refusal>(binding.mutation.refusal, value),
       run: async (tx, stamp, attemptArgs) => {
         const admitted = await binding.command.admit({
@@ -588,11 +590,7 @@ export function createNextMutationAction<
           actor,
           args: attemptArgs,
         })
-        if (admitted.kind === "denied") {
-          return err({
-            kind: "denied",
-          } satisfies MutationAttemptFailure<Refusal>)
-        }
+        if (admitted.kind === "denied") return err(admitted)
 
         const decision = await binding.command.execute({
           tx,
@@ -602,20 +600,12 @@ export function createNextMutationAction<
           stamp,
           mutationId: prepared.value.mutationId,
         })
-        if (decision.kind === "accepted") return ok(undefined)
-        return err(
-          decision.kind === "denied"
-            ? ({ kind: "denied" } satisfies MutationAttemptFailure<Refusal>)
-            : ({
-                kind: "refused",
-                error: decision.error,
-              } satisfies MutationAttemptFailure<Refusal>)
-        )
+        return decision.kind === "accepted" ? ok(undefined) : err(decision)
       },
     })
     if (!outcome.ok) return outcome
     if (outcome.value.kind === "denied") forbidden()
-    if (outcome.value.kind === "rejected") return ok(outcome.value)
+    if (outcome.value.kind === "refused") return ok(outcome.value)
 
     await finalizeExternalActionCommit(
       outcome.value.stamp,

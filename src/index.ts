@@ -37,8 +37,11 @@ export {
 } from "./canonical-invocation"
 // `createStampAccumulator` is framework-independent: it is the only way a
 // custom `MutationAuthorityAdapter` mints the accepted stamp for an attempt.
+// Commands for any adapter call `throwMutationContention` on a lost race.
 export {
   createStampAccumulator,
+  MutationContentionError,
+  throwMutationContention,
   type MutationAuthorityAdapter,
   type MutationAuthorityAdapterError,
   type MutationAuthorityRequest,
