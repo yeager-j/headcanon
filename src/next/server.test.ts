@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
+import { forbidden } from "next/navigation"
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -40,14 +41,8 @@ const nextCache = vi.hoisted(() => ({
   revalidateTag: vi.fn(),
   updateTag: vi.fn(),
 }))
-const forbidden = vi.hoisted(() =>
-  vi.fn(() => {
-    throw new Error("forbidden")
-  })
-)
 
 vi.mock("next/cache", () => nextCache)
-vi.mock("next/navigation", () => ({ forbidden }))
 
 function stamp(entries: Record<string, number>): AcceptedStamp {
   const parsed = acceptedStamp({ revisions: entries })
@@ -74,13 +69,14 @@ afterEach(() => {
 })
 
 describe("axis cache tags", () => {
-  it("derives a bounded, versioned SHA-256 tag without exposing the axis", async () => {
-    const axis = axisId(`secret/${"x".repeat(1_000)}`)
+  // Hashing bounds the tag's length and keeps it a safe tag name. The axis is
+  // not confidential: hashing is not there to hide it.
+  it("derives a bounded, versioned SHA-256 tag from an axis of any length", async () => {
+    const axis = axisId(`entity/${"x".repeat(1_000)}`)
     const tag = await axisCacheTag(axis)
 
     expect(tag).toMatch(/^headcanon:axis:v1:[0-9a-f]{64}$/)
     expect(tag.length).toBeLessThanOrEqual(256)
-    expect(tag).not.toContain(axis)
     expect(await axisCacheTag(axis)).toBe(tag)
   })
 
@@ -395,14 +391,18 @@ describe("Next mutation action", () => {
 
   function action(
     authority: CounterAuthority,
-    registered: IncrementCommand = command()
+    registered: IncrementCommand = command(),
+    options: {
+      readonly actor?: () => string
+      readonly invalidations?: InvalidationPublisher
+    } = {}
   ) {
     return createNextMutationAction({
       protocol,
-      actor: () => "actor",
+      actor: options.actor ?? (() => "actor"),
       authority,
       commands: [bindMutation(increment, registered)],
-      invalidations: { publish: vi.fn() },
+      invalidations: options.invalidations ?? { publish: vi.fn() },
       reportInvalidationFailure: vi.fn(),
     })
   }
@@ -430,20 +430,34 @@ describe("Next mutation action", () => {
     expect(authority.read()).toBe(11)
   })
 
-  it("claims no receipt when screening denies", async () => {
+  // `next/navigation` is not mocked in this file, so this observes the real
+  // Next behaviour that a denial must not depend on.
+  it("cannot deny through forbidden() without Next's experimental flag", () => {
+    expect(process.env.__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS).toBeUndefined()
+    expect(() => forbidden()).toThrow(
+      "`forbidden()` is experimental and only allowed to be enabled when `experimental.authInterrupts` is enabled."
+    )
+  })
+
+  it("returns a screening denial without a framework flag and claims no receipt", async () => {
     const authority = createAuthority()
 
     await expect(
       action(authority, command({ denyScreen: true }))(envelope)
-    ).rejects.toThrow("forbidden")
+    ).resolves.toEqual(ok({ kind: "denied" }))
 
     expect(authority.receiptCount()).toBe(0)
   })
 
-  it("never screens or admits a malformed or unknown envelope", async () => {
+  it("never derives the actor, screens, or admits for a malformed or unknown envelope", async () => {
     const authority = createAuthority()
     const lifecycle: string[] = []
-    const execute = action(authority, command({ lifecycle }))
+    const execute = action(authority, command({ lifecycle }), {
+      actor: () => {
+        lifecycle.push("actor")
+        return "actor"
+      },
+    })
 
     await expect(execute({ bad: true })).resolves.toEqual(
       err({ code: "invalid-envelope", reason: "unexpected-fields" })
@@ -475,8 +489,8 @@ describe("Next mutation action", () => {
     } satisfies IncrementCommand
     const execute = action(authority, registered)
 
-    await expect(execute(envelope)).rejects.toThrow("forbidden")
-    await expect(execute(envelope)).rejects.toThrow("forbidden")
+    await expect(execute(envelope)).resolves.toEqual(ok({ kind: "denied" }))
+    await expect(execute(envelope)).resolves.toEqual(ok({ kind: "denied" }))
 
     expect(authority.receiptCount()).toBe(1)
     expect(authority.read()).toBe(0)
@@ -526,6 +540,61 @@ describe("Next mutation action", () => {
     )
     expect(finalizeAccepted.mock.calls[0]![0]).not.toHaveProperty("evidence")
     expect(finalizeAccepted.mock.calls[0]![0]).not.toHaveProperty("preflight")
+  })
+
+  it("runs the accepted projection before it expires, refreshes, or publishes", async () => {
+    const events: string[] = []
+    nextCache.updateTag.mockImplementation(() => events.push("update"))
+    nextCache.refresh.mockImplementation(() => events.push("refresh"))
+    const execute = action(
+      createAuthority(),
+      command({ finalizeAccepted: () => void events.push("project") }),
+      { invalidations: { publish: () => void events.push("publish") } }
+    )
+
+    await execute(envelope)
+
+    expect(events).toEqual(["project", "update", "refresh", "publish"])
+  })
+
+  it("still invalidates the commit when the projection throws, then rethrows", async () => {
+    const events: string[] = []
+    nextCache.updateTag.mockImplementation(() => events.push("update"))
+    nextCache.refresh.mockImplementation(() => events.push("refresh"))
+    const failure = new Error("projection unavailable")
+    const authority = createAuthority()
+    const execute = action(
+      authority,
+      command({
+        finalizeAccepted: () => {
+          events.push("project")
+          throw failure
+        },
+      }),
+      { invalidations: { publish: () => void events.push("publish") } }
+    )
+
+    await expect(execute(envelope)).rejects.toBe(failure)
+
+    expect(events).toEqual(["project", "update", "refresh", "publish"])
+    expect(authority.read()).toBe(1)
+  })
+
+  it("gives screening and finalization separate copies of the arguments", async () => {
+    const finalizeAccepted = vi.fn()
+    const registered = {
+      ...command({ finalizeAccepted }),
+      screen: ({ args }) => {
+        ;(args as { amount: number }).amount = 99
+        return allowMutationScreening({ screened: 0 })
+      },
+    } satisfies IncrementCommand
+
+    await action(createAuthority(), registered)(envelope)
+
+    expect(finalizeAccepted).toHaveBeenCalledWith(
+      expect.objectContaining({ args: { amount: 1 } })
+    )
   })
 
   it("accepts a three-axis command without another interface field", async () => {
