@@ -12,3 +12,6 @@ fixture/next-env.d.ts
 fixture/test-results/
 fixture/playwright-report/
 .idea
+
+# Agent worktrees
+.claude/worktrees/

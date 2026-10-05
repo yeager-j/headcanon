@@ -85,7 +85,7 @@
   "dependencies": {
     "@standard-schema/spec": "^1.1.0",
     "canonicalize": "^3.0.0",
-    "serializable-result": "^0.1.0"
+    "serializable-result": "file:../serializable-result"
   },
   "peerDependencies": {
     "@testing-library/react": "^16.3.2",
