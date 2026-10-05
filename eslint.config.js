@@ -9,21 +9,15 @@ import tseslint from "typescript-eslint"
 
 export default [
   js.configs.recommended,
-  eslintConfigPrettier,
   ...tseslint.configs.recommended,
   {
     files: ["fixture/**/*.{ts,tsx}"],
     ...pluginReact.configs.flat.recommended,
-    languageOptions: {
-      ...pluginReact.configs.flat.recommended.languageOptions,
-      globals: { ...globals.serviceworker },
-    },
   },
   {
     files: ["fixture/**/*.{ts,tsx}"],
     plugins: {
       "@next/next": pluginNext,
-      "react-hooks": pluginReactHooks,
     },
     settings: {
       next: { rootDir: "fixture" },
@@ -32,10 +26,21 @@ export default [
     rules: {
       ...pluginNext.configs.recommended.rules,
       ...pluginNext.configs["core-web-vitals"].rules,
-      ...pluginReactHooks.configs.recommended.rules,
       // The new JSX transform makes React scope unnecessary.
       "react/react-in-jsx-scope": "off",
       "react/prop-types": "off",
+    },
+  },
+  {
+    // The package's own hooks follow the same rules as the fixture's.
+    files: ["src/**/*.{ts,tsx}", "fixture/**/*.{ts,tsx}"],
+    plugins: {
+      "react-hooks": pluginReactHooks,
+    },
+    rules: {
+      ...pluginReactHooks.configs.recommended.rules,
+      // A missing dependency is a stale-closure bug, not a style nit.
+      "react-hooks/exhaustive-deps": "error",
     },
   },
   {
@@ -59,7 +64,7 @@ export default [
   {
     files: ["**/*.mjs"],
     languageOptions: {
-      globals: { URL: "readonly", console: "readonly", process: "readonly" },
+      globals: globals.node,
     },
   },
   {
@@ -72,4 +77,6 @@ export default [
       "fixture/test-results/**",
     ],
   },
+  // Last, so it turns off every formatting rule the configs above enable.
+  eslintConfigPrettier,
 ]
