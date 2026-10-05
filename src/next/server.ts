@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto"
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { cacheTag, refresh, revalidateTag, updateTag } from "next/cache"
-import { forbidden } from "next/navigation"
 import { err, ok, type Result } from "serializable-result"
 
 import {
@@ -281,7 +280,8 @@ export interface MutationCommand<
     | Promise<MutationCommandDecision<MutationRefusalOf<Mutation>>>
   /**
    * Runs after every accepted delivery, including recovery from a stored
-   * receipt. Implementations must be repeat-safe.
+   * receipt, and before the action expires cache tags, refreshes, or
+   * publishes invalidations. Implementations must be repeat-safe.
    */
   readonly finalizeAccepted?: (context: {
     readonly actor: Actor
@@ -329,46 +329,6 @@ export function bindMutation<
   return Object.freeze({ mutation, command })
 }
 
-/**
- * UNN-688 spike: an application-scoped command definer. The application
- * decides its actor, preflight, and transaction types once — where its
- * authority context is created — and every command literal is then fully
- * contextually typed with only mutation, projection, and evidence left to
- * infer. `defineMutationCommand(mutation, command)` produces the same frozen
- * binding as `bindMutation` and preserves its wrong-definition negative
- * typecheck; if adopted, it replaces `bindMutation` rather than joining it.
- * @returns A contextually typed command-binding factory.
- */
-export function createMutationCommandDefiner<Actor, Preflight, Transaction>() {
-  return function defineMutationCommand<
-    const Mutation extends MutationWithRefusal,
-    Projection,
-    Evidence,
-  >(
-    mutation: Mutation,
-    command: MutationCommand<
-      NoInfer<Mutation>,
-      Actor,
-      Preflight,
-      Transaction,
-      Projection,
-      Evidence
-    >
-  ): MutationBinding<
-    Mutation,
-    MutationCommand<
-      Mutation,
-      Actor,
-      Preflight,
-      Transaction,
-      Projection,
-      Evidence
-    >
-  > {
-    return Object.freeze({ mutation, command })
-  }
-}
-
 type AnyMutationBinding = MutationBinding<MutationWithRefusal>
 
 type BoundMutation<Commands extends readonly AnyMutationBinding[]> =
@@ -409,39 +369,26 @@ type CompatibleBindings<
     : { readonly __incompatibleMutationCommand: never }
   : unknown
 
-type RuntimeCommand<Actor, Preflight, Transaction, Refusal> = {
-  readonly screen: (context: {
-    readonly executor: Preflight
-    readonly actor: Actor
-    readonly args: unknown
-  }) => MutationScreening<unknown> | Promise<MutationScreening<unknown>>
-  readonly admit: (context: {
-    readonly tx: Transaction
-    readonly actor: Actor
-    readonly args: unknown
-  }) => MutationAdmission<unknown> | Promise<MutationAdmission<unknown>>
-  readonly execute: (context: {
-    readonly tx: Transaction
-    readonly actor: Actor
-    readonly args: unknown
-    readonly evidence: unknown
-    readonly stamp: StampAccumulator
-    readonly mutationId: string
-  }) =>
-    | MutationCommandDecision<Refusal>
-    | Promise<MutationCommandDecision<Refusal>>
-  readonly finalizeAccepted?: (context: {
-    readonly actor: Actor
-    readonly args: unknown
-    readonly stamp: AcceptedStamp
-    readonly projection: unknown
-  }) => void | Promise<void>
-}
+/**
+ * The erased form the action dispatches through once the binding list has
+ * been checked: any parsed args and the protocol's refusal union.
+ */
+type RuntimeMutation<Refusal> = MutationWithRefusal &
+  ((args: unknown) => unknown) & {
+    readonly refusal: StandardSchemaV1<unknown, Refusal>
+  }
 
-interface RuntimeBinding<Actor, Preflight, Transaction, Refusal> {
-  readonly mutation: MutationWithRefusal
-  readonly command: RuntimeCommand<Actor, Preflight, Transaction, Refusal>
-}
+type RuntimeBinding<Actor, Preflight, Transaction, Refusal> = MutationBinding<
+  RuntimeMutation<Refusal>,
+  MutationCommand<
+    RuntimeMutation<Refusal>,
+    Actor,
+    Preflight,
+    Transaction,
+    unknown,
+    unknown
+  >
+>
 
 function parseMutationRefusal<Refusal>(
   schema: StandardSchemaV1,
@@ -488,20 +435,34 @@ function assertCompleteBindings(
  *
  * The returned action treats its argument as untrusted: it parses the envelope,
  * revalidates arguments, derives canonical identity, and resolves the matching
- * command by mutation-definition identity. It derives the actor from the
- * supplied trusted callback, runs screening before receipt ownership, and runs
- * admission plus execution inside the authority's retryable transaction
- * attempts. The authority owns receipt deduplication and contention; commands
- * own application authorization, domain writes, axis stamping, and the
- * repeat-safe `finalizeAccepted` projection. Accepted finalization is
- * intentionally at-least-once because a redelivery may recover a stored
- * receipt. The action expires affected Next cache tags, refreshes the invoking
- * route, and publishes invalidations after acceptance; publication failures go
- * only to the supplied reporter and do not turn an accepted mutation into a
+ * command by mutation-definition identity before it derives the actor from the
+ * supplied trusted callback, so a malformed request never reaches application
+ * code. It runs screening before receipt ownership, and runs admission plus
+ * execution inside the authority's retryable transaction attempts. Every
+ * command callback receives its own copy of the parsed arguments. The
+ * authority owns receipt deduplication and contention; commands own
+ * application authorization, domain writes, axis stamping, and the
+ * repeat-safe `finalizeAccepted` projection.
+ *
+ * A denial, from screening or from a recorded transaction-time admission,
+ * returns `ok({ kind: "denied" })`. It carries no reason, so it reveals no
+ * more than an HTTP 403, and it needs no Next configuration: the action does
+ * not throw Next's experimental `forbidden()`, which fails unless
+ * `experimental.authInterrupts` is enabled. A screening denial claims no
+ * receipt; a recorded denial replays on redelivery.
+ *
+ * After acceptance the action first runs `finalizeAccepted`, then expires
+ * the affected Next cache tags, refreshes the invoking route, and publishes
+ * invalidations. That order lets a projection write what readers load before
+ * any reader is told to reload. If `finalizeAccepted` throws, the action still
+ * expires, refreshes, and publishes, because the commit exists, and then
+ * rethrows; a redelivery recovers the stored receipt and reruns the
+ * projection, so accepted finalization is at-least-once. Publication failures
+ * go only to the supplied reporter and do not turn an accepted mutation into a
  * rejection.
  *
  * @param options Protocol, trusted actor, authority, exhaustive commands, invalidation publisher, and failure reporter.
- * @returns A protocol-branded Server Action returning terminal outcomes or typed executor failures.
+ * @returns A protocol-branded Server Action returning terminal outcomes (`accepted`, `refused`, or `denied`) or typed executor failures.
  * @throws Trusted actor or command callbacks may throw unexpected application/framework failures.
  */
 export function createNextMutationAction<
@@ -546,13 +507,8 @@ export function createNextMutationAction<
   return async (
     envelope: unknown
   ): Promise<
-    Result<
-      Exclude<Terminal, { readonly kind: "denied" }>,
-      MutationExecutorError
-    > &
-      ProtocolIdentity<Protocol["id"]>
+    Result<Terminal, MutationExecutorError> & ProtocolIdentity<Protocol["id"]>
   > => {
-    const actor = await options.actor()
     const prepared = await prepareMutationRequest(options.protocol, envelope)
     if (!prepared.ok) return prepared
 
@@ -560,13 +516,13 @@ export function createNextMutationAction<
     if (!binding) {
       throw new Error(`Missing mutation binding: ${prepared.value.mutation}`)
     }
-    const args = structuredClone(prepared.value.args)
+    const actor = await options.actor()
     const screening = await binding.command.screen({
       executor: options.authority.preflight,
       actor,
-      args,
+      args: structuredClone(prepared.value.args),
     })
-    if (screening.kind === "denied") forbidden()
+    if (screening.kind === "denied") return ok(screening)
 
     const outcome = await executePreparedMutation<
       Transaction,
@@ -603,21 +559,23 @@ export function createNextMutationAction<
         return decision.kind === "accepted" ? ok(undefined) : err(decision)
       },
     })
-    if (!outcome.ok) return outcome
-    if (outcome.value.kind === "denied") forbidden()
-    if (outcome.value.kind === "refused") return ok(outcome.value)
+    if (!outcome.ok || outcome.value.kind !== "accepted") return outcome
 
-    await finalizeExternalActionCommit(
-      outcome.value.stamp,
-      options.invalidations,
-      options.reportInvalidationFailure
-    )
-    await binding.command.finalizeAccepted?.({
-      actor,
-      args,
-      stamp: outcome.value.stamp,
-      projection: screening.projection,
-    })
-    return ok(outcome.value)
+    const { stamp } = outcome.value
+    try {
+      await binding.command.finalizeAccepted?.({
+        actor,
+        args: structuredClone(prepared.value.args),
+        stamp,
+        projection: screening.projection,
+      })
+    } finally {
+      await finalizeExternalActionCommit(
+        stamp,
+        options.invalidations,
+        options.reportInvalidationFailure
+      )
+    }
+    return outcome
   }
 }

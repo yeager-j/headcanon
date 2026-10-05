@@ -213,7 +213,10 @@ context to enforce them.
   through; commands own application admission, execution, and repeat-safe
   accepted projections. A command attempt is accepted, `refused` (a public
   refusal, recorded and replayed), or `denied` (private); the terminal outcome
-  uses the same names. A command that loses a race calls
+  uses the same names. The generated action returns a denial, from screening
+  or from a recorded admission, as `ok({ kind: "denied" })` with no reason. It
+  does not throw Next's `forbidden()`, so it needs no `experimental.authInterrupts`
+  flag. A command that loses a race calls
   `throwMutationContention()` from `headcanon`, and every adapter reruns it.
 - **Invalidation vocabulary.** The framework-independent entry defines singleton
   axis invalidations, subscribers, publishers, and the one meaning of each
@@ -305,7 +308,10 @@ same way as the Ably channel name, so `axisCacheTag` is async),
 `tagVersionedBase` parses a `"use cache"` loader's `{ value, revisions }` into a
 canon and fails closed above Next's 128-tag ceiling, and
 `createNextMutationAction` finalizes accepted stamps with `updateTag`, one
-shared-event invalidation publication, and server `refresh()`. The separately
+shared-event invalidation publication, and server `refresh()`. It runs the
+command's `finalizeAccepted` projection first, so the projection exists before
+any reader is told to reload; if the projection throws, the action still
+invalidates the commit and then rethrows. The separately
 named external-commit helpers preserve the Server Action versus Route Handler
 context distinction. Each binding requires an application-owned failure
 reporter; publication rejection and timeout are recorded there without changing
