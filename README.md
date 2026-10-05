@@ -309,17 +309,34 @@ the accepted outcome.
 ## Ably invalidations
 
 `headcanon/ably/server` turns one accepted stamp into a singleton
-message per axis through an application-supplied Ably REST client. Server and
+message per axis and sends them through Ably REST batch publish (at most 100
+channels per request). If Ably rejects a request or refuses a channel, the
+publication rejects with `AblyInvalidationPublicationError`, whose `failures`
+name exactly the axes that were not published; the other axes were. Server and
 client share the deployment-scoped SHA-256 channel derivation from
-`headcanon/ably/channels`; payload parsing admits only `eventId`,
-`axis`, and a valid revision.
+`headcanon/ably/channels`. Both factories parse `namespace` at construction and
+throw on an invalid one (segments of letters, digits, `_`, `.`, or `-` joined by
+single colons); it is never trimmed or rewritten. Hashing keeps channel names
+bounded and channel-safe; it does not hide the axis, which every payload
+carries in clear next to `eventId` and a valid revision. Payload parsing admits
+only those three fields, and a payload whose axis does not match its channel is
+dropped with an `axis-channel-mismatch` diagnostic.
 
 `headcanon/ably/client` aggregates every mounted root's observed
 axes, requests one exact subscribe-only capability through Ably `authorize()`,
-and attaches new channels only after authorization succeeds. Axis-set changes
-and recovered connections enter `reauthorizing`; authorization, attachment, or
-connection failure enters `unavailable`. A successful attachment or connection
-recovery requests one coalesced refresh to close the delivery gap.
+and attaches new channels only after authorization succeeds. It requests a new
+token only when the axis set changes or Ably reports an auth error; connection
+recovery reuses the current token, and an empty set requests nothing. Status is
+derived from the connection state, each desired channel's state, and the last
+reconciliation: a down connection, a `failed` or `suspended` channel, or a
+failed authorization or attachment reports `unavailable`; a channel not yet
+attached reports `reauthorizing`; otherwise `active`. With no subscriptions it
+reports `reauthorizing` (or `unavailable` while disconnected). `retry()`
+re-attaches every desired channel that is not attached. Each new subscription
+gets one `onSubscriptionGap` once its axes deliver, even on channels that were
+already attached; connection recovery and channel continuity loss (`attached`
+or `update` with `resumed: false`) request it again. Unsubscribing releases
+unobserved channels without waiting for authorization.
 
 Viewer policy and token issuance remain application-owned. The application's
 auth callback must derive permission from trusted viewer and tenant context; it

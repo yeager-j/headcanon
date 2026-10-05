@@ -2,7 +2,7 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { ablyAxisChannelName } from "../ably/channels"
+import { ablyAxisChannelName, ablyChannelNamespace } from "../ably/channels"
 import {
   acceptedStamp,
   axisId,
@@ -85,7 +85,10 @@ describe("axis cache tags", () => {
 
   it("hashes an axis exactly as the Ably channel derivation does", async () => {
     const axis = axisId("entity/shared")
-    const channel = await ablyAxisChannelName("production", axis)
+    const channel = await ablyAxisChannelName(
+      ablyChannelNamespace("production"),
+      axis
+    )
 
     expect(await axisCacheTag(axis)).toBe(
       `headcanon:axis:v1:${channel.split(":").at(-1)}`

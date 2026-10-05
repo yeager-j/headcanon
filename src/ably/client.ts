@@ -9,6 +9,7 @@ import type { AxisId } from "../revisions"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
+  ablyChannelNamespace,
   ablySubscribeCapability,
 } from "./channels"
 
@@ -18,12 +19,71 @@ interface AblyMessage {
 
 type AblyMessageListener = (message: AblyMessage) => void
 
+/** The parts of an Ably `ErrorInfo` the adapter reads to recognize auth errors. */
+export interface AblyErrorInfo {
+  readonly code?: number
+  readonly statusCode?: number
+}
+
+/** Ably channel states, as reported by `RealtimeChannel.state`. */
+export type AblyChannelState =
+  | "initialized"
+  | "attaching"
+  | "attached"
+  | "detaching"
+  | "detached"
+  | "suspended"
+  | "failed"
+
+/**
+ * One channel state change. `current: "attached"` with `resumed: false`
+ * (an `attached` or `update` event) means message continuity was lost.
+ */
+export interface AblyChannelStateChange {
+  readonly current: AblyChannelState
+  readonly resumed: boolean
+  readonly reason?: AblyErrorInfo
+}
+
+type AblyChannelStateListener = (change: AblyChannelStateChange) => void
+
 /** Minimal channel contract required by the client invalidation adapter. */
 export interface AblyRealtimeChannel {
+  readonly state: AblyChannelState
   subscribe(name: string, listener: AblyMessageListener): Promise<unknown>
   unsubscribe(name: string, listener: AblyMessageListener): void
   attach(): Promise<unknown>
   detach(): Promise<unknown>
+  /** Listens to every channel event, including `update`. */
+  on(listener: AblyChannelStateListener): void
+  off(listener: AblyChannelStateListener): void
+}
+
+/** Ably connection states, as reported by `Connection.state`. */
+export type AblyConnectionState =
+  | "initialized"
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "suspended"
+  | "closing"
+  | "closed"
+  | "failed"
+
+/** One connection state change. */
+export interface AblyConnectionStateChange {
+  readonly current: AblyConnectionState
+  readonly reason?: AblyErrorInfo
+}
+
+type AblyConnectionListener = (change: AblyConnectionStateChange) => void
+
+/** Connection state and lifecycle events used to derive adapter status. */
+export interface AblyRealtimeConnection {
+  readonly state: AblyConnectionState
+  /** Listens to every connection event, including `update`. */
+  on(listener: AblyConnectionListener): void
+  off(listener: AblyConnectionListener): void
 }
 
 /** Minimal Ably realtime client contract required for exact-set authorization. */
@@ -42,98 +102,107 @@ export interface AblyRealtimeClient {
   readonly connection: AblyRealtimeConnection
 }
 
-type AblyConnectionEvent =
-  | "connected"
-  | "disconnected"
-  | "suspended"
-  | "closed"
-  | "failed"
+/**
+ * Why the adapter dropped an inbound message: the payload failed parsing, or
+ * it parsed but names a different axis than the channel it arrived on.
+ */
+export type AblyInvalidationMessageError =
+  | AxisInvalidationValidationError
+  | {
+      readonly code: "axis-channel-mismatch"
+      readonly expectedAxis: AxisId
+      readonly value: unknown
+    }
 
-type AblyConnectionListener = (change: unknown) => void
-
-/** Connection lifecycle callbacks used to close invalidation delivery gaps. */
-export interface AblyRealtimeConnection {
-  readonly state: string
-  on(event: AblyConnectionEvent, listener: AblyConnectionListener): void
-  on(events: AblyConnectionEvent[], listener: AblyConnectionListener): void
-  off(event: AblyConnectionEvent, listener: AblyConnectionListener): void
-  off(events: AblyConnectionEvent[], listener: AblyConnectionListener): void
-}
-
-/** Ably invalidation adapter with explicit retry and reconciliation completion. */
+/** Ably invalidation adapter with an explicit retry control. */
 export interface AblyInvalidationAdapter extends InvalidationAdapter {
+  /** Re-runs reconciliation: reauthorizes if needed and re-attaches every desired channel that is not attached. */
   retry(): void
-  settled(): Promise<void>
 }
 
-interface ActiveChannel {
-  readonly axis: AxisId
+interface SubscriptionEntry {
+  readonly subscription: InvalidationSubscription
+  /** Last status this subscription was told (or started in). */
+  reported: InvalidationStatus
+  /** Whether this subscription still needs an `onSubscriptionGap` call. */
+  awaitingGap: boolean
+}
+
+interface AxisChannel {
   readonly channel: AblyRealtimeChannel
-  readonly listener: AblyMessageListener
+  readonly onMessage: AblyMessageListener
+  readonly onStateChange: AblyChannelStateListener
 }
 
-function observedAxes(
-  subscriptions: ReadonlySet<InvalidationSubscription>
-): readonly AxisId[] {
-  return [...new Set([...subscriptions].flatMap(({ axes }) => axes))].sort()
-}
+const UNAVAILABLE_CONNECTION_STATES: ReadonlySet<AblyConnectionState> = new Set(
+  ["disconnected", "suspended", "closing", "closed", "failed"]
+)
 
-function sameNames(
-  left: ReadonlyMap<string, ActiveChannel>,
-  right: ReadonlyMap<string, AxisId>
-): boolean {
-  if (left.size !== right.size) return false
-  for (const name of left.keys()) {
-    if (!right.has(name)) return false
-  }
-  return true
-}
-
-function sameAxes(
-  activeChannels: ReadonlyMap<string, ActiveChannel>,
-  desiredAxes: readonly AxisId[]
-): boolean {
-  const activeAxes = new Set(
-    [...activeChannels.values()].map(({ axis }) => axis)
-  )
+function isAuthError(reason: AblyErrorInfo | undefined): boolean {
+  if (!reason) return false
+  const { code, statusCode } = reason
   return (
-    activeAxes.size === desiredAxes.length &&
-    desiredAxes.every((axis) => activeAxes.has(axis))
+    statusCode === 401 || (code !== undefined && code >= 40100 && code < 40200)
   )
+}
+
+function sameMembers(
+  left: ReadonlySet<string>,
+  right: readonly string[]
+): boolean {
+  return left.size === right.length && right.every((name) => left.has(name))
 }
 
 /**
  * Owns exact-set authorization, attachment, and gap recovery for mounted roots.
  *
  * The adapter aggregates axes from all live subscriptions, authorizes exactly
- * that deduplicated channel set, and attaches channels only after authorization
- * succeeds. Axis changes and reconnects are reconciled through one coalesced
- * generation loop. A successful attachment marks a delivery gap, so consumers
- * receive `onSubscriptionGap` and can refresh the authoritative canon before
- * trusting realtime state. Malformed payloads and lifecycle failures are
- * reported to optional diagnostics callbacks; callback failures are isolated
- * from the subscription lifecycle. Unsubscribing removes listeners and detaches
- * channels that no remaining root observes.
+ * that deduplicated channel set, and attaches channels only after
+ * authorization succeeds. It requests a new token only when that set changes
+ * or Ably reports an auth error; connection recovery reuses the token. An
+ * empty set requests nothing.
  *
- * @param options Realtime client, deployment namespace, and lifecycle diagnostics.
- * @returns An Ably invalidation adapter with `retry()` and `settled()` controls.
+ * Status is derived, never stored: `unavailable` while the connection is down,
+ * a desired channel is `failed` or `suspended`, or the last reconciliation
+ * failed for a channel that is still not attached; otherwise `reauthorizing`
+ * until every desired channel is attached, then `active`. With no
+ * subscriptions the status is `reauthorizing` (or `unavailable` while the
+ * connection is down), never `active`.
+ *
+ * Each new subscription receives one `onSubscriptionGap` once its axes are
+ * delivering, including when it joins channels that are already attached.
+ * Connection recovery and channel continuity loss (`attached` or `update`
+ * with `resumed: false`) request the gap again for affected subscriptions;
+ * the two can produce two refreshes for one outage.
+ *
+ * Unsubscribing releases channels no remaining subscription observes in a
+ * microtask: listeners are removed and detach is attempted without waiting
+ * for any authorization. Malformed payloads and lifecycle failures go to
+ * optional diagnostics callbacks, isolated from the subscription lifecycle.
+ *
+ * @param options Realtime client, deployment namespace, and diagnostics.
+ * @returns An Ably invalidation adapter with a `retry()` control.
+ * @throws Error at construction when `namespace` is invalid (see `ablyChannelNamespace`).
  */
 export function createAblyInvalidationAdapter(options: {
   readonly realtime: AblyRealtimeClient
   readonly namespace: string
-  readonly onMalformedMessage?: (error: AxisInvalidationValidationError) => void
+  readonly onMalformedMessage?: (error: AblyInvalidationMessageError) => void
   readonly onLifecycleError?: (error: unknown) => void
 }): AblyInvalidationAdapter {
-  const subscriptions = new Set<InvalidationSubscription>()
-  const activeChannels = new Map<string, ActiveChannel>()
-  const axesAwaitingGapClosure = new Set<AxisId>()
-  let status: InvalidationStatus = "reauthorizing"
+  const namespace = ablyChannelNamespace(options.namespace)
+  const { realtime } = options
+  const entries = new Set<SubscriptionEntry>()
+  const channels = new Map<AxisId, AxisChannel>()
+  const channelNames = new Map<AxisId, Promise<string>>()
+  let authorizedNames: ReadonlySet<string> | null = null
+  let reconcileFailed = false
+  let connectionLost = false
+  let monitoring = false
+  let releaseScheduled = false
   let requestedGeneration = 0
   let completedGeneration = 0
-  let reconciliation: Promise<void> | null = null
-  let monitoringConnection = false
-  let closeGapAfterReconcile = false
-  let connectionUnavailable = false
+  let reconciling = false
 
   const reportLifecycleError = (error: unknown) => {
     try {
@@ -143,7 +212,7 @@ export function createAblyInvalidationAdapter(options: {
     }
   }
 
-  const reportMalformedMessage = (error: AxisInvalidationValidationError) => {
+  const reportMalformedMessage = (error: AblyInvalidationMessageError) => {
     try {
       options.onMalformedMessage?.(error)
     } catch {
@@ -151,222 +220,242 @@ export function createAblyInvalidationAdapter(options: {
     }
   }
 
-  const setStatus = (next: InvalidationStatus) => {
-    if (status === next) return
-    status = next
-    for (const subscription of subscriptions) {
-      subscription.onStatusChange(next)
+  const observedAxes = (): readonly AxisId[] =>
+    [
+      ...new Set([...entries].flatMap(({ subscription }) => subscription.axes)),
+    ].sort()
+
+  const channelName = (axis: AxisId): Promise<string> => {
+    let name = channelNames.get(axis)
+    if (!name) {
+      name = ablyAxisChannelName(namespace, axis)
+      channelNames.set(axis, name)
+    }
+    return name
+  }
+
+  const deriveStatus = (): InvalidationStatus => {
+    if (
+      UNAVAILABLE_CONNECTION_STATES.has(realtime.connection.state) ||
+      (monitoring && connectionLost)
+    ) {
+      return "unavailable"
+    }
+    if (entries.size === 0) return "reauthorizing"
+
+    let allAttached = true
+    for (const axis of observedAxes()) {
+      const state = channels.get(axis)?.channel.state
+      if (state === "failed" || state === "suspended") return "unavailable"
+      if (state !== "attached") allAttached = false
+    }
+    if (allAttached) return "active"
+    return reconcileFailed ? "unavailable" : "reauthorizing"
+  }
+
+  /** Tells each subscription the derived status if it differs from what it was last told. */
+  const reportStatus = () => {
+    const status = deriveStatus()
+    for (const entry of [...entries]) {
+      if (!entries.has(entry) || entry.reported === status) continue
+      entry.reported = status
+      entry.subscription.onStatusChange(status)
     }
   }
 
-  const removeChannel = async (
-    name: string,
-    active: ActiveChannel
-  ): Promise<void> => {
-    active.channel.unsubscribe(ABLY_AXIS_INVALIDATION_EVENT, active.listener)
-    activeChannels.delete(name)
-    axesAwaitingGapClosure.delete(active.axis)
-    try {
-      await active.channel.detach()
-    } catch (error) {
-      reportLifecycleError(error)
+  /** Delivers pending gap requests once delivery is active. */
+  const closeGaps = () => {
+    if (deriveStatus() !== "active") return
+    for (const entry of [...entries]) {
+      if (!entries.has(entry) || !entry.awaitingGap) continue
+      entry.awaitingGap = false
+      entry.subscription.onSubscriptionGap?.()
     }
+  }
+
+  const requestGap = (axis: AxisId | null) => {
+    for (const entry of entries) {
+      if (axis === null || entry.subscription.axes.includes(axis)) {
+        entry.awaitingGap = true
+      }
+    }
+  }
+
+  const releaseUnobservedChannels = () => {
+    releaseScheduled = false
+    const observed = new Set(observedAxes())
+    for (const [axis, axisChannel] of channels) {
+      if (observed.has(axis)) continue
+      channels.delete(axis)
+      channelNames.delete(axis)
+      const { channel, onMessage, onStateChange } = axisChannel
+      channel.unsubscribe(ABLY_AXIS_INVALIDATION_EVENT, onMessage)
+      channel.off(onStateChange)
+      channel.detach().catch(reportLifecycleError)
+    }
+  }
+
+  const openChannel = (axis: AxisId, name: string): AxisChannel => {
+    const channel = realtime.channels.get(name, { attachOnSubscribe: false })
+    const onMessage: AblyMessageListener = (message) => {
+      const parsed = axisInvalidation(message.data)
+      if (!parsed.ok) {
+        reportMalformedMessage(parsed.error)
+        return
+      }
+      if (parsed.value.axis !== axis) {
+        reportMalformedMessage({
+          code: "axis-channel-mismatch",
+          expectedAxis: axis,
+          value: message.data,
+        })
+        return
+      }
+      for (const { subscription } of [...entries]) {
+        if (subscription.axes.includes(axis)) {
+          subscription.onInvalidation(parsed.value)
+        }
+      }
+    }
+    const axisChannel: AxisChannel = {
+      channel,
+      onMessage,
+      onStateChange: (change) => {
+        if (channels.get(axis) !== axisChannel) return
+        if (isAuthError(change.reason)) authorizedNames = null
+        if (change.current === "attached" && !change.resumed) requestGap(axis)
+        reportStatus()
+        closeGaps()
+      },
+    }
+    channel.on(axisChannel.onStateChange)
+    channels.set(axis, axisChannel)
+    return axisChannel
+  }
+
+  const ensureAttached = async (axis: AxisId, name: string): Promise<void> => {
+    const existing = channels.get(axis)
+    if (existing?.channel.state === "attached") return
+
+    // Whatever this attachment misses is closed by a refresh once it is live.
+    requestGap(axis)
+    const axisChannel = existing ?? openChannel(axis, name)
+    if (!existing) {
+      await axisChannel.channel.subscribe(
+        ABLY_AXIS_INVALIDATION_EVENT,
+        axisChannel.onMessage
+      )
+    }
+    if (channels.get(axis) !== axisChannel) return
+    await axisChannel.channel.attach()
   }
 
   const reconcileOnce = async (generation: number): Promise<void> => {
-    setStatus("reauthorizing")
-    const axes = observedAxes(subscriptions)
-    const desiredEntries = await Promise.all(
-      axes.map(
-        async (axis) =>
-          [await ablyAxisChannelName(options.namespace, axis), axis] as const
-      )
-    )
-    const desiredChannels = new Map(desiredEntries)
+    const axes = observedAxes()
+    if (axes.length === 0) return
+
+    const names = await Promise.all(axes.map(channelName))
     if (generation !== requestedGeneration) return
 
-    await options.realtime.auth.authorize({
-      capability: ablySubscribeCapability([...desiredChannels.keys()]),
-    })
-    if (generation !== requestedGeneration) return
-
-    const removed = [...activeChannels].filter(
-      ([name]) => !desiredChannels.has(name)
-    )
-    await Promise.all(
-      removed.map(([name, active]) => removeChannel(name, active))
-    )
-
-    const added = [...desiredChannels].filter(
-      ([name]) => !activeChannels.has(name)
-    )
-    const attachmentResults = await Promise.allSettled(
-      added.map(async ([name, axis]) => {
-        const channel = options.realtime.channels.get(name, {
-          attachOnSubscribe: false,
+    if (authorizedNames === null || !sameMembers(authorizedNames, names)) {
+      try {
+        await realtime.auth.authorize({
+          capability: ablySubscribeCapability(names),
         })
-        const listener: AblyMessageListener = (message) => {
-          const parsed = axisInvalidation(message.data)
-          if (!parsed.ok) {
-            reportMalformedMessage(parsed.error)
-            return
-          }
-          if (parsed.value.axis !== axis) {
-            reportMalformedMessage({
-              code: "invalid-axis-invalidation",
-              reason: "invalid-axis",
-              value: message.data,
-            })
-            return
-          }
-
-          for (const subscription of subscriptions) {
-            if (!subscription.axes.includes(axis)) continue
-            subscription.onInvalidation(parsed.value)
-          }
-        }
-
-        try {
-          await channel.subscribe(ABLY_AXIS_INVALIDATION_EVENT, listener)
-          await channel.attach()
-        } catch (error) {
-          channel.unsubscribe(ABLY_AXIS_INVALIDATION_EVENT, listener)
-          throw error
-        }
-        return [name, { axis, channel, listener }] as const
-      })
-    )
-    for (const result of attachmentResults) {
-      if (result.status === "fulfilled") {
-        const [name, active] = result.value
-        activeChannels.set(name, active)
-        axesAwaitingGapClosure.add(active.axis)
+      } catch (error) {
+        authorizedNames = null
+        throw error
       }
-    }
-    const attachmentFailure = attachmentResults.find(
-      (result) => result.status === "rejected"
-    )
-    if (attachmentFailure?.status === "rejected") {
-      throw attachmentFailure.reason
+      authorizedNames = new Set(names)
+      if (generation !== requestedGeneration) return
     }
 
-    if (generation !== requestedGeneration) return
-    if (!sameNames(activeChannels, desiredChannels)) return
-    if (connectionUnavailable) return
-    setStatus("active")
-    const closesConnectionGap = closeGapAfterReconcile
-    if (axesAwaitingGapClosure.size > 0 || closesConnectionGap) {
-      for (const subscription of subscriptions) {
-        if (
-          !closesConnectionGap &&
-          !subscription.axes.some((axis) => axesAwaitingGapClosure.has(axis))
-        ) {
-          continue
-        }
-        subscription.onSubscriptionGap?.()
-      }
-    }
-    axesAwaitingGapClosure.clear()
-    closeGapAfterReconcile = false
+    const results = await Promise.allSettled(
+      axes.map((axis, index) => ensureAttached(axis, names[index] as string))
+    )
+    const failure = results.find((result) => result.status === "rejected")
+    if (failure?.status === "rejected") throw failure.reason
   }
 
   const runReconciliation = () => {
     requestedGeneration += 1
-    if (reconciliation) return
+    if (reconciling) return
+    reconciling = true
 
-    reconciliation = (async () => {
-      while (completedGeneration !== requestedGeneration) {
-        const generation = requestedGeneration
-        try {
-          await reconcileOnce(generation)
-        } catch (error) {
-          reportLifecycleError(error)
-          setStatus("unavailable")
+    void (async () => {
+      try {
+        while (completedGeneration !== requestedGeneration) {
+          const generation = requestedGeneration
+          reconcileFailed = false
+          reportStatus()
+          try {
+            await reconcileOnce(generation)
+          } catch (error) {
+            reportLifecycleError(error)
+            reconcileFailed = true
+          }
+          completedGeneration = generation
         }
-        completedGeneration = generation
+      } finally {
+        reconciling = false
       }
-    })().finally(() => {
-      reconciliation = null
-      if (completedGeneration !== requestedGeneration) runReconciliation()
-    })
+      reportStatus()
+      closeGaps()
+    })()
   }
 
-  const unavailableConnectionStates: AblyConnectionEvent[] = [
-    "disconnected",
-    "suspended",
-    "closed",
-    "failed",
-  ]
-  const handleConnectionUnavailable: AblyConnectionListener = () => {
-    connectionUnavailable = true
-    setStatus("unavailable")
-  }
-  const handleConnectionConnected: AblyConnectionListener = () => {
-    if (!connectionUnavailable) return
-    connectionUnavailable = false
-    closeGapAfterReconcile = true
-    runReconciliation()
-  }
-  const startConnectionMonitoring = () => {
-    if (monitoringConnection) return
-    monitoringConnection = true
-    options.realtime.connection.on(
-      unavailableConnectionStates,
-      handleConnectionUnavailable
-    )
-    options.realtime.connection.on("connected", handleConnectionConnected)
-    if (
-      unavailableConnectionStates.includes(
-        options.realtime.connection.state as AblyConnectionEvent
-      )
-    ) {
-      handleConnectionUnavailable(undefined)
-    } else if (options.realtime.connection.state === "connected") {
-      connectionUnavailable = false
+  const onConnectionChange: AblyConnectionListener = (change) => {
+    if (isAuthError(change.reason)) authorizedNames = null
+    if (UNAVAILABLE_CONNECTION_STATES.has(change.current)) {
+      connectionLost = true
+    } else if (change.current === "connected" && connectionLost) {
+      connectionLost = false
+      requestGap(null)
+      runReconciliation()
     }
+    reportStatus()
+    closeGaps()
   }
-  const stopConnectionMonitoring = () => {
-    if (!monitoringConnection) return
-    monitoringConnection = false
-    options.realtime.connection.off(
-      unavailableConnectionStates,
-      handleConnectionUnavailable
+
+  const startMonitoring = () => {
+    monitoring = true
+    connectionLost = UNAVAILABLE_CONNECTION_STATES.has(
+      realtime.connection.state
     )
-    options.realtime.connection.off("connected", handleConnectionConnected)
+    realtime.connection.on(onConnectionChange)
+  }
+
+  const stopMonitoring = () => {
+    monitoring = false
+    realtime.connection.off(onConnectionChange)
   }
 
   return {
     get initialStatus() {
-      return status
+      return deriveStatus()
     },
     subscribe(subscription) {
-      const wasEmpty = subscriptions.size === 0
-      subscriptions.add(subscription)
-      if (wasEmpty) startConnectionMonitoring()
-      if (
-        !sameAxes(activeChannels, observedAxes(subscriptions)) &&
-        status !== "reauthorizing"
-      ) {
-        setStatus("reauthorizing")
-      } else {
-        subscription.onStatusChange(status)
+      const entry: SubscriptionEntry = {
+        subscription,
+        reported: deriveStatus(),
+        awaitingGap: true,
       }
+      entries.add(entry)
+      if (entries.size === 1) startMonitoring()
+      reportStatus()
       runReconciliation()
+
       return () => {
-        subscriptions.delete(subscription)
-        if (subscriptions.size === 0) stopConnectionMonitoring()
-        if (
-          !sameAxes(activeChannels, observedAxes(subscriptions)) &&
-          status !== "reauthorizing"
-        ) {
-          setStatus("reauthorizing")
+        if (!entries.delete(entry)) return
+        if (entries.size === 0) stopMonitoring()
+        if (!releaseScheduled) {
+          releaseScheduled = true
+          queueMicrotask(releaseUnobservedChannels)
         }
+        reportStatus()
         runReconciliation()
       }
     },
     retry: runReconciliation,
-    async settled() {
-      while (reconciliation) await reconciliation
-    },
   }
 }

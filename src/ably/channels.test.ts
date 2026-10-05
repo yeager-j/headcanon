@@ -3,22 +3,40 @@ import { describe, expect, it } from "vitest"
 
 import { axisId } from "../revisions"
 import {
+  ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
-  ablyCapabilityByteLength,
+  ablyChannelNamespace,
   ablySubscribeCapability,
 } from "./channels"
 
 describe("Ably axis channels", () => {
   it("derives a stable deployment-scoped SHA-256 channel", async () => {
-    const axis = axisId("secret/storage/axis")
+    const axis = axisId("entity/storage/axis")
     const digest = createHash("sha256").update(axis, "utf8").digest("hex")
 
-    await expect(ablyAxisChannelName("preview-671", axis)).resolves.toBe(
-      `preview-671:headcanon:axis:v1:${digest}`
-    )
-    await expect(ablyAxisChannelName("", axis)).rejects.toThrow(
-      "namespace is required"
-    )
+    await expect(
+      ablyAxisChannelName(ablyChannelNamespace("preview-671"), axis)
+    ).resolves.toBe(`preview-671:headcanon:axis:v1:${digest}`)
+    expect(ABLY_AXIS_INVALIDATION_EVENT).toBe("headcanon.axis-invalidation.v1")
+  })
+
+  it("parses a namespace without rewriting it", () => {
+    for (const namespace of ["production", "app:preview-42", "a.b_c"]) {
+      expect(ablyChannelNamespace(namespace)).toBe(namespace)
+    }
+    for (const namespace of [
+      "",
+      " production",
+      "production ",
+      "production:",
+      ":production",
+      "app::preview",
+      "[meta]production",
+    ]) {
+      expect(() => ablyChannelNamespace(namespace)).toThrow(
+        "Invalid Ably axis-channel namespace"
+      )
+    }
   })
 
   it("enumerates exact subscribe-only capabilities deterministically", () => {
@@ -31,18 +49,17 @@ describe("Ably axis channels", () => {
   })
 
   it("measures a combat-scale exact capability claim", async () => {
+    const namespace = ablyChannelNamespace("production")
     const channels = await Promise.all(
       Array.from({ length: 128 }, (_, index) =>
-        ablyAxisChannelName("production", axisId(`combatant/${index}`))
+        ablyAxisChannelName(namespace, axisId(`combatant/${index}`))
       )
     )
     const capability = ablySubscribeCapability(channels)
-    const measuredBytes = ablyCapabilityByteLength(capability)
 
     expect(Object.keys(capability)).toHaveLength(128)
-    expect(measuredBytes).toBe(
+    expect(
       new TextEncoder().encode(JSON.stringify(capability)).byteLength
-    )
-    expect(measuredBytes).toBe(14_081)
+    ).toBe(14_081)
   })
 })
