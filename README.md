@@ -223,7 +223,9 @@ context to enforce them.
   `createLazyInvalidationAdapter` wraps a transport that is created
   asynchronously, for example after a dynamic import of the Ably SDK: it
   reports `reauthorizing` until the transport is ready and then forwards the
-  transport's own status.
+  transport's own status. `withPollingFallback` wraps a transport and, while
+  it is degraded, reports `polling` and signals a subscription gap at a fixed
+  interval, so the root refreshes through its usual carrier.
 - **Shared-entry safety.** The dependency gate walks everything reachable from the
   protocol and React client entries and rejects Node built-ins, server-only
   modules, database and server-framework dependencies, and environment or secret
@@ -270,9 +272,16 @@ requests `router.refresh()`; snapshot carriers refetch immediately. A dedicated
 refresh transition coalesces requests and retries one uncovered refresh after one
 second. Two completed uncovered attempts produce a typed `behind`,
 `missing-axis`, or `refresh-error` stall while leaving accepted predictions
-mounted. `retryRefresh()` and genuinely fresher invalidations reset that budget.
+mounted; `status.stallReason` exists only while `status.freshness` is
+`stalled`. `retryRefresh()`, a new acceptance, and genuinely fresher
+invalidations reset that budget. A subscription gap (`onSubscriptionGap`) is a
+requirement too: only a successful refresh that started after the gap closes
+it, so a failed one leaves the root short of `current` and subject to the same
+budget, stall, and `retryRefresh()`.
 Promise-returning adapters complete from their promise; void carriers such as
-`router.refresh()` consume an attempt only when the root receives the next canon.
+`router.refresh()` consume an attempt only when the root receives a canon whose
+state value (by identity) or revisions changed, so re-rendering with the same
+canon, or with a rebuilt wrapper around the same state, does not.
 
 `recoveryListeners` map uncertain delivery, stalled freshness, and newly recorded
 replay conflicts onto application-owned effects. Factory listeners provide

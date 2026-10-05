@@ -292,7 +292,7 @@ export interface DeliveryRecovery {
 /** Canon recovery facts supplied while authoritative incorporation is stalled. */
 export interface FreshnessRecovery {
   readonly retry: () => void
-  readonly reason: RefreshStallReason | null
+  readonly reason: RefreshStallReason
   readonly missingAxes: readonly AxisId[]
 }
 
@@ -378,13 +378,15 @@ function useRecoveryListeners<Invocation, Error>(
     return enterUncertainDelivery()
   }, [handlesUncertainDelivery, root.retryDelivery, root.status.delivery])
 
-  const enterStalledFreshness = useEffectEvent(() =>
-    listeners.onFreshnessStalled?.({
+  const enterStalledFreshness = useEffectEvent(() => {
+    const { status } = root
+    if (status.freshness !== "stalled") return
+    return listeners.onFreshnessStalled?.({
       retry: root.retryRefresh,
-      reason: root.status.stallReason,
-      missingAxes: root.status.missingAxes,
+      reason: status.stallReason,
+      missingAxes: status.missingAxes,
     })
-  )
+  })
   const handlesStalledFreshness = listeners.onFreshnessStalled !== undefined
   useEffect(() => {
     if (!handlesStalledFreshness || root.status.freshness !== "stalled") {
@@ -1206,10 +1208,9 @@ export function createObservedRoot(options: ObservedRootOptions) {
 // the framework-independent `headcanon` entry.
 export {
   useSnapshotRefresh,
-  withPollingFallback,
+  type FreshnessState,
   type FreshnessStatus,
   type IncorporationStatus,
-  type PollingFallbackOptions,
   type RefreshAdapter,
   type RefreshStallReason,
 } from "./refresh"

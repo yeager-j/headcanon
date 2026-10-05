@@ -58,6 +58,7 @@ export {
   createLazyInvalidationAdapter,
   createNoRealtimeInvalidationAdapter,
   isDegradedInvalidationStatus,
+  withPollingFallback,
   type AxisInvalidationValidationError,
   type AxisInvalidation,
   type InvalidationAdapter,
@@ -67,4 +68,5 @@ export {
   type InvalidationStatus,
   type InvalidationSubscription,
   type LazyInvalidationAdapterOptions,
+  type PollingFallbackOptions,
 } from "./invalidation"

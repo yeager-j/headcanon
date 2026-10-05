@@ -66,6 +66,12 @@ export interface InvalidationSubscription {
   readonly axes: readonly AxisId[]
   readonly onInvalidation: (invalidation: AxisInvalidation) => void
   readonly onStatusChange: (status: InvalidationStatus) => void
+  /**
+   * Reports that invalidations for these axes may have been missed before this
+   * call (for example across a reattachment), with no revision to say which.
+   * The root then needs one refresh that starts after the call and succeeds;
+   * a failed refresh leaves the gap open.
+   */
   readonly onSubscriptionGap?: () => void
 }
 
@@ -194,6 +200,125 @@ export function createNoRealtimeInvalidationAdapter(): InvalidationAdapter {
     subscribe(subscription) {
       subscription.onStatusChange("disabled")
       return () => undefined
+    },
+  }
+}
+
+/** Timing and visibility policy for degraded invalidation polling. */
+export interface PollingFallbackOptions {
+  readonly intervalMs: number
+  readonly pauseWhenHidden?: boolean
+}
+
+function pollingStatus(status: InvalidationStatus): InvalidationStatus {
+  return isDegradedInvalidationStatus(status) ? "polling" : status
+}
+
+/**
+ * Preserves bounded liveness through the subscribed root's existing refresh
+ * path whenever its primary invalidation transport is unavailable.
+ *
+ * The wrapper reports `polling` while the primary adapter is disabled,
+ * reauthorizing, or unavailable. At the configured interval it reports a
+ * subscription gap (`onSubscriptionGap`): while the primary is degraded,
+ * invalidations may have been missed, which is exactly what a gap means, so
+ * the root treats each tick like any other gap. It stops the timer on
+ * unsubscribe and
+ * can pause while the document is hidden. When the primary transport becomes
+ * active, polling stops and the original status is forwarded. This is a
+ * liveness fallback, not a second data source: the root still obtains state
+ * only through its existing refresh carrier.
+ *
+ * @param primary Push invalidation adapter to wrap.
+ * @param options Polling interval and visibility policy.
+ * @returns An invalidation adapter with polling fallback.
+ * @throws Error when `intervalMs` is not a finite positive number.
+ */
+export function withPollingFallback(
+  primary: InvalidationAdapter,
+  options: PollingFallbackOptions
+): InvalidationAdapter {
+  if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
+    throw new Error("Polling fallback intervalMs must be positive")
+  }
+
+  const pauseWhenHidden = options.pauseWhenHidden ?? true
+
+  return {
+    get initialStatus() {
+      return pollingStatus(primary.initialStatus)
+    },
+    subscribe(subscription) {
+      let polling = isDegradedInvalidationStatus(primary.initialStatus)
+      let stopped = false
+      let interval: ReturnType<typeof setInterval> | null = null
+
+      const hidden = () =>
+        pauseWhenHidden &&
+        typeof document !== "undefined" &&
+        document.visibilityState === "hidden"
+
+      const stopInterval = () => {
+        if (interval === null) return
+        clearInterval(interval)
+        interval = null
+      }
+
+      const requestRefresh = () => {
+        if (!stopped && polling && !hidden()) {
+          subscription.onSubscriptionGap?.()
+        }
+      }
+
+      const startInterval = () => {
+        if (stopped || !polling || hidden() || interval !== null) return
+        interval = setInterval(requestRefresh, options.intervalMs)
+      }
+
+      const reconcileInterval = () => {
+        if (polling) startInterval()
+        else stopInterval()
+      }
+
+      const onStatusChange: InvalidationSubscription["onStatusChange"] = (
+        status
+      ) => {
+        if (status === "active") polling = false
+        else if (isDegradedInvalidationStatus(status)) polling = true
+
+        reconcileInterval()
+        subscription.onStatusChange(polling ? "polling" : status)
+      }
+
+      const onVisibilityChange = () => {
+        if (hidden()) {
+          stopInterval()
+          return
+        }
+
+        requestRefresh()
+        startInterval()
+      }
+
+      const stopPrimary = primary.subscribe({
+        ...subscription,
+        onStatusChange,
+      })
+      reconcileInterval()
+
+      if (pauseWhenHidden && typeof document !== "undefined") {
+        document.addEventListener("visibilitychange", onVisibilityChange)
+      }
+
+      return () => {
+        if (stopped) return
+        stopped = true
+        stopInterval()
+        if (pauseWhenHidden && typeof document !== "undefined") {
+          document.removeEventListener("visibilitychange", onVisibilityChange)
+        }
+        stopPrimary()
+      }
     },
   }
 }
