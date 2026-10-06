@@ -144,13 +144,13 @@ async function replaceState(
 }
 
 function contractHarness(
-  db: () => ContractDatabase,
+  getDatabase: () => ContractDatabase,
   isolation: IsolationLevel
 ): MutationAuthorityContractHarness<ContractTransaction, ContractDatabase> {
   return {
     name: `drizzle/Postgres (database default ${isolation})`,
     async create() {
-      const database = db()
+      const database = getDatabase()
       await database.delete(headcanonMutationReceipts)
       await replaceState(database, MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE)
 
@@ -218,7 +218,7 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
   const databases = new Map<IsolationLevel, ContractDatabase>()
   let schemaCreated = false
 
-  const database = (isolation: IsolationLevel) => {
+  const databaseFor = (isolation: IsolationLevel) => {
     const db = databases.get(isolation)
     if (!db) throw new Error(`No database for ${isolation}`)
     return db
@@ -239,7 +239,7 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
       databases.set(isolation, drizzle(pool, { schema }))
     }
 
-    const db = database("read committed")
+    const db = databaseFor("read committed")
     for (const statement of receiptMigration.split(
       "--> statement-breakpoint"
     )) {
@@ -272,7 +272,7 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
 
   it("connects each harness with its database default isolation", async () => {
     for (const isolation of DATABASE_ISOLATION_LEVELS) {
-      const result = await database(isolation).execute<{
+      const result = await databaseFor(isolation).execute<{
         default_transaction_isolation: string
       }>(sql`show default_transaction_isolation`)
       expect(result.rows[0]?.default_transaction_isolation).toBe(isolation)
@@ -281,12 +281,12 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
 
   for (const isolation of DATABASE_ISOLATION_LEVELS) {
     verifyMutationAuthorityContract(
-      contractHarness(() => database(isolation), isolation)
+      contractHarness(() => databaseFor(isolation), isolation)
     )
   }
 
   it("rolls back real Postgres serialization failures without a receipt", async () => {
-    const db = database("read committed")
+    const db = databaseFor("read committed")
     await db.delete(headcanonMutationReceipts)
     await db.delete(contractEffects)
     const authority = createDrizzleMutationAuthority({

@@ -9,23 +9,13 @@ import {
   uuid,
 } from "drizzle-orm/pg-core"
 
-/**
- * The mutation-receipt table definition, isolated from the authority adapter so
- * that adopters can include it in their Drizzle schema and migrations without
- * pulling the executor graph (and its `canonicalize` dependency) into
- * schema-only tooling such as `drizzle-kit`. The adapter imports the table for
- * its queries without re-exporting it; schema consumers use the dedicated
- * `headcanon/drizzle-schema` entry.
- */
+import type { StoredTerminalOutcome } from "../core/authority"
+
+// Schema tooling such as drizzle-kit loads this entry, so at runtime it imports
+// only drizzle-orm: import anything else as a type.
 
 /** The durable terminal outcome stored per mutation, as serialized JSON. */
-export type StoredMutationTerminalOutcome =
-  | {
-      readonly kind: "accepted"
-      readonly stamp: { readonly revisions: unknown }
-    }
-  | { readonly kind: "refused"; readonly error: unknown }
-  | { readonly kind: "denied" }
+export type StoredMutationTerminalOutcome = StoredTerminalOutcome
 
 /**
  * Durable authority outcomes keyed by trusted actor scope and mutation UUID.

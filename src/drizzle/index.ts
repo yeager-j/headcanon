@@ -5,32 +5,32 @@ import {
   type PgTransaction,
 } from "drizzle-orm/pg-core"
 import type { ExtractTablesWithRelations } from "drizzle-orm/relations"
-import { ok, type Result } from "serializable-result"
+import { err, ok, type Result } from "serializable-result"
 
 import {
   contentionRetry,
   createStampAccumulator,
-  mutationReceipt,
+  prepareTerminalOutcome,
   receiptKey,
-  recordTerminalOutcome,
   replayReceipt,
+  storedReceipt,
   type MutationAttemptFailure,
   type MutationAuthorityAdapter,
+  type StampAccumulator,
+  type StoredReceipt,
 } from "../core/authority"
 import { isPostgresContention } from "./postgres-error"
-import {
-  headcanonMutationReceipts,
-  type StoredMutationTerminalOutcome,
-} from "./schema"
-
-// The receipt table is defined in `./schema` (drizzle-orm only, so schema
-// tooling never loads the authority graph) and published from the dedicated
-// `headcanon/drizzle-schema` entry. This adapter imports it for its own queries; it does
-// not re-export it, so the table has exactly one public home (UNN-673).
+// `headcanon/drizzle-schema` is the receipt table's one public home; do not re-export it here.
+import { headcanonMutationReceipts } from "./schema"
 
 export { matchesPostgresError, type PostgresErrorMatch } from "./postgres-error"
 
-/** Transaction-capable Drizzle client shape accepted by the authority adapter. */
+/**
+ * The transaction each command attempt receives from
+ * `createDrizzleMutationAuthority`, for a database with this query-result kind
+ * and schema. To derive it from a database type, use
+ * `DrizzleMutationTx<typeof db>`.
+ */
 export type DrizzleMutationTransaction<
   QueryResult extends PgQueryResultHKT,
   Schema extends Record<string, unknown>,
@@ -45,49 +45,137 @@ export type DrizzleMutationTx<
   DB extends PgDatabase<PgQueryResultHKT, Record<string, unknown>>,
 > = Parameters<Parameters<DB["transaction"]>[0]>[0]
 
-/** Application policy and database hooks used by the Drizzle authority adapter. */
+/** Options for `createDrizzleMutationAuthority`. */
 export interface DrizzleMutationAuthorityOptions<
   QueryResult extends PgQueryResultHKT,
   Schema extends Record<string, unknown>,
   Actor,
 > {
+  /**
+   * Interactive Postgres client that runs each execution in a transaction, and
+   * the `preflight` executor. HTTP-only clients cannot run interactive
+   * transactions; for Neon, use the WebSocket `Pool`.
+   */
   readonly db: PgDatabase<QueryResult, Schema>
+  /**
+   * Returns the trusted receipt scope for an actor, such as a user ID.
+   * Receipts and duplicate detection are keyed by this scope and the mutation
+   * ID, so it must be stable for one actor.
+   */
   readonly scope: (actor: Actor) => string
+  /**
+   * Total attempts, including the first, before a contended execution returns
+   * `contention`. A positive integer; defaults to 2.
+   */
   readonly maxAttempts?: number
+  /**
+   * Marks an error thrown by an attempt as contention, so the attempt rolls
+   * back and reruns. PostgreSQL serialization failure, deadlock, and
+   * lock-not-available errors already count. Build it with
+   * `matchesPostgresError`.
+   */
   readonly isContentionError?: (error: unknown) => boolean
 }
 
-/** Rolls back the attempt savepoint of a refused or denied command. */
-class RollBackAttempt extends Error {
-  constructor() {
-    super("Roll back the refused mutation attempt")
-    this.name = "RollBackAttempt"
+/** Thrown inside the attempt savepoint so Drizzle rolls back a refused or denied command's writes. */
+class AttemptRollback<Refusal> extends Error {
+  readonly failure: MutationAttemptFailure<Refusal>
+
+  constructor(failure: MutationAttemptFailure<Refusal>) {
+    super("Roll back the refused or denied mutation attempt")
+    this.name = "AttemptRollback"
+    this.failure = failure
   }
 }
 
+/** Runs one command attempt in a savepoint whose writes roll back when the command is refused or denied. */
+async function runAttemptInSavepoint<
+  QueryResult extends PgQueryResultHKT,
+  Schema extends Record<string, unknown>,
+  Refusal,
+>(
+  tx: DrizzleMutationTransaction<QueryResult, Schema>,
+  run: (
+    tx: DrizzleMutationTransaction<QueryResult, Schema>,
+    stamp: StampAccumulator
+  ) => Promise<Result<void, MutationAttemptFailure<Refusal>>>,
+  stamp: StampAccumulator
+): Promise<Result<void, MutationAttemptFailure<Refusal>>> {
+  try {
+    await tx.transaction(async (attemptTx) => {
+      const attempted = await run(attemptTx, stamp)
+      if (!attempted.ok) throw new AttemptRollback(attempted.error)
+    })
+  } catch (error) {
+    if (error instanceof AttemptRollback) return err(error.failure)
+    throw error
+  }
+  return ok(undefined)
+}
+
+async function findReceipt<
+  QueryResult extends PgQueryResultHKT,
+  Schema extends Record<string, unknown>,
+>(
+  tx: DrizzleMutationTransaction<QueryResult, Schema>,
+  actorScope: string,
+  mutationId: string
+): Promise<StoredReceipt | undefined> {
+  const [recorded] = await tx
+    .select({
+      protocol: headcanonMutationReceipts.protocol,
+      canonicalInvocation: headcanonMutationReceipts.canonicalInvocation,
+      canonicalFingerprint: headcanonMutationReceipts.canonicalFingerprint,
+      terminalOutcome: headcanonMutationReceipts.terminalOutcome,
+    })
+    .from(headcanonMutationReceipts)
+    .where(
+      and(
+        eq(headcanonMutationReceipts.actorScope, actorScope),
+        eq(headcanonMutationReceipts.mutationId, mutationId)
+      )
+    )
+    .for("update")
+  return recorded
+}
+
+async function insertReceipt<
+  QueryResult extends PgQueryResultHKT,
+  Schema extends Record<string, unknown>,
+>(
+  tx: DrizzleMutationTransaction<QueryResult, Schema>,
+  actorScope: string,
+  mutationId: string,
+  receipt: StoredReceipt
+): Promise<void> {
+  await tx.insert(headcanonMutationReceipts).values({
+    ...receipt,
+    actorScope,
+    mutationId,
+  })
+}
+
 /**
- * Creates the Postgres authority adapter around an interactive Drizzle client.
+ * Creates the Postgres {@link MutationAuthorityAdapter} for a Drizzle
+ * database. It requires an interactive transaction client.
  *
- * Each execution derives a trusted actor scope, acquires a transaction-scoped
- * advisory lock before receipt or application-row access, and runs the command
- * callback inside a transaction attempt. Duplicate mutation IDs return the
- * stored terminal outcome when canonical bytes match; a reused ID with
- * different bytes returns `mutation-id-reused`. PostgreSQL serialization,
- * deadlock, lock-timeout, and application-classified contention roll back the
- * attempt and retry from fresh state up to `maxAttempts`. The adapter requires
- * an interactive transaction client and does not decide actor identity,
- * authorization, domain semantics, or projection ownership.
+ * Receipts, replay, and contention reruns follow the
+ * {@link MutationAuthorityAdapter} rules. A transaction-scoped advisory lock
+ * on the actor scope and mutation ID serializes executions of one mutation.
+ * PostgreSQL serialization failure, deadlock, and lock-not-available errors,
+ * and errors that `isContentionError` marks, count as contention. A refused or
+ * denied command's writes roll back and its outcome is recorded. Any other
+ * error from a command or the database propagates from `execute` with no
+ * receipt.
  *
- * Every attempt runs at READ COMMITTED, whatever the database default. Under
- * REPEATABLE READ or SERIALIZABLE the snapshot would be taken by the lock
- * statement itself, before the lock is granted, so a duplicate delivery that
- * waited on the lock could not see the receipt its twin had just committed
- * and would run the command again. Commands guard their own writes with
- * compare-and-set and `throwMutationContention()` from `headcanon` instead.
+ * Every attempt runs at READ COMMITTED, whatever the database default. Guard
+ * writes with compare-and-set and call `throwMutationContention()` from
+ * `headcanon` when the guard fails. The adapter does not decide actor
+ * identity, authorization, or domain rules.
  *
- * @param options Interactive Drizzle client, trusted scope function, retry policy, and optional contention classification.
- * @returns A receipt-owning mutation authority with the database as preflight executor.
- * @throws Error when retry configuration is invalid or the database reports an unexpected failure.
+ * @param options The database, actor scope, and retry policy.
+ * @returns A mutation authority whose `preflight` executor is `options.db`.
+ * @throws Error when `maxAttempts` is not a positive integer.
  */
 export function createDrizzleMutationAuthority<
   QueryResult extends PgQueryResultHKT,
@@ -113,62 +201,42 @@ export function createDrizzleMutationAuthority<
     preflight: options.db,
     execute(request, run) {
       const actorScope = options.scope(request.actor)
+      const key = receiptKey(actorScope, request.mutationId)
 
       return retry(request.mutationId, () =>
         options.db.transaction(
           async (tx) => {
+            // Serialize executions of one receipt key before its receipt is read.
             await tx.execute(
-              sql`select pg_advisory_xact_lock(hashtextextended(${receiptKey(actorScope, request.mutationId)}, 0))`
+              sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`
             )
 
-            const [recorded] = await tx
-              .select({
-                protocol: headcanonMutationReceipts.protocol,
-                canonicalInvocation:
-                  headcanonMutationReceipts.canonicalInvocation,
-                canonicalFingerprint:
-                  headcanonMutationReceipts.canonicalFingerprint,
-                terminalOutcome: headcanonMutationReceipts.terminalOutcome,
-              })
-              .from(headcanonMutationReceipts)
-              .where(
-                and(
-                  eq(headcanonMutationReceipts.actorScope, actorScope),
-                  eq(headcanonMutationReceipts.mutationId, request.mutationId)
-                )
-              )
-              .for("update")
+            const recorded = await findReceipt(
+              tx,
+              actorScope,
+              request.mutationId
+            )
             if (recorded) return replayReceipt(recorded, request)
 
             const stamp = createStampAccumulator()
-            let attempted: Result<void, MutationAttemptFailure<Refusal>> = ok(
-              undefined
-            )
-            try {
-              await tx.transaction(async (attemptTx) => {
-                attempted = await run(attemptTx, stamp)
-                if (!attempted.ok) throw new RollBackAttempt()
-              })
-            } catch (error) {
-              if (!(error instanceof RollBackAttempt)) throw error
-            }
-
-            const { stored, terminal } = recordTerminalOutcome(
+            const attempted = await runAttemptInSavepoint(tx, run, stamp)
+            const { stored, terminal } = prepareTerminalOutcome(
               attempted,
               stamp,
               request.parseRefusal
             )
-            const receipt = mutationReceipt(request, stored)
-            await tx.insert(headcanonMutationReceipts).values({
-              ...receipt,
+            await insertReceipt(
+              tx,
               actorScope,
-              mutationId: request.mutationId,
-              terminalOutcome:
-                receipt.terminalOutcome as StoredMutationTerminalOutcome,
-            })
+              request.mutationId,
+              storedReceipt(request, stored)
+            )
 
             return ok(terminal)
           },
+          // A stricter level takes the snapshot at the lock statement, before
+          // the lock is granted, so a duplicate that waited could miss its
+          // twin's receipt and run the command again.
           { isolationLevel: "read committed" }
         )
       )
