@@ -1,7 +1,15 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { forbidden } from "next/navigation"
 import { err, ok, type Result } from "serializable-result"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  vi,
+} from "vitest"
 
 import { ablyAxisChannelName, ablyChannelNamespace } from "../ably/channels"
 import {
@@ -578,6 +586,63 @@ describe("Next mutation action", () => {
 
     expect(events).toEqual(["project", "update", "refresh", "publish"])
     expect(authority.read()).toBe(1)
+  })
+
+  it("expires and refreshes without publishing when it has no realtime transport", async () => {
+    const events: string[] = []
+    nextCache.updateTag.mockImplementation(() => events.push("update"))
+    nextCache.refresh.mockImplementation(() => events.push("refresh"))
+    const execute = createNextMutationAction({
+      protocol,
+      actor: () => "actor",
+      authority: createAuthority(),
+      commands: [bindMutation(increment, command())],
+    })
+
+    await expect(execute(envelope)).resolves.toMatchObject(
+      ok({ kind: "accepted" })
+    )
+
+    expect(events).toEqual(["update", "refresh"])
+  })
+
+  it("requires a publisher and its failure reporter together", () => {
+    const base = {
+      protocol,
+      actor: () => "actor",
+      authority: createAuthority(),
+      commands: [bindMutation(increment, command())],
+    } as const
+    // @ts-expect-error — a publisher needs a reporter for its failures.
+    createNextMutationAction({ ...base, invalidations: { publish: vi.fn() } })
+    // @ts-expect-error — a reporter without a publisher has nothing to report.
+    createNextMutationAction({ ...base, reportInvalidationFailure: vi.fn() })
+  })
+
+  // README, Drizzle section: an inline command gets `args` from its mutation
+  // but no context types, so commands are declared as `MutationCommand`s. If
+  // TypeScript starts inferring these, update the README.
+  it("infers an inline command's args but not its context", () => {
+    createNextMutationAction({
+      protocol,
+      actor: () => "actor",
+      authority: createAuthority(),
+      commands: [
+        bindMutation(increment, {
+          screen: ({ actor, executor, args }) => {
+            expectTypeOf(actor).toBeUnknown()
+            expectTypeOf(executor).toBeUnknown()
+            expectTypeOf(args.amount).toBeNumber()
+            return allowMutationScreening(null)
+          },
+          admit: ({ tx }) => {
+            expectTypeOf(tx).toBeUnknown()
+            return allowMutation(null)
+          },
+          execute: () => acceptMutation(),
+        }),
+      ],
+    })
   })
 
   it("gives screening and finalization separate copies of the arguments", async () => {

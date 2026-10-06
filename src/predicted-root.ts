@@ -151,6 +151,10 @@ export class TerminalDeliveryError extends Error {
  * wait the root reports `delivery: "uncertain"`, releases the Action, and
  * keeps the envelope for an exact-envelope retry; a response that arrives
  * later still settles the mutation.
+ *
+ * This bounds only the root's own Action. It cannot bound work that `send`
+ * itself parks in React: a Next Server Action call holds every transition in
+ * the app until its HTTP request ends (see `createNextPredictedRoot`).
  */
 export const DELIVERY_WAIT_MS = 10_000
 

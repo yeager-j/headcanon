@@ -44,10 +44,18 @@ jobs:
       # against them and the built package.
       - run: npm run check:fixture
 
-  # The real-router negative control: a mutation must canonize in place
-  # through the actual App Router. The package's jsdom suite cannot observe
-  # React's Action scheduling, so only this job can catch a held-open-Action
-  # deadlock. The fixture's authority is in memory and needs no database.
+  # The real-router suite, run against a production `next start`:
+  # - canonization: the golden path (`createNextPredictedRoot` in its
+  #   `action` form over a `createNextMutationAction` Server Action)
+  #   predicts, then canonizes in place through the actual App Router;
+  # - lifecycle: refusal, denial, uncertain delivery and its retry, a replay
+  #   conflict, a freshness stall, and the bound on a hung delivery;
+  # - react-physics: the React and Next transition behaviour the package
+  #   relies on or cannot change (a held Action parks RSC payloads and
+  #   navigation; a pending Server Action call holds every transition).
+  # The package's jsdom suite cannot observe React's Action scheduling or the
+  # App Router's action queue, so only this job can catch those regressions.
+  # The fixture's authority is in memory and needs no database.
   e2e:
     runs-on: ubuntu-latest
     steps:

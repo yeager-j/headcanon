@@ -62,7 +62,7 @@ export const applyNotesMutationAction = createNextMutationAction({
     scope: (actor) => actor.userId,
   }),
   commands: [bindMutation(renameNote, renameNoteCommand)], // screen / admit / execute / repeat-safe finalizeAccepted
-  invalidations: notesInvalidationPublisher,
+  invalidations: notesInvalidationPublisher, // omit both lines without realtime
   reportInvalidationFailure,
 })
 ```
@@ -156,7 +156,8 @@ milestones.
 Headcanon owns conventions only at framework seams it can determine safely. A
 generated Next Server Action uses the standard sender adapter; a Next RSC root
 uses the App Router refresh carrier with a 250 ms acceptance grace; omitting
-client invalidations means no realtime; and the Drizzle and Ably entries expose
+`invalidations`, on the client root or on the generated action, means no
+realtime; and the Drizzle and Ably entries expose
 their standard adapters. The explicit `send` and `refresh` form remains public
 for snapshot carriers, tests, and unusual delivery adapters.
 
@@ -269,9 +270,11 @@ queue condition, not a terminal mutation stage.
 
 Each delivery attempt holds a React Action open, so canon that rides back with
 the response cannot commit before its acceptance is recorded. React holds every
-other transition while an Action is open, so the hold is bounded: after
-`DELIVERY_WAIT_MS` (10 seconds) without an answer, delivery becomes uncertain
-and the Action ends. An ordinary throw from `send` also makes delivery
+other transition while an Action is open, so the root bounds its own hold:
+after `DELIVERY_WAIT_MS` (10 seconds) without an answer, delivery becomes
+uncertain and the Action ends. That bound covers only the root's Action; see
+[A Server Action that does not answer](#a-server-action-that-does-not-answer)
+for the hold that Next keeps. An ordinary throw from `send` also makes delivery
 uncertain. While the head is uncertain, the queue waits and every prediction
 stays rendered. `retryDelivery()` redelivers the queue head with the exact same
 envelope and mutation ID. An answer that arrives late, to the first attempt or
@@ -347,9 +350,32 @@ command's `finalizeAccepted` projection first, so the projection exists before
 any reader is told to reload; if the projection throws, the action still
 invalidates the commit and then rethrows. The separately
 named external-commit helpers preserve the Server Action versus Route Handler
-context distinction. Each binding requires an application-owned failure
+context distinction. Each publisher comes with an application-owned failure
 reporter; publication rejection and timeout are recorded there without changing
-the accepted outcome.
+the accepted outcome. The generated action takes neither when the application
+has no realtime transport.
+
+### A Server Action that does not answer
+
+`DELIVERY_WAIT_MS` does not bound a Next Server Action call. Next sends every
+call through the App Router's action queue, which sets the router state to a
+pending promise inside a transition until the HTTP response arrives. React
+renders all pending transitions together, so while one call is unanswered:
+
+- no transition in the app commits, even when no React Action is open;
+- the queue does not send the next Server Action call, so `retryDelivery()`
+  (and every other Server Action in the app) waits behind the unanswered call;
+- a navigation still proceeds: Next discards the pending call's router update
+  and runs the navigation at once.
+
+The root still reports `delivery: "uncertain"` after the wait and keeps every
+prediction rendered. A late acceptance or refusal still settles the mutation.
+Next has no public way to abort the call, so the package cannot end this hold.
+Bound it on the server: give the command's external calls and database waits
+(for example Postgres `lock_timeout` and `statement_timeout`) a deadline below
+the platform's request limit, so that every call answers. A call that ends in
+an error leaves delivery uncertain, and `retryDelivery()` then sends the same
+envelope.
 
 ## Ably invalidations
 
@@ -435,9 +461,28 @@ baseline SQL is checked in at `drizzle/0000_headcanon_mutation_receipts.sql` for
 migration review and fixtures, and a test fails if it drifts from the table
 definition. Receipts are written once; `created_at` is indexed for pruning.
 
-Commands infer their context when registered through `createNextMutationAction`.
-When a command or Store needs an explicit transaction type, use
-`DrizzleMutationTx<typeof db>` rather than hand-deriving it from the client type.
+Declare each command with its context types. `bindMutation` infers a
+command's `args` from the mutation, but not its `actor`, `executor`, or `tx`:
+written inline in the `commands` list, those parameters are `unknown`. Name
+the transaction as `DrizzleMutationTx<typeof db>` rather than hand-deriving it
+from the client type, and the screening executor as the authority's
+`preflight`:
+
+```ts
+const authority = createDrizzleMutationAuthority({ db, scope })
+
+const renameNoteCommand: MutationCommand<
+  typeof renameNote,
+  Actor,
+  (typeof authority)["preflight"],
+  DrizzleMutationTx<typeof db>,
+  RenameProjection,
+  RenameEvidence
+> = { screen, admit, execute }
+```
+
+`createNextMutationAction` then checks each declared command against its
+`actor` and `authority`.
 
 The adapter requires an interactive Postgres Drizzle client: for Neon, use the
 WebSocket `Pool` integration rather than the HTTP query client. It acquires a

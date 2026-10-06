@@ -18,7 +18,22 @@ import { expect, test, type Page } from "@playwright/test"
  *    root bounds each hold by `DELIVERY_WAIT_MS`.
  * 4. A pending Server Action call holds every transition until it responds,
  *    even with no Action open. So that bound frees the root's own hold but
- *    not the app: a Server Action that never answers still freezes it.
+ *    not the app: a Server Action that never answers still freezes it. The
+ *    mechanism is Next's, not React's Action entanglement: `callServer`
+ *    (next/dist/client/app-call-server.js) dispatches the call to the App
+ *    Router's action queue, whose `dispatchAction`
+ *    (next/dist/client/components/app-router-instance.js) sets the router
+ *    state to a pending promise inside `startTransition`; `useActionQueue`
+ *    reads that state with `use()`, so the router suspends in a transition
+ *    lane. React renders every pending transition lane as one batch, so no
+ *    transition commits until the call answers. The package cannot end that
+ *    hold: Next's `fetch` for the call takes no abort signal. README, "A
+ *    Server Action that does not answer", tells adopters to bound it on the
+ *    server instead.
+ * 5. The same queue is serial: a second Server Action call is not sent while
+ *    the first is unanswered, so a `retryDelivery()` waits too. A navigation
+ *    is not held: Next discards the pending call's router update and
+ *    navigates at once.
  */
 
 async function openProbe(page: Page): Promise<void> {
@@ -92,6 +107,8 @@ test("navigation is blocked while an Action is held open and proceeds on settlem
   await expect(page).toHaveURL("/")
 })
 
+// Pinned, not fixed: the hold is the App Router action queue's pending
+// router state (fact 4 above), which the package cannot abort.
 test("a pending Server Action call holds every transition until it responds, with no Action open", async ({
   page,
 }) => {
@@ -110,4 +127,31 @@ test("a pending Server Action call holds every transition until it responds, wit
   await page.request.post("/api/faults", { data: {} })
   await expect(page.getByTestId("log")).toContainText("bare:bare-1 accepted")
   await expect(page.getByTestId("bumps")).toHaveText("2")
+})
+
+test("a pending Server Action call delays the next call but not a navigation", async ({
+  page,
+}) => {
+  await openProbe(page)
+  const sent: string[] = []
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.headers()["next-action"]) {
+      sent.push(request.url())
+    }
+  })
+
+  await page.request.post("/api/faults", { data: { delivery: "hang" } })
+  await button(page, "send bare").click()
+  await expect.poll(() => sent.length).toBe(1)
+  await button(page, "send bare").click()
+  // Bounded wait, as above: an unqueued call leaves the page at once.
+  await page.waitForTimeout(1_000)
+  expect(sent).toHaveLength(1)
+
+  await page.getByRole("link", { name: "go home" }).click()
+  await expect(page).toHaveURL("/")
+  // The navigation discarded the hung call's router update; the queued call
+  // runs after it.
+  await expect.poll(() => sent.length).toBe(2)
+  await page.request.post("/api/faults", { data: {} })
 })

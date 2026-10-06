@@ -123,19 +123,30 @@ async function publishInvalidation(
   }
 }
 
+/** A realtime publisher and the sink for its failures; absent without realtime. */
+interface Publication {
+  readonly invalidations: InvalidationPublisher
+  readonly reportFailure: InvalidationPublicationFailureReporter
+}
+
 async function finalizeStamp(
   stamp: AcceptedStamp,
-  invalidations: InvalidationPublisher,
   expireAxis: ExpireAxis,
-  reportFailure: InvalidationPublicationFailureReporter,
-  refreshRoute?: () => void
+  refreshRoute: (() => void) | undefined,
+  publication: Publication | undefined
 ): Promise<void> {
   for (const [axis] of revisionEntries(stamp.revisions)) {
     expireAxis(await axisCacheTag(axis))
   }
 
   refreshRoute?.()
-  await publishInvalidation(stamp, invalidations, reportFailure)
+  if (publication) {
+    await publishInvalidation(
+      stamp,
+      publication.invalidations,
+      publication.reportFailure
+    )
+  }
 }
 
 /** Finalizes a non-protocol commit made inside a Server Action.
@@ -149,7 +160,10 @@ export function finalizeExternalActionCommit(
   invalidations: InvalidationPublisher,
   reportFailure: InvalidationPublicationFailureReporter
 ): Promise<void> {
-  return finalizeStamp(stamp, invalidations, updateTag, reportFailure, refresh)
+  return finalizeStamp(stamp, updateTag, refresh, {
+    invalidations,
+    reportFailure,
+  })
 }
 
 /** Finalizes a non-protocol commit without an invoking route to refresh.
@@ -165,9 +179,9 @@ export function announceExternalCommit(
 ): Promise<void> {
   return finalizeStamp(
     stamp,
-    invalidations,
     (tag) => revalidateTag(tag, { expire: 0 }),
-    reportFailure
+    undefined,
+    { invalidations, reportFailure }
   )
 }
 
@@ -431,6 +445,20 @@ function assertCompleteBindings(
 }
 
 /**
+ * A generated action's realtime publication: a publisher with its failure
+ * reporter, or neither when the application has no realtime transport.
+ */
+type ActionInvalidations =
+  | {
+      readonly invalidations: InvalidationPublisher
+      readonly reportInvalidationFailure: InvalidationPublicationFailureReporter
+    }
+  | {
+      readonly invalidations?: undefined
+      readonly reportInvalidationFailure?: undefined
+    }
+
+/**
  * Creates one Server Action from an exhaustive, definition-keyed command list.
  *
  * The returned action treats its argument as untrusted: it parses the envelope,
@@ -459,9 +487,11 @@ function assertCompleteBindings(
  * rethrows; a redelivery recovers the stored receipt and reruns the
  * projection, so accepted finalization is at-least-once. Publication failures
  * go only to the supplied reporter and do not turn an accepted mutation into a
- * rejection.
+ * rejection. Omit both `invalidations` and `reportInvalidationFailure` when
+ * the application has no realtime transport: the action then only expires
+ * tags and refreshes, and the router carries canon back.
  *
- * @param options Protocol, trusted actor, authority, exhaustive commands, invalidation publisher, and failure reporter.
+ * @param options Protocol, trusted actor, authority, exhaustive commands, and optionally an invalidation publisher with its failure reporter.
  * @returns A protocol-branded Server Action returning terminal outcomes (`accepted`, `refused`, or `denied`) or typed executor failures.
  * @throws Trusted actor or command callbacks may throw unexpected application/framework failures.
  */
@@ -474,21 +504,21 @@ export function createNextMutationAction<
   Actor,
   Preflight,
   const Commands extends readonly AnyMutationBinding[],
->(options: {
-  readonly protocol: Protocol
-  readonly actor: () => Actor | Promise<Actor>
-  readonly authority: MutationAuthorityAdapter<
-    Transaction,
-    Actor,
-    unknown,
-    Preflight
-  >
-  readonly commands: Commands &
-    CompleteBindings<Protocol, Commands> &
-    CompatibleBindings<Commands, Actor, Preflight, Transaction>
-  readonly invalidations: InvalidationPublisher
-  readonly reportInvalidationFailure: InvalidationPublicationFailureReporter
-}) {
+>(
+  options: {
+    readonly protocol: Protocol
+    readonly actor: () => Actor | Promise<Actor>
+    readonly authority: MutationAuthorityAdapter<
+      Transaction,
+      Actor,
+      unknown,
+      Preflight
+    >
+    readonly commands: Commands &
+      CompleteBindings<Protocol, Commands> &
+      CompatibleBindings<Commands, Actor, Preflight, Transaction>
+  } & ActionInvalidations
+) {
   type Refusal = MutationRefusalOf<BoundMutation<Commands>>
   type Terminal = MutationTerminalOutcome<Refusal>
 
@@ -570,10 +600,16 @@ export function createNextMutationAction<
         projection: screening.projection,
       })
     } finally {
-      await finalizeExternalActionCommit(
+      await finalizeStamp(
         stamp,
-        options.invalidations,
-        options.reportInvalidationFailure
+        updateTag,
+        refresh,
+        options.invalidations === undefined
+          ? undefined
+          : {
+              invalidations: options.invalidations,
+              reportFailure: options.reportInvalidationFailure,
+            }
       )
     }
     return outcome
