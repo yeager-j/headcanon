@@ -48,8 +48,8 @@
       "default": "./dist/next/server.js"
     },
     "./react": {
-      "types": "./dist/react.d.ts",
-      "default": "./dist/react.js"
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
     },
     "./testing": {
       "types": "./dist/testing/index.d.ts",

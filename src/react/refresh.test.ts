@@ -6,7 +6,7 @@ import { useSyncExternalStore } from "react"
 import { ok, type Result } from "serializable-result"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { covers } from "./core/revisions"
+import { covers } from "../core/revisions"
 import {
   acceptedStamp,
   axisId,
@@ -22,15 +22,17 @@ import {
   type InvalidationSubscription,
   type MutationEnvelope,
   type Revision,
-} from "./index"
-import { ROUTER_ACCEPTANCE_GRACE_MS } from "./next/client"
+} from "../index"
+import { ROUTER_ACCEPTANCE_GRACE_MS } from "../next/client"
+import { createInMemoryInvalidationAdapter } from "../testing/index"
+import { verifyRefreshContract } from "../testing/react"
 import {
   createObservedRoot,
   createPredictedRoot,
   useSnapshotRefresh,
   type PredictedRootRecoveryListeners,
   type RefreshAdapter,
-} from "./react"
+} from "./index"
 import {
   SNAPSHOT_ACCEPTANCE_GRACE_MS,
   UNCOVERED_REFRESH_RETRY_MS,
@@ -38,8 +40,6 @@ import {
   type AcceptanceSource,
   type IncorporationStatus,
 } from "./refresh"
-import { createInMemoryInvalidationAdapter } from "./testing/index"
-import { verifyRefreshContract } from "./testing/react"
 
 type TestError = { readonly code: "refused" }
 type AddArgs = { readonly amount: number }

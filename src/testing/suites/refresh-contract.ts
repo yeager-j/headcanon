@@ -13,7 +13,7 @@ import {
   useIncorporation,
   type AcceptanceSource,
   type RefreshAdapter,
-} from "../../refresh"
+} from "../../react/refresh"
 import type { ContractCase } from "./contract-case"
 
 /** Refresh carrier fixture used by reusable stall-state assertions. */

@@ -1,96 +1,44 @@
 "use client"
 
-// The predicted-root implementation. Not a package entry: `headcanon/react`
-// and `headcanon/next/client` build their public factories on
-// `createPredictedRootHook`, and only the Next binding supplies a
-// control-flow classifier.
-import {
-  startTransition,
-  useCallback,
-  useEffect,
-  useEffectEvent,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-} from "react"
+// The mutation ledger of one predicted root: the delivery queue, the receipts,
+// and the replay conflicts. Not a package entry; `./predicted-root` mounts one
+// store per root and renders its snapshot.
+import { startTransition } from "react"
 import { err, ok, type Result } from "serializable-result"
 
-import type { MutationEnvelope, MutationExecutorError } from "./core/authority"
-import {
-  findMutation,
-  type AnyMutationDefinition,
-  type MutationContext,
-  type MutationDefinition,
-  type MutationInvocation,
-  type MutationRefusalOf,
-  type ProtocolDefinition,
-  type ProtocolInvocation,
-} from "./core/protocol"
+import type { MutationEnvelope, MutationExecutorError } from "../core/authority"
 import {
   covers,
   type AcceptedStamp,
-  type Canon,
   type RevisionVector,
-} from "./core/revisions"
-import type {
-  DeliveryRecovery,
-  FreshnessRecovery,
-  MutationLifecycleError,
-  MutationReceipt,
-  MutationStageListeners,
-  PredictedRoot,
-  PredictedRootHook,
-  PredictedRootOptions,
-  PredictedRootRecoveryListeners,
-  ProtocolPredictedRoot,
-  ReplayConflict,
-} from "./react"
-import { useIncorporation } from "./refresh"
+} from "../core/revisions"
 
-/** The mutation union a protocol registers. */
-export type MutationOf<Protocol> =
-  Protocol extends ProtocolDefinition<string, infer Mutations>
-    ? Mutations[number]
-    : never
+/** Terminal lifecycle failures surfaced by a predicted root's receipts. */
+export type MutationLifecycleError<Error> =
+  | { readonly kind: "domain"; readonly error: Error }
+  | { readonly kind: "replay-refused"; readonly error: Error }
+  | { readonly kind: "delivery-cancelled" }
+  | TerminalDeliveryFailure
+  | {
+      readonly kind: "root-unmounted"
+      readonly outcome: "unknown" | "accepted"
+    }
 
-// Both extractors re-alias the mutation union through `extends infer` so the
-// conditional distributes per member. Matching the whole union against one
-// `MutationDefinition<...>` fails inference as soon as a protocol registers
-// mutations with different argument schemas (the schema sits in both co- and
-// contravariant positions), silently collapsing State and Error to `never`.
+/** Independent acceptance and canonization milestones for one mutation. */
+export interface MutationReceipt<Error> {
+  readonly id: string
+  readonly accepted: Promise<
+    Result<AcceptedStamp, MutationLifecycleError<Error>>
+  >
+  readonly canonized: Promise<Result<void, MutationLifecycleError<Error>>>
+}
 
-/** The one state type every mutation of a protocol predicts. */
-export type StateOf<Protocol> =
-  MutationOf<Protocol> extends infer Mutation
-    ? Mutation extends MutationDefinition<
-        string,
-        infer _Schema,
-        infer State,
-        infer _Error,
-        infer _Refusal
-      >
-      ? State
-      : never
-    : never
-
-/**
- * A protocol's internal ledger error union: predictor errors plus
- * per-mutation receipt refusals. The public mutate call correlates this union
- * back to the selected invocation.
- */
-export type ErrorOf<Protocol> =
-  | (MutationOf<Protocol> extends infer Mutation
-      ? Mutation extends MutationDefinition<
-          string,
-          infer _Schema,
-          infer _State,
-          infer Error,
-          infer _Refusal
-        >
-        ? Error
-        : never
-      : never)
-  | MutationRefusalOf<MutationOf<Protocol>>
+/** A pending invocation jossed while replaying newer authoritative canon. */
+export interface ReplayConflict<Invocation, Error> {
+  readonly mutationId: string
+  readonly invocation: Invocation
+  readonly error: Error
+}
 
 /**
  * The `send` adapter throws this when the authority reported **no terminal
@@ -227,7 +175,7 @@ const DELIVERY_TRANSITIONS: Readonly<
   accepted: [],
 }
 
-interface LedgerEntry<Invocation> {
+export interface LedgerEntry<Invocation> {
   readonly envelope: MutationEnvelope<Invocation>
   readonly delivery: DeliveryState
   /** A replay refused this prediction; it no longer renders. */
@@ -267,7 +215,7 @@ interface EntryLifetime<Error> {
   retryTimer: ReturnType<typeof setTimeout> | null
 }
 
-function queueHead<Invocation>(
+export function queueHead<Invocation>(
   entries: readonly LedgerEntry<Invocation>[]
 ): LedgerEntry<Invocation> | undefined {
   return entries.find((entry) => entry.delivery.kind !== "accepted")
@@ -279,7 +227,7 @@ function queueHead<Invocation>(
  * `useSyncExternalStore`; every change goes through `advance` (delivery
  * transitions) or `settle` (terminal outcomes).
  */
-function createLedgerStore<Invocation, Error>(
+export function createLedgerStore<Invocation, Error>(
   send: (
     envelope: MutationEnvelope<Invocation>
   ) => Promise<Result<AcceptedStamp, Error>>,
@@ -640,271 +588,5 @@ function createLedgerStore<Invocation, Error>(
         if (!active) dispose()
       })
     },
-  }
-}
-
-interface RuntimeMutation<State, Error> {
-  readonly predict: (
-    state: State,
-    args: unknown,
-    context: MutationContext
-  ) => Result<State, Error>
-}
-
-interface ReplayRefusal<Error> {
-  readonly mutationId: string
-  readonly error: Error
-}
-
-interface Projection<State, Error> {
-  readonly value: State
-  readonly refusals: readonly ReplayRefusal<Error>[]
-}
-
-function mutationContext(mutationId: string): MutationContext {
-  return Object.freeze({ mutationId })
-}
-
-function freezeEnvelope<Invocation>(
-  protocol: string,
-  mutationId: string,
-  invocation: Invocation
-): MutationEnvelope<Invocation> {
-  return Object.freeze({
-    protocol,
-    mutationId,
-    invocation: structuredClone(invocation),
-  })
-}
-
-/**
- * Merges per-call or per-mount listeners over factory defaults, one stage or
- * condition at a time.
- */
-function withDefaults<Listeners extends object>(
-  overrides: Listeners | undefined,
-  defaults: Listeners | undefined
-): Partial<Listeners> {
-  const merged: Partial<Listeners> = { ...defaults }
-  if (!overrides) return merged
-  for (const key of Object.keys(overrides) as (keyof Listeners)[]) {
-    if (overrides[key] !== undefined) merged[key] = overrides[key]
-  }
-  return merged
-}
-
-type RecoverySource = Pick<
-  PredictedRoot<unknown, unknown, unknown>,
-  "status" | "retryDelivery" | "retryRefresh"
->
-
-function useDegradedStateListeners(
-  root: RecoverySource,
-  listeners: Pick<
-    PredictedRootRecoveryListeners<unknown, unknown>,
-    "onDeliveryUncertain" | "onFreshnessStalled"
-  >
-): void {
-  const enterUncertainDelivery = useEffectEvent(() => {
-    const recovery: DeliveryRecovery = { retry: root.retryDelivery }
-    return listeners.onDeliveryUncertain?.(recovery)
-  })
-  const handlesUncertainDelivery = listeners.onDeliveryUncertain !== undefined
-  useEffect(() => {
-    if (!handlesUncertainDelivery || root.status.delivery !== "uncertain") {
-      return
-    }
-    return enterUncertainDelivery()
-  }, [handlesUncertainDelivery, root.retryDelivery, root.status.delivery])
-
-  const enterStalledFreshness = useEffectEvent(() => {
-    const status = root.status
-    if (status.freshness !== "stalled") return
-    const recovery: FreshnessRecovery = {
-      retry: root.retryRefresh,
-      reason: status.stallReason,
-      missingAxes: status.missingAxes,
-    }
-    return listeners.onFreshnessStalled?.(recovery)
-  })
-  const handlesStalledFreshness = listeners.onFreshnessStalled !== undefined
-  useEffect(() => {
-    if (!handlesStalledFreshness || root.status.freshness !== "stalled") {
-      return
-    }
-    return enterStalledFreshness()
-  }, [handlesStalledFreshness, root.retryRefresh, root.status.freshness])
-}
-
-/**
- * Builds a predicted-root hook. `headcanon/react` passes a classifier that
- * classifies nothing; the Next binding passes `unstable_rethrow`.
- * @param options Protocol, delivery, refresh, invalidation, and listener configuration.
- * @param classifyDeliveryError Throws when a delivery error is framework control flow.
- * @returns The predicted-root hook.
- */
-export function createPredictedRootHook<
-  const Protocol extends ProtocolDefinition<
-    string,
-    readonly AnyMutationDefinition[]
-  >,
->(
-  options: PredictedRootOptions<Protocol>,
-  classifyDeliveryError: (error: unknown) => void
-): PredictedRootHook<Protocol> {
-  type State = StateOf<Protocol>
-  type Invocation = ProtocolInvocation<Protocol>
-  type Error = ErrorOf<Protocol>
-
-  const runtimeInvocation = (
-    invocation: Invocation
-  ): MutationInvocation<string, unknown> =>
-    invocation as MutationInvocation<string, unknown>
-
-  const predict = (
-    state: State,
-    envelope: MutationEnvelope<Invocation>
-  ): Result<State, Error> => {
-    const invocation = runtimeInvocation(envelope.invocation)
-    const mutation = findMutation(
-      options.protocol,
-      invocation.name
-    ) as unknown as RuntimeMutation<State, Error>
-    return mutation.predict(
-      state,
-      invocation.args,
-      mutationContext(envelope.mutationId)
-    )
-  }
-
-  /**
-   * The rendered value: every live prediction folded over canon in
-   * invocation order. An accepted mutation stays predicted until this canon
-   * covers its stamp — however long the carrier takes — and then is
-   * identity, so the render that delivers covering canon never applies it
-   * twice.
-   */
-  const project = (
-    canon: Canon<State>,
-    entries: readonly LedgerEntry<Invocation>[]
-  ): Projection<State, Error> => {
-    let value = canon.value
-    const refusals: ReplayRefusal<Error>[] = []
-    for (const entry of entries) {
-      if (entry.conflicted) continue
-      if (
-        entry.delivery.kind === "accepted" &&
-        covers(canon.revisions, entry.delivery.stamp.revisions)
-      ) {
-        continue
-      }
-      const predicted = predict(value, entry.envelope)
-      if (predicted.ok) value = predicted.value
-      else
-        refusals.push({
-          mutationId: entry.envelope.mutationId,
-          error: predicted.error,
-        })
-    }
-    return { value, refusals }
-  }
-
-  return function usePredictedRoot({ canon, recoveryListeners }) {
-    const [store] = useState(() =>
-      createLedgerStore<Invocation, Error>(options.send, classifyDeliveryError)
-    )
-    const ledger = useSyncExternalStore(
-      store.subscribe,
-      store.getSnapshot,
-      store.getSnapshot
-    )
-    const useRefresh = options.refresh
-    const refresh = useRefresh()
-    // The ledger is the one authority for accepted stamps; incorporation
-    // follows it rather than keeping its own.
-    const incorporation = useIncorporation(
-      canon,
-      refresh,
-      options.invalidations,
-      store
-    )
-    const projection = useMemo(
-      () => project(canon, ledger.entries),
-      [canon, ledger.entries]
-    )
-    const listeners = withDefaults(recoveryListeners, options.recoveryListeners)
-
-    useEffect(() => {
-      store.activate()
-      return store.deactivate
-    }, [store])
-
-    // Reconcile this render's projection, then deliver. Refusals first, so a
-    // jossed envelope that never left is retracted before it could be sent.
-    const surfaceConflict = useEffectEvent(
-      (conflict: ReplayConflict<Invocation, Error>) =>
-        listeners.onConflict?.(conflict)
-    )
-    useEffect(() => {
-      for (const refusal of projection.refusals) {
-        const conflict = store.recordConflict(refusal.mutationId, refusal.error)
-        if (conflict) surfaceConflict(conflict)
-      }
-      store.canonize(canon.revisions)
-      store.deliverHead()
-    }, [canon, projection, store])
-
-    const mutate = useCallback(
-      (
-        invocation: Invocation,
-        stageOverrides?: MutationStageListeners<Error>
-      ): Result<MutationReceipt<Error>, Error> => {
-        const stages = withDefaults(stageOverrides, options.mutationListeners)
-        const envelope = freezeEnvelope(
-          options.protocol.id,
-          globalThis.crypto.randomUUID(),
-          invocation
-        )
-        const predicted = predict(projection.value, envelope)
-        if (!predicted.ok) {
-          const result = err<Error>(predicted.error)
-          stages.onPrediction?.(result)
-          return result
-        }
-
-        const receipt = store.enqueue(envelope)
-        if (stages.onAcceptance) {
-          void receipt.accepted.then(stages.onAcceptance)
-        }
-        if (stages.onCanonization) {
-          void receipt.canonized.then(stages.onCanonization)
-        }
-        const result = ok(receipt)
-        stages.onPrediction?.(result)
-        return result
-      },
-      [projection.value, store]
-    )
-
-    const head = queueHead(ledger.entries)
-    const root: ProtocolPredictedRoot<Protocol> = {
-      value: projection.value,
-      mutate: mutate as ProtocolPredictedRoot<Protocol>["mutate"],
-      retryDelivery: store.retryDelivery,
-      retryRefresh: incorporation.retryRefresh,
-      status: {
-        pending: ledger.entries.length,
-        delivery:
-          head === undefined
-            ? "idle"
-            : head.delivery.kind === "uncertain"
-              ? "uncertain"
-              : "sending",
-        ...incorporation.status,
-      },
-      conflicts: ledger.conflicts,
-    }
-    useDegradedStateListeners(root, listeners)
-    return root
   }
 }
