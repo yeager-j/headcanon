@@ -30,14 +30,11 @@ export {
   type ProtocolInvocation,
 } from "./core/protocol"
 export {
-  canonicalInvocation,
+  prepareCanonicalInvocation,
   type CanonicalInvocation,
   type CanonicalInvocationError,
   type PreparedCanonicalInvocation,
 } from "./core/canonical-invocation"
-// `createStampAccumulator` is framework-independent: it is the only way a
-// custom `MutationAuthorityAdapter` mints the accepted stamp for an attempt.
-// Commands for any adapter call `throwMutationContention` on a lost race.
 export {
   createStampAccumulator,
   MutationContentionError,

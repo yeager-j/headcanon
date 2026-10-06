@@ -3,15 +3,15 @@ import { err, ok, type Result } from "serializable-result"
 
 import { hasExactKeys, isPlainRecord } from "./admission"
 import {
-  canonicalInvocation,
   canonicalJson,
+  prepareCanonicalInvocation,
   type CanonicalInvocation,
   type CanonicalInvocationError,
 } from "./canonical-invocation"
 import {
   findMutation,
   type AnyMutationDefinition,
-  type ProtocolDefinition,
+  type AnyProtocolDefinition,
 } from "./protocol"
 import {
   acceptedStamp,
@@ -32,23 +32,29 @@ export interface MutationEnvelope<Invocation> {
 
 /** The attempt-local authority for constructing a complete accepted vector. */
 export interface StampAccumulator {
-  /** Validates and records one persisted revision for this authority attempt. */
+  /**
+   * Records one persisted revision for this authority attempt. Recording the
+   * same revision again is allowed.
+   * @throws Error when `revision` is not a non-negative safe integer, or is lower than a revision already recorded for `axis` in this attempt.
+   */
   record(axis: AxisId, revision: number): void
 }
 
-/** A stamp accumulator that can publish the complete vector for its attempt. */
+/** A stamp accumulator that also returns the accepted stamp for its attempt. */
 export interface ReadableStampAccumulator extends StampAccumulator {
+  /** Returns a frozen stamp that holds every revision recorded so far in this attempt. */
   accepted(): AcceptedStamp
 }
 
 /**
- * Creates one isolated revision vector for a single authority attempt.
+ * Creates one isolated revision vector for a single authority attempt. A
+ * custom {@link MutationAuthorityAdapter} uses it to mint the accepted stamp
+ * for each attempt.
  *
  * Commands call `record` once for every persisted revision they advance. The
  * accumulator rejects invalid or regressing coordinates and `accepted()`
  * returns the complete vector for the attempt. The authority must discard it
- * when a transaction rolls back; it is deliberately not a process-wide
- * revision store.
+ * when a transaction rolls back.
  *
  * @returns A fresh accumulator whose accepted stamp contains only this attempt's records.
  */
@@ -76,8 +82,7 @@ export function createStampAccumulator(): ReadableStampAccumulator {
 /**
  * How a command attempt ends without acceptance: a public refusal, recorded
  * and replayed to the caller, or a private denial that is never exposed as a
- * refusal. A failed attempt is also its terminal outcome, so both stages use
- * one vocabulary.
+ * refusal.
  */
 export type MutationAttemptFailure<Refusal> =
   | { readonly kind: "refused"; readonly error: Refusal }
@@ -88,16 +93,22 @@ export type MutationTerminalOutcome<Refusal> =
   | { readonly kind: "accepted"; readonly stamp: AcceptedStamp }
   | MutationAttemptFailure<Refusal>
 
+/** The JSON form of a {@link MutationTerminalOutcome}, as an adapter stores it in a receipt. */
+export type StoredTerminalOutcome =
+  | {
+      readonly kind: "accepted"
+      readonly stamp: { readonly revisions: unknown }
+    }
+  | { readonly kind: "refused"; readonly error: unknown }
+  | { readonly kind: "denied" }
+
 declare const protocolIdentity: unique symbol
 
 /**
- * Phantom protocol identity for a generated executor's outcome. A generated
- * Server Action admits `unknown` envelopes, so its parameter carries no
- * protocol evidence, and an app wrapper preserves only the return type —
- * without this tag, two protocols with compatible refusal unions would let a
- * client bind the wrong generated action and only fail at runtime. The
- * property is optional and never present at runtime; it exists purely so
- * structural assignability compares protocol ids.
+ * Phantom type tag that makes outcomes of different protocols unassignable to
+ * each other, even when their refusal types match. A wrapper that returns a
+ * tagged outcome must keep the tag in its return type. The property is
+ * optional and never present at runtime.
  */
 export type ProtocolIdentity<ProtocolId extends string> = {
   readonly [protocolIdentity]?: ProtocolId
@@ -128,8 +139,8 @@ export interface MutationAuthorityRequest<Actor, Refusal = unknown> {
  *
  * The callback may run more than once. An adapter must discard both its
  * transactional effects and its stamp accumulator whenever an attempt rolls
- * back, and must rerun an attempt that throws contention (see
- * {@link isMutationContention}).
+ * back, and must rerun an attempt that throws {@link MutationContentionError},
+ * or a store error that signals a lost race.
  */
 export interface MutationAuthorityAdapter<
   Transaction,
@@ -143,6 +154,19 @@ export interface MutationAuthorityAdapter<
    * and reading through it claims no receipt.
    */
   readonly preflight: Preflight
+  /**
+   * Runs one request under its receipt key: the actor's scope and the
+   * mutation ID. Calls with one key run one at a time; calls with different
+   * keys may interleave.
+   *
+   * If a receipt is already recorded under the key, returns its outcome when
+   * the request's canonical identity matches, or `mutation-id-reused` when it
+   * does not. Otherwise calls `run` once per attempt, each time with a fresh
+   * transaction and a fresh {@link createStampAccumulator} accumulator,
+   * records the terminal outcome, and returns it. Returns `contention` when
+   * every attempt the adapter allows ends in contention.
+   * @throws What `run` throws, other than contention; and an Error when a refusal must be recorded or replayed and the request has no `parseRefusal`.
+   */
   execute(
     request: MutationAuthorityRequest<Actor, Refusal>,
     run: (
@@ -164,6 +188,7 @@ export class MutationContentionError extends Error {
 
 /**
  * Rolls the current attempt back so the authority can retry from current state.
+ * Call it from a command when a guarded write loses a race.
  * @returns Never; throws transaction-control-flow contention.
  * @throws {@link MutationContentionError} to request an authority retry.
  */
@@ -239,24 +264,24 @@ export function receiptKey(scope: string, mutationId: string): string {
 }
 
 /** One recorded receipt, in the form every adapter stores. */
-export interface MutationReceipt {
+export interface StoredReceipt {
   readonly protocol: string
   readonly canonicalInvocation: string
   readonly canonicalFingerprint: string
-  /** The JSON form produced by {@link recordTerminalOutcome}. */
-  readonly terminalOutcome: unknown
+  /** The JSON form produced by {@link prepareTerminalOutcome}. */
+  readonly terminalOutcome: StoredTerminalOutcome
 }
 
 /**
  * Builds the receipt to store for a request's terminal outcome.
  * @param request The request whose identity the receipt records.
- * @param terminalOutcome The stored JSON form from {@link recordTerminalOutcome}.
+ * @param terminalOutcome The stored JSON form from {@link prepareTerminalOutcome}.
  * @returns The receipt fields every adapter stores.
  */
-export function mutationReceipt(
+export function storedReceipt(
   request: MutationAuthorityRequest<unknown, unknown>,
-  terminalOutcome: unknown
-): MutationReceipt {
+  terminalOutcome: StoredTerminalOutcome
+): StoredReceipt {
   return {
     protocol: request.protocol,
     canonicalInvocation: request.canonical.json,
@@ -275,7 +300,7 @@ export function mutationReceipt(
  * @throws Error when the recorded outcome is malformed, or holds a refusal that the request cannot parse.
  */
 export function replayReceipt<Refusal>(
-  receipt: MutationReceipt,
+  receipt: StoredReceipt,
   request: MutationAuthorityRequest<unknown, Refusal>
 ): Result<MutationTerminalOutcome<Refusal>, MutationAuthorityAdapterError> {
   if (
@@ -300,13 +325,13 @@ function parseStoredOutcome<Refusal>(
     if (!hasExactKeys(value, ["kind", "stamp"])) {
       throw new Error("Invalid accepted mutation receipt")
     }
-    const stamp = acceptedStamp(value.stamp)
-    if (!stamp.ok) {
+    const parsedStamp = acceptedStamp(value.stamp)
+    if (!parsedStamp.ok) {
       throw new Error(
-        `Invalid accepted mutation receipt stamp (${stamp.error.reason})`
+        `Invalid accepted mutation receipt stamp (${parsedStamp.error.reason})`
       )
     }
-    return Object.freeze({ kind: "accepted", stamp: stamp.value })
+    return Object.freeze({ kind: "accepted", stamp: parsedStamp.value })
   }
 
   if (value.kind === "refused" && hasExactKeys(value, ["kind", "error"])) {
@@ -338,12 +363,12 @@ function parseStoredOutcome<Refusal>(
  * @returns The terminal outcome and its JSON form for the receipt.
  * @throws Error when the outcome is not JSON serializable, or holds a refusal that cannot be parsed.
  */
-export function recordTerminalOutcome<Refusal>(
+export function prepareTerminalOutcome<Refusal>(
   attempted: Result<void, MutationAttemptFailure<Refusal>>,
   stamp: ReadableStampAccumulator,
   parseRefusal?: (value: unknown) => Refusal
 ): {
-  readonly stored: unknown
+  readonly stored: StoredTerminalOutcome
   readonly terminal: MutationTerminalOutcome<Refusal>
 } {
   const outcome: MutationTerminalOutcome<Refusal> = attempted.ok
@@ -353,7 +378,7 @@ export function recordTerminalOutcome<Refusal>(
   if (json === undefined) {
     throw new Error("Mutation receipt outcome is not JSON serializable")
   }
-  const stored: unknown = JSON.parse(json)
+  const stored: StoredTerminalOutcome = JSON.parse(json)
   return { stored, terminal: parseStoredOutcome(stored, parseRefusal) }
 }
 
@@ -400,7 +425,7 @@ const UUID_PATTERN =
 
 function parseEnvelope(
   value: unknown,
-  protocol: ProtocolDefinition<string, readonly AnyMutationDefinition[]>
+  protocol: AnyProtocolDefinition
 ): Result<ParsedEnvelope, MutationExecutorError> {
   if (!isPlainRecord(value)) {
     return err({ code: "invalid-envelope", reason: "not-plain-object" })
@@ -458,10 +483,7 @@ const UNPARSED_ARGUMENTS_ISSUE: StandardSchemaV1.Issue = Object.freeze({
  * @returns A prepared request or a typed admission/canonicalization failure.
  */
 export async function prepareMutationRequest<
-  const Protocol extends ProtocolDefinition<
-    string,
-    readonly AnyMutationDefinition[]
-  >,
+  const Protocol extends AnyProtocolDefinition,
 >(
   protocol: Protocol,
   envelope: unknown
@@ -483,7 +505,7 @@ export async function prepareMutationRequest<
     name: definition.name,
     args: parsedArguments.value,
   }
-  const prepared = await canonicalInvocation(protocol.id, invocation)
+  const prepared = await prepareCanonicalInvocation(protocol.id, invocation)
   if (!prepared.ok) {
     return err({ code: "canonical-invocation", error: prepared.error })
   }

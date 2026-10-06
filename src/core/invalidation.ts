@@ -13,6 +13,10 @@ import {
 
 /** One singleton revision notification on a globally stable axis. */
 export interface AxisInvalidation {
+  /**
+   * ID of the publication that produced this entry; every entry fanned out
+   * from one accepted stamp shares it.
+   */
   readonly eventId: string
   readonly axis: AxisId
   readonly revision: Revision
@@ -88,12 +92,22 @@ export interface InvalidationSubscription {
 export interface InvalidationAdapter {
   /** Status a subscription made now starts in; read at subscribe time. */
   readonly initialStatus: InvalidationStatus
+  /** Subscribes to `subscription.axes` and returns the function that ends the subscription. */
   subscribe(subscription: InvalidationSubscription): () => void
 }
 
 /** Initialization and diagnostics supplied to the lazy transport adapter. */
 export interface LazyInvalidationAdapterOptions {
+  /**
+   * Creates the transport. Called at most once, on the first subscription.
+   * Resolve `null` when no transport is available.
+   */
   readonly initialize: () => Promise<InvalidationAdapter | null>
+  /**
+   * Receives the error when initialization fails: `initialize` throws or
+   * rejects, or forwarding a buffered subscription to the new transport
+   * throws. Not called when `initialize` resolves `null`.
+   */
   readonly onInitializationError?: (error: unknown) => void
 }
 
@@ -124,8 +138,7 @@ export function createLazyInvalidationAdapter(
   let inner: InvalidationAdapter | null = null
   const buffered = new Set<BufferedSubscription>()
 
-  const becomeUnavailable = (error?: unknown): void => {
-    if (error !== undefined) options.onInitializationError?.(error)
+  const becomeUnavailable = (): void => {
     state = "unavailable"
     for (const entry of buffered) {
       if (!entry.cancelled) entry.subscription.onStatusChange("unavailable")
@@ -154,7 +167,8 @@ export function createLazyInvalidationAdapter(
       }
       buffered.clear()
     } catch (error) {
-      becomeUnavailable(error)
+      if (error !== undefined) options.onInitializationError?.(error)
+      becomeUnavailable()
     }
   }
 
@@ -206,7 +220,13 @@ export function createNoRealtimeInvalidationAdapter(): InvalidationAdapter {
 
 /** Timing and visibility policy for degraded invalidation polling. */
 export interface PollingFallbackOptions {
+  /** Milliseconds between gap reports while the primary is degraded; finite and positive. */
   readonly intervalMs: number
+  /**
+   * Whether to skip gap reports while the document is hidden, and report one
+   * gap when it becomes visible again while polling. Defaults to `true`. Has
+   * no effect where `document` is undefined.
+   */
   readonly pauseWhenHidden?: boolean
 }
 
@@ -215,19 +235,14 @@ function pollingStatus(status: InvalidationStatus): InvalidationStatus {
 }
 
 /**
- * Preserves bounded liveness through the subscribed root's existing refresh
- * path whenever its primary invalidation transport is unavailable.
+ * Wraps an invalidation adapter so a root keeps refreshing while push delivery
+ * is degraded.
  *
- * The wrapper reports `polling` while the primary adapter is disabled,
- * reauthorizing, or unavailable. At the configured interval it reports a
- * subscription gap (`onSubscriptionGap`): while the primary is degraded,
- * invalidations may have been missed, which is exactly what a gap means, so
- * the root treats each tick like any other gap. It stops the timer on
- * unsubscribe and
- * can pause while the document is hidden. When the primary transport becomes
- * active, polling stops and the original status is forwarded. This is a
- * liveness fallback, not a second data source: the root still obtains state
- * only through its existing refresh carrier.
+ * While the primary reports `disabled`, `reauthorizing`, or `unavailable`, the
+ * wrapper reports `polling` and calls `onSubscriptionGap` every `intervalMs`,
+ * so the root refreshes through its usual carrier. When the primary reports
+ * `active`, polling stops and the primary's status is forwarded. Unsubscribing
+ * stops the timer.
  *
  * @param primary Push invalidation adapter to wrap.
  * @param options Polling interval and visibility policy.
@@ -249,14 +264,15 @@ export function withPollingFallback(
       return pollingStatus(primary.initialStatus)
     },
     subscribe(subscription) {
+      const watchesVisibility =
+        pauseWhenHidden && typeof document !== "undefined"
       let polling = isDegradedInvalidationStatus(primary.initialStatus)
       let stopped = false
       let interval: ReturnType<typeof setInterval> | null = null
 
-      const hidden = () =>
-        pauseWhenHidden &&
-        typeof document !== "undefined" &&
-        document.visibilityState === "hidden"
+      const pausedWhileHidden = () =>
+        watchesVisibility && document.visibilityState === "hidden"
+      const mayPoll = () => !stopped && polling && !pausedWhileHidden()
 
       const stopInterval = () => {
         if (interval === null) return
@@ -265,13 +281,11 @@ export function withPollingFallback(
       }
 
       const requestRefresh = () => {
-        if (!stopped && polling && !hidden()) {
-          subscription.onSubscriptionGap?.()
-        }
+        if (mayPoll()) subscription.onSubscriptionGap?.()
       }
 
       const startInterval = () => {
-        if (stopped || !polling || hidden() || interval !== null) return
+        if (!mayPoll() || interval !== null) return
         interval = setInterval(requestRefresh, options.intervalMs)
       }
 
@@ -291,7 +305,7 @@ export function withPollingFallback(
       }
 
       const onVisibilityChange = () => {
-        if (hidden()) {
+        if (pausedWhileHidden()) {
           stopInterval()
           return
         }
@@ -306,7 +320,7 @@ export function withPollingFallback(
       })
       reconcileInterval()
 
-      if (pauseWhenHidden && typeof document !== "undefined") {
+      if (watchesVisibility) {
         document.addEventListener("visibilitychange", onVisibilityChange)
       }
 
@@ -314,7 +328,7 @@ export function withPollingFallback(
         if (stopped) return
         stopped = true
         stopInterval()
-        if (pauseWhenHidden && typeof document !== "undefined") {
+        if (watchesVisibility) {
           document.removeEventListener("visibilitychange", onVisibilityChange)
         }
         stopPrimary()
@@ -325,6 +339,11 @@ export function withPollingFallback(
 
 /** Fans one committed vector out as singleton axis invalidation entries. */
 export interface InvalidationPublisher {
+  /**
+   * Publishes one entry per axis in `stamp`, each carrying `eventId`. A
+   * rejection or a slow result is reported as a publication failure and does
+   * not fail the accepted mutation.
+   */
   publish(eventId: string, stamp: AcceptedStamp): void | Promise<void>
 }
 
@@ -333,6 +352,7 @@ export interface InvalidationPublicationFailure {
   readonly kind: "rejected" | "timed-out"
   readonly eventId: string
   readonly stamp: AcceptedStamp
+  /** The rejection reason; present only when `kind` is `rejected`. */
   readonly error?: unknown
 }
 

@@ -216,12 +216,12 @@ context to enforce them.
   the mutation list, infers its invocation union, requires every mutation to
   predict one state type (for inline tuples and predeclared arrays alike), and
   rejects duplicate stable names.
-- **Canonical invocation identity.** `canonicalInvocation` combines a protocol ID
-  and invocation into RFC 8785 canonical JSON, exact UTF-8 bytes, and a lowercase
-  SHA-256 fingerprint, and returns the isolated invocation that identity
-  describes; authority passes those arguments to commands. It rejects values
-  outside the supported JSON domain before canonicalization and isolates valid
-  input from inherited `toJSON` behavior.
+- **Canonical invocation identity.** `prepareCanonicalInvocation` combines a
+  protocol ID and invocation into RFC 8785 canonical JSON, exact UTF-8 bytes,
+  and a lowercase SHA-256 fingerprint, and returns the isolated invocation that
+  identity describes; authority passes those arguments to commands. It rejects
+  values outside the supported JSON domain before canonicalization and isolates
+  valid input from inherited `toJSON` behavior.
 - **Authority execution.** `createNextMutationAction` strictly admits envelopes,
   reparses arguments, and selects one exhaustive definition-keyed command before
   entering receipt authority. The authority adapter owns receipt scope,

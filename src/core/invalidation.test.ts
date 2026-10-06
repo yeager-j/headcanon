@@ -115,6 +115,12 @@ function deferred<T>(): {
   return { promise, resolve, reject }
 }
 
+/** Lets a pending lazy initialize() settle and forward buffered subscriptions. */
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
 function subscription(
   statuses: InvalidationStatus[]
 ): InvalidationSubscription {
@@ -126,6 +132,8 @@ function subscription(
 }
 
 describe("createLazyInvalidationAdapter", () => {
+  const transportError = new Error("transport failed")
+
   it("initializes once and forwards buffered and ready subscriptions", async () => {
     const readiness = deferred<InvalidationAdapter | null>()
     const subscribed: InvalidationSubscription[] = []
@@ -150,8 +158,7 @@ describe("createLazyInvalidationAdapter", () => {
     expect(subscribed).toHaveLength(0)
 
     readiness.resolve(inner)
-    await readiness.promise
-    await Promise.resolve()
+    await flushMicrotasks()
     adapter.subscribe(subscription([]))
 
     expect(subscribed).toHaveLength(3)
@@ -174,8 +181,7 @@ describe("createLazyInvalidationAdapter", () => {
         return () => undefined
       },
     })
-    await readiness.promise
-    await Promise.resolve()
+    await flushMicrotasks()
 
     expect(subscribed).toHaveLength(0)
   })
@@ -195,8 +201,7 @@ describe("createLazyInvalidationAdapter", () => {
     expect(adapter.initialStatus).toBe("reauthorizing")
     adapter.subscribe(subscription(statuses))
     readiness.resolve(inner)
-    await readiness.promise
-    await Promise.resolve()
+    await flushMicrotasks()
 
     expect(statuses).toEqual(["active"])
     expect(adapter.initialStatus).toBe("active")
@@ -215,8 +220,7 @@ describe("createLazyInvalidationAdapter", () => {
     })
 
     adapter.subscribe(subscription([]))
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushMicrotasks()
     innerStatus = "unavailable"
 
     expect(adapter.initialStatus).toBe("unavailable")
@@ -233,8 +237,7 @@ describe("createLazyInvalidationAdapter", () => {
     })
 
     const buffered = adapter.subscribe(subscription([]))
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushMicrotasks()
     const direct = adapter.subscribe(subscription([]))
     buffered()
     direct()
@@ -254,39 +257,44 @@ describe("createLazyInvalidationAdapter", () => {
           },
         }),
     })
-    let unsubscribe = () => undefined as void
+    let unsubscribe: () => void = () => undefined
     unsubscribe = adapter.subscribe({
       ...subscription([]),
       onStatusChange: () => unsubscribe(),
     })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushMicrotasks()
 
     expect(subscribed).toHaveLength(0)
   })
 
-  it.each(["unavailable", "rejected"] as const)(
-    "reports unavailable when initialization is %s",
-    async (outcome) => {
+  it.each([
+    {
+      outcome: "resolves null",
+      initialize: () => Promise.resolve(null),
+      reported: [],
+    },
+    {
+      outcome: "rejects",
+      initialize: () => Promise.reject(transportError),
+      reported: [transportError],
+    },
+  ])(
+    "reports unavailable when initialization $outcome",
+    async ({ initialize, reported }) => {
       const statuses: InvalidationStatus[] = []
-      const error = new Error("transport failed")
       const errors: unknown[] = []
       const adapter = createLazyInvalidationAdapter({
-        initialize: () =>
-          outcome === "unavailable"
-            ? Promise.resolve(null)
-            : Promise.reject(error),
+        initialize,
         onInitializationError: (value) => errors.push(value),
       })
 
       adapter.subscribe(subscription(statuses))
-      await Promise.resolve()
-      await Promise.resolve()
+      await flushMicrotasks()
       adapter.subscribe(subscription(statuses))
 
       expect(statuses).toEqual(["unavailable", "unavailable"])
       expect(adapter.initialStatus).toBe("unavailable")
-      expect(errors).toEqual(outcome === "rejected" ? [error] : [])
+      expect(errors).toEqual(reported)
     }
   )
 })

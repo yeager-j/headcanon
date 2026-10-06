@@ -16,11 +16,10 @@ export type Revision = number & { readonly [revisionBrand]: "Revision" }
 /**
  * The latest authoritative revision observed for each axis in a projection.
  *
- * At runtime this is a frozen plain object keyed by axis, so it survives
- * React's serializer. The type is opaque on purpose: application-supplied axis
- * strings may collide with `Object.prototype` members, so a vector is only
- * built by this module's constructors and only read through
- * {@link revisionAt} and {@link revisionEntries}.
+ * Opaque: build one with {@link revisionVector} or {@link defineCanon} and read
+ * it only with {@link revisionAt} and {@link revisionEntries}, because axis
+ * strings may collide with `Object.prototype` members. It is a frozen plain
+ * object, so it crosses the RSC boundary.
  */
 export type RevisionVector = {
   readonly [revisionVectorBrand]: "RevisionVector"
@@ -60,13 +59,7 @@ export type RevisionValidationError = {
   readonly value: unknown
 }
 
-/**
- * Why an untrusted value could not become a complete revision vector.
- *
- * Like every headcanon parser error, it keeps its own `code`, names the
- * failing part in `reason`, and nests an inner parser's error unchanged under
- * `error`.
- */
+/** Why an untrusted value could not become a complete revision vector. */
 export type RevisionVectorValidationError =
   | {
       readonly code: "invalid-revision-vector"
@@ -305,17 +298,30 @@ export function acceptedStamp(
   return ok(stampRecordedRevisions(revisions.value))
 }
 
+function describeRevisionVectorError(
+  error: RevisionVectorValidationError
+): string {
+  switch (error.reason) {
+    case "not-plain-object":
+      return `${error.code} (not-plain-object)`
+    case "invalid-axis":
+      return `${error.code} at axis ${JSON.stringify(error.axis)} (invalid-axis)`
+    case "invalid-revision":
+      return `${error.code} at axis ${JSON.stringify(error.axis)} (${error.error.reason})`
+  }
+}
+
 /**
- * Constructs a validated {@link Canon} from a loader's raw observation.
+ * Builds a frozen {@link Canon} from a loader's value and the raw axis
+ * revisions observed with it.
  *
- * The application supplies axis-namespace keys and raw revision integers; this
- * parses them into an immutable {@link RevisionVector} (the parse-don't-validate
- * seam) and **throws** on an invalid coordinate — a loader-side data-integrity
- * failure, not an expected boundary. `tagVersionedBase` in
- * `headcanon/next/server` runs the same parse for `"use cache"` loaders.
+ * An invalid revision is a loader data-integrity failure, so this throws
+ * instead of returning a result. In a `"use cache"` loader, use
+ * `defineCachedCanon` from `headcanon/next/server`, which also applies the axis
+ * cache tags.
  * @param input Loader value and raw axis revisions observed together.
  * @returns A frozen canon carrying branded revisions.
- * @throws Error when the supplied revision vector is invalid.
+ * @throws Error naming the reason, and the failing axis when there is one, when the revision vector is invalid.
  */
 export function defineCanon<State>(input: {
   readonly value: State
@@ -323,17 +329,8 @@ export function defineCanon<State>(input: {
 }): Canon<State> {
   const revisions = revisionVector(input.revisions)
   if (!revisions.ok) {
-    const { error } = revisions
-    const location =
-      error.reason === "not-plain-object"
-        ? ` (${error.reason})`
-        : ` at axis ${JSON.stringify(error.axis)} (${
-            error.reason === "invalid-revision"
-              ? error.error.reason
-              : error.reason
-          })`
     throw new Error(
-      `defineCanon received an invalid revision vector: ${error.code}${location}`
+      `defineCanon received an invalid revision vector: ${describeRevisionVectorError(revisions.error)}`
     )
   }
 

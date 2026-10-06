@@ -29,8 +29,9 @@ type ParsedFormSchema<Schema extends StandardSchemaV1> =
         readonly "~headcanon": "A mutation argument schema's output must be a valid input"
       }
 
-/** Package-owned identity shared by prediction replay and authority execution. */
+/** Package-owned mutation identity, passed to `predict` and to a command's `execute`. */
 export interface MutationContext {
+  /** The mutation ID carried by the invocation's envelope. */
   readonly mutationId: string
 }
 
@@ -83,7 +84,11 @@ export interface AnyMutationDefinition {
   readonly predict: (...args: never[]) => Result<unknown, unknown>
 }
 
-type MutationState<Mutation> = Mutation extends AnyMutationDefinition
+/**
+ * Extracts the state type a mutation's predictor takes; a union of mutations
+ * gives the union of their states.
+ */
+export type MutationState<Mutation> = Mutation extends AnyMutationDefinition
   ? Parameters<Mutation["predict"]>[0]
   : never
 
@@ -110,14 +115,14 @@ export type InvocationOf<Mutation> = Mutation extends (
   ? Invocation
   : never
 
-/** Extracts the public authority refusal admitted by a mutation's codec. */
+/** Extracts the authority refusal type defined by a mutation's refusal schema. */
 export type MutationRefusalOf<Mutation> = Mutation extends {
   readonly refusal: infer Schema extends StandardSchemaV1
 }
   ? StandardSchemaV1.InferOutput<Schema>
   : never
 
-/** Extracts the predictor plus authority refusal correlated to a mutation. */
+/** Extracts a mutation's public error type: its prediction error or its authority refusal. */
 export type MutationErrorOf<Mutation> =
   InvocationOf<Mutation> extends MutationInvocation<
     string,
@@ -135,6 +140,18 @@ export interface ProtocolDefinition<
   readonly id: Id
   readonly mutations: Mutations
 }
+
+/** Any protocol definition: the constraint for code generic over protocols. */
+export type AnyProtocolDefinition = ProtocolDefinition<
+  string,
+  readonly AnyMutationDefinition[]
+>
+
+/** The union of every mutation definition a protocol registers. */
+export type ProtocolMutation<Protocol> =
+  Protocol extends ProtocolDefinition<string, infer Mutations>
+    ? Mutations[number]
+    : never
 
 /** The union of every invocation admitted by a protocol definition. */
 export type ProtocolInvocation<Protocol> =
@@ -197,7 +214,7 @@ export function defineMutation<
 >(definition: {
   readonly name: Name
   readonly args: Schema & ParsedFormSchema<Schema>
-  /** Runtime codec for authority refusals which may cross the receipt boundary. */
+  /** Schema for the authority refusals a receipt stores and replays. */
   readonly refusal?: RefusalSchema
   readonly predict: (
     state: State,
@@ -230,17 +247,14 @@ export function defineMutation<
 /**
  * Registers a closed set of mutations under one stable protocol ID.
  *
- * A protocol is the dispatch boundary shared by the browser and authority. It
- * freezes the mutation list, which is the one registry: authority and the
- * predicted root resolve a name through it exactly once. TypeScript also
- * requires all mutations in the registry to predict the same state shape,
- * whether they are passed as an inline tuple or a predeclared array.
- * Duplicate names and malformed definitions throw during construction; they
- * are programmer/configuration errors, not request-level refusals.
+ * Pass the same protocol to the predicted root and to the mutation action.
+ * The returned protocol holds a frozen copy of the mutation list. TypeScript
+ * requires every mutation to predict the same state type, whether the list is
+ * an inline tuple or a predeclared array.
  *
  * @param definition Stable protocol ID and closed mutation registry.
  * @returns A frozen protocol definition.
- * @throws Error when a mutation is malformed or two mutations share a name.
+ * @throws Error when a mutation is malformed or two mutations share a name; these are configuration errors, not request refusals.
  */
 export function defineProtocol<
   const Id extends string,

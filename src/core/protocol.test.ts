@@ -79,14 +79,14 @@ const append = defineMutation({
 })
 
 function rejectInvalidProtocolsAtCompileTime() {
-  function helper() {
+  function plainFunction() {
     return undefined
   }
 
   defineProtocol({
     id: "test.invalid.v1",
     // @ts-expect-error — protocol entries must be mutation definitions.
-    mutations: [helper],
+    mutations: [plainFunction],
   })
   defineProtocol({
     id: "test.mixed-state.v1",
@@ -171,12 +171,12 @@ const step = defineMutation({
   predict: (state: number, args) => ok(state + args.step),
 })
 
-function envelope(invocation: {
-  readonly name: string
-  readonly args: unknown
-}) {
+function envelope(
+  protocol: { readonly id: string },
+  invocation: { readonly name: string; readonly args: unknown }
+) {
   return {
-    protocol: "test.parsed-form.v1",
+    protocol: protocol.id,
     mutationId: "00000000-0000-4000-8000-000000000000",
     invocation,
   }
@@ -270,8 +270,13 @@ describe("defineProtocol", () => {
     expect(Object.isFrozen(protocol.mutations)).toBe(true)
     expect(findMutation(protocol, "counter.increment")).toBe(increment)
     expect(findMutation(protocol, "counter.reset")).toBe(reset)
-    for (const inherited of ["__proto__", "toString", "constructor", 1]) {
-      expect(findMutation(protocol, inherited)).toBeUndefined()
+    for (const unregisteredName of [
+      "__proto__",
+      "toString",
+      "constructor",
+      1,
+    ]) {
+      expect(findMutation(protocol, unregisteredName)).toBeUndefined()
     }
 
     expectTypeOf<ProtocolInvocation<typeof protocol>>().toEqualTypeOf<
@@ -308,16 +313,16 @@ describe("defineProtocol", () => {
   })
 
   it("rejects malformed mutation functions at the protocol boundary", () => {
-    function helper() {
+    function plainFunction() {
       return undefined
     }
 
     expect(() =>
       defineProtocol({
         id: "test.invalid.v1",
-        mutations: [helper as unknown as typeof increment],
+        mutations: [plainFunction as unknown as typeof increment],
       })
-    ).toThrowError("Invalid mutation definition: helper")
+    ).toThrowError("Invalid mutation definition: plainFunction")
   })
 })
 
@@ -338,7 +343,7 @@ describe("parsed-form arguments at the authority", () => {
     )
 
     await expect(
-      prepareMutationRequest(protocol, envelope(invocation))
+      prepareMutationRequest(protocol, envelope(protocol, invocation))
     ).resolves.toEqual({
       ok: false,
       error: {
@@ -357,7 +362,7 @@ describe("parsed-form arguments at the authority", () => {
   it("admits parsed-form arguments when input and output types differ", async () => {
     const prepared = await prepareMutationRequest(
       stepProtocol,
-      envelope(step({ step: 2 }))
+      envelope(stepProtocol, step({ step: 2 }))
     )
 
     expect(prepared.ok && prepared.value.args).toEqual({ step: 2 })
@@ -366,7 +371,7 @@ describe("parsed-form arguments at the authority", () => {
   it("refuses unparsed wire input that parsing would fill in", async () => {
     const prepared = await prepareMutationRequest(
       stepProtocol,
-      envelope({ name: "counter.step", args: {} })
+      envelope(stepProtocol, { name: "counter.step", args: {} })
     )
 
     expect(prepared.ok ? null : prepared.error.code).toBe("invalid-arguments")

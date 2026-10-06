@@ -1,8 +1,8 @@
 /**
  * Lowercase hex SHA-256 of a UTF-8 string or exact bytes.
  *
- * Uses WebCrypto, which is a global in every supported runtime (browsers and
- * Node 20+, per `engines`), so browser and server entries hash identically.
+ * Uses the global WebCrypto, present in browsers and in every Node version
+ * `engines` admits, so browser and server entries hash identically.
  * @param input UTF-8 text or exact bytes to hash.
  * @returns The 64-character lowercase hex digest.
  */

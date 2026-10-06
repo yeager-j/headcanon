@@ -231,22 +231,18 @@ export function canonicalJson(
 }
 
 /**
- * Produces environment-independent receipt identity for a parsed invocation.
+ * Computes the receipt identity of a parsed invocation under a protocol ID,
+ * with the isolated copy of the invocation that identity describes.
  *
- * The full `{ protocol, invocation }` envelope is validated as plain JSON,
- * isolated from inherited `toJSON` behavior, serialized with RFC 8785 ordering,
- * and hashed from the exact UTF-8 bytes. Consumers should compare `bytes` when
- * proving duplicate-delivery identity; `sha256` is a useful indexed lookup and
- * diagnostic fingerprint, but is not the equality proof. The result also
- * carries the isolated invocation the identity describes, which authority
- * passes to commands. The operation has no persistence or authority side
- * effect and is safe to run before claiming a receipt.
+ * Compare `canonical.bytes`, not `canonical.sha256`, to prove two deliveries
+ * are one request (see {@link CanonicalInvocation}). It has no side effects, so
+ * it is safe to call before claiming a receipt.
  *
  * @param protocolId Stable protocol identifier included in the identity material.
  * @param invocation Parsed invocation whose name and arguments form the request intent.
  * @returns A promise for the canonical identity and isolated invocation, or a typed failure for unsupported JSON input.
  */
-export async function canonicalInvocation<Name extends string, Args>(
+export async function prepareCanonicalInvocation<Name extends string, Args>(
   protocolId: string,
   invocation: MutationInvocation<Name, Args>
 ): Promise<

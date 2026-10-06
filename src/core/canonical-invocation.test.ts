@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { canonicalInvocation, type MutationInvocation } from ".."
+import { prepareCanonicalInvocation, type MutationInvocation } from ".."
 import { canonicalJson } from "./canonical-invocation"
 
 function invocation(args: unknown): MutationInvocation<"test.mutate", unknown> {
@@ -8,7 +8,10 @@ function invocation(args: unknown): MutationInvocation<"test.mutate", unknown> {
 }
 
 async function canonical(args: unknown) {
-  const result = await canonicalInvocation("test.protocol.v1", invocation(args))
+  const result = await prepareCanonicalInvocation(
+    "test.protocol.v1",
+    invocation(args)
+  )
   if (!result.ok)
     throw new Error(`Canonicalization failed: ${result.error.code}`)
   return result.value.canonical
@@ -18,7 +21,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe("canonicalInvocation", () => {
+describe("prepareCanonicalInvocation", () => {
   it("canonicalizes reordered and nested object keys identically", async () => {
     const first = await canonical({ z: 1, nested: { b: true, a: null }, a: 2 })
     const second = await canonical({ a: 2, nested: { a: null, b: true }, z: 1 })
@@ -111,7 +114,7 @@ describe("canonicalInvocation", () => {
     const digest = vi.spyOn(globalThis.crypto.subtle, "digest")
 
     await expect(
-      canonicalInvocation("test.protocol.v1", invocation(args))
+      prepareCanonicalInvocation("test.protocol.v1", invocation(args))
     ).resolves.toEqual({
       ok: false,
       error: {
@@ -129,7 +132,7 @@ describe("canonicalInvocation", () => {
     const digest = vi.spyOn(globalThis.crypto.subtle, "digest")
 
     await expect(
-      canonicalInvocation("test.protocol.v1", invocation(cyclic))
+      prepareCanonicalInvocation("test.protocol.v1", invocation(cyclic))
     ).resolves.toEqual({
       ok: false,
       error: {
@@ -146,7 +149,7 @@ describe("canonicalInvocation", () => {
 
     const digest = vi.spyOn(globalThis.crypto.subtle, "digest")
     await expect(
-      canonicalInvocation(
+      prepareCanonicalInvocation(
         "test.protocol.v1",
         invocation(new SpecialArray("value"))
       )
@@ -179,7 +182,7 @@ describe("canonicalInvocation", () => {
     ],
   ] as const)("rejects an object with a %s", async (_label, args, expected) => {
     await expect(
-      canonicalInvocation("test.protocol.v1", invocation(args))
+      prepareCanonicalInvocation("test.protocol.v1", invocation(args))
     ).resolves.toEqual({
       ok: false,
       error: {
@@ -198,7 +201,7 @@ describe("canonicalInvocation", () => {
 
     const digest = vi.spyOn(globalThis.crypto.subtle, "digest")
     await expect(
-      canonicalInvocation("test.protocol.v1", invocation(args))
+      prepareCanonicalInvocation("test.protocol.v1", invocation(args))
     ).resolves.toEqual({
       ok: false,
       error: {
@@ -213,7 +216,7 @@ describe("canonicalInvocation", () => {
 
   it("returns the isolated invocation that the identity describes", async () => {
     const args = { tags: ["a", "b"], nested: { count: 1 } }
-    const result = await canonicalInvocation(
+    const result = await prepareCanonicalInvocation(
       "test.protocol.v1",
       invocation(args)
     )
