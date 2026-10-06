@@ -299,7 +299,9 @@ mounted; `status.stallReason` exists only while `status.freshness` is
 invalidations reset that budget. A subscription gap (`onSubscriptionGap`) is a
 requirement too: only a successful refresh that started after the gap closes
 it, so a failed one leaves the root short of `current` and subject to the same
-budget, stall, and `retryRefresh()`.
+budget, stall, and `retryRefresh()`. Every status field describes the canon
+of the render that reads it: a render that delivers covering canon reports
+`current` with empty `missingAxes` in that same render.
 Promise-returning adapters complete from their promise; void carriers such as
 `router.refresh()` consume an attempt only when the root receives a canon whose
 state value (by identity) or revisions changed, so re-rendering with the same
