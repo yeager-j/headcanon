@@ -19,6 +19,20 @@ installed copy of React and Next; `npm test` fails if they do not. `files` in
 a new export is checked with no edit to them. Every export ships to browsers
 unless `scripts/check-bundle-safety.mjs` lists it as server-only.
 
+Inside `src`, export `./a` builds from `src/a/index.ts` and `./a/b` from
+`src/a/b.ts` or `src/a/b/index.ts`. The one exception is
+`headcanon/drizzle-schema`, which builds from `src/drizzle/schema.ts`. Every
+other file is internal. Tests sit beside the file they test.
+
+| Folder        | What it holds                                                                    |
+| ------------- | -------------------------------------------------------------------------------- |
+| `src/core`    | The protocol model and authority. No React or Next: it is the `headcanon` graph. |
+| `src/react`   | The predicted root: its hook, mutation ledger, and refresh incorporation.        |
+| `src/next`    | The Next bindings. `server/` splits revalidation, the binder, and the action.    |
+| `src/ably`    | The Ably invalidation transport.                                                 |
+| `src/drizzle` | The Postgres authority and its receipt table.                                    |
+| `src/testing` | Test doubles; the contract suites are in `suites/`.                              |
+
 `headcanon/testing` holds only test doubles and must import no test framework:
 `src/testing/index.test.ts` imports it in plain Node with `vitest` and Testing
 Library blocked, and lint rejects a test-framework import anywhere in
