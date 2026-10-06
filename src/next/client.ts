@@ -9,14 +9,15 @@ import type {
   MutationExecutorError,
   MutationTerminalOutcome,
   ProtocolIdentity,
-} from "../authority"
-import { createPredictedRootHook } from "../predicted-root"
+} from "../core/authority"
 import type {
   AnyMutationDefinition,
   MutationRefusalOf,
   ProtocolDefinition,
   ProtocolInvocation,
-} from "../protocol"
+} from "../core/protocol"
+import type { AcceptedStamp } from "../core/revisions"
+import { createPredictedRootHook } from "../predicted-root"
 import {
   createObservedRoot,
   RetryableDeliveryError,
@@ -26,7 +27,6 @@ import {
   type PredictedRootOptions,
 } from "../react"
 import type { RefreshAdapter } from "../refresh"
-import type { AcceptedStamp } from "../revisions"
 
 /** Grace period allowing a Server Action's RSC response to carry acceptance. */
 export const ROUTER_ACCEPTANCE_GRACE_MS = 250

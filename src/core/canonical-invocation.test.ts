@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { canonicalInvocation, type MutationInvocation } from "../index"
 import { canonicalJson } from "./canonical-invocation"
-import { canonicalInvocation, type MutationInvocation } from "./index"
 
 function invocation(args: unknown): MutationInvocation<"test.mutate", unknown> {
   return { name: "test.mutate", args }

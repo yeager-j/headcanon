@@ -12,7 +12,7 @@ import type {
   AxisInvalidation,
   InvalidationAdapter,
   InvalidationStatus,
-} from "./invalidation"
+} from "./core/invalidation"
 import {
   covers,
   revisionAt,
@@ -22,7 +22,7 @@ import {
   type AxisId,
   type Canon,
   type RevisionVector,
-} from "./revisions"
+} from "./core/revisions"
 
 /** Grace period used by snapshot carriers before an acceptance refresh. */
 export const SNAPSHOT_ACCEPTANCE_GRACE_MS = 0

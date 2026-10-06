@@ -2,18 +2,18 @@ import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
-  UNCOVERED_REFRESH_RETRY_MS,
-  useIncorporation,
-  type AcceptanceSource,
-  type RefreshAdapter,
-} from "../../refresh"
-import {
   acceptedStamp,
   axisId,
   revisionVector,
   type AcceptedStamp,
   type Canon,
-} from "../../revisions"
+} from "../../core/revisions"
+import {
+  UNCOVERED_REFRESH_RETRY_MS,
+  useIncorporation,
+  type AcceptanceSource,
+  type RefreshAdapter,
+} from "../../refresh"
 import type { ContractCase } from "./contract-case"
 
 /** Refresh carrier fixture used by reusable stall-state assertions. */

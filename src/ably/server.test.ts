@@ -1,7 +1,7 @@
 import type { Rest } from "ably"
 import { describe, expect, it, vi } from "vitest"
 
-import { acceptedStamp, axisId, type AcceptedStamp } from "../revisions"
+import { acceptedStamp, axisId, type AcceptedStamp } from "../core/revisions"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,

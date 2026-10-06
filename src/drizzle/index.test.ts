@@ -11,8 +11,11 @@ import { Pool } from "pg"
 import { err, ok } from "serializable-result"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { executePreparedMutation, prepareMutationRequest } from "../authority"
-import { defineMutation, defineProtocol } from "../protocol"
+import {
+  executePreparedMutation,
+  prepareMutationRequest,
+} from "../core/authority"
+import { defineMutation, defineProtocol } from "../core/protocol"
 import {
   MUTATION_AUTHORITY_CONTRACT_AXES,
   MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE,

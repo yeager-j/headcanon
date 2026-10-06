@@ -3,8 +3,16 @@
 import { createContext, createElement, useContext, type ReactNode } from "react"
 import type { Result } from "serializable-result"
 
-import type { MutationEnvelope } from "./authority"
-import type { InvalidationAdapter } from "./invalidation"
+import type { MutationEnvelope } from "./core/authority"
+import type { InvalidationAdapter } from "./core/invalidation"
+import type {
+  AnyMutationDefinition,
+  InvocationOf,
+  MutationErrorOf,
+  ProtocolDefinition,
+  ProtocolInvocation,
+} from "./core/protocol"
+import type { AcceptedStamp, AxisId, Canon } from "./core/revisions"
 import {
   createPredictedRootHook,
   type ErrorOf,
@@ -12,20 +20,12 @@ import {
   type StateOf,
   type TerminalDeliveryFailure,
 } from "./predicted-root"
-import type {
-  AnyMutationDefinition,
-  InvocationOf,
-  MutationErrorOf,
-  ProtocolDefinition,
-  ProtocolInvocation,
-} from "./protocol"
 import {
   useIncorporation,
   type IncorporationStatus,
   type RefreshAdapter,
   type RefreshStallReason,
 } from "./refresh"
-import type { AcceptedStamp, AxisId, Canon } from "./revisions"
 
 /** Terminal lifecycle failures surfaced by a predicted root's receipts. */
 export type MutationLifecycleError<Error> =

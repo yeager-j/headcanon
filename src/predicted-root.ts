@@ -15,7 +15,7 @@ import {
 } from "react"
 import { err, ok, type Result } from "serializable-result"
 
-import type { MutationEnvelope, MutationExecutorError } from "./authority"
+import type { MutationEnvelope, MutationExecutorError } from "./core/authority"
 import {
   findMutation,
   type AnyMutationDefinition,
@@ -25,7 +25,13 @@ import {
   type MutationRefusalOf,
   type ProtocolDefinition,
   type ProtocolInvocation,
-} from "./protocol"
+} from "./core/protocol"
+import {
+  covers,
+  type AcceptedStamp,
+  type Canon,
+  type RevisionVector,
+} from "./core/revisions"
 import type {
   DeliveryRecovery,
   FreshnessRecovery,
@@ -40,12 +46,6 @@ import type {
   ReplayConflict,
 } from "./react"
 import { useIncorporation } from "./refresh"
-import {
-  covers,
-  type AcceptedStamp,
-  type Canon,
-  type RevisionVector,
-} from "./revisions"
 
 /** The mutation union a protocol registers. */
 export type MutationOf<Protocol> =

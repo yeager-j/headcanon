@@ -12,6 +12,7 @@ import {
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { revisionAt } from "./core/revisions"
 import {
   acceptedStamp,
   axisId,
@@ -36,7 +37,6 @@ import {
   type PredictedRootRecoveryListeners,
 } from "./react"
 import { UNCOVERED_REFRESH_RETRY_MS } from "./refresh"
-import { revisionAt } from "./revisions"
 
 type CounterError = { readonly code: "prediction-refused" }
 type CounterArgs = {

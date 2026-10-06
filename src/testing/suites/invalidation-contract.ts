@@ -4,8 +4,8 @@ import type {
   AxisInvalidation,
   InvalidationAdapter,
   InvalidationPublisher,
-} from "../../invalidation"
-import { acceptedStamp, axisId, type AcceptedStamp } from "../../revisions"
+} from "../../core/invalidation"
+import { acceptedStamp, axisId, type AcceptedStamp } from "../../core/revisions"
 import { createInMemoryInvalidationAdapter } from "../in-memory-invalidation"
 import type { ContractCase } from "./contract-case"
 

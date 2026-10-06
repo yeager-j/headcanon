@@ -12,25 +12,25 @@ import {
   type MutationTerminalOutcome,
   type ProtocolIdentity,
   type StampAccumulator,
-} from "../authority"
+} from "../core/authority"
 import type {
   InvalidationPublicationFailureReporter,
   InvalidationPublisher,
-} from "../invalidation"
+} from "../core/invalidation"
 import {
   findMutation,
   type AnyMutationDefinition,
   type MutationRefusalOf,
   type ProtocolDefinition,
-} from "../protocol"
+} from "../core/protocol"
 import {
   defineCanon,
   revisionEntries,
   type AcceptedStamp,
   type AxisId,
   type Canon,
-} from "../revisions"
-import { sha256Hex } from "../sha256"
+} from "../core/revisions"
+import { sha256Hex } from "../core/sha256"
 
 /** Maximum axis count supported by one Next cache-tagged versioned base. */
 export const MAX_VERSIONED_BASE_AXES = 128

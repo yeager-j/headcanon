@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest"
 
-import { MutationContentionError } from "../authority"
-import type { InvalidationSubscription } from "../invalidation"
-import type { AxisId } from "../revisions"
+import { MutationContentionError } from "../core/authority"
+import type { InvalidationSubscription } from "../core/invalidation"
+import type { AxisId } from "../core/revisions"
 import {
   createInMemoryInvalidationContractHarness,
   verifyInvalidationContract,

@@ -1,5 +1,5 @@
-import type { AxisId } from "../revisions"
-import { sha256Hex } from "../sha256"
+import type { AxisId } from "../core/revisions"
+import { sha256Hex } from "../core/sha256"
 
 declare const namespaceBrand: unique symbol
 

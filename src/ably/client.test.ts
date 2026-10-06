@@ -8,9 +8,9 @@ import {
   type AxisInvalidation,
   type InvalidationStatus,
   type InvalidationSubscription,
-} from "../invalidation"
-import { axisId, type AxisId } from "../revisions"
-import { sha256Hex } from "../sha256"
+} from "../core/invalidation"
+import { axisId, type AxisId } from "../core/revisions"
+import { sha256Hex } from "../core/sha256"
 import {
   verifyInvalidationContract,
   type InvalidationContractHarness,
@@ -35,7 +35,7 @@ import { createAblyInvalidationPublisher, type AblyRestClient } from "./server"
 // Hashing resolves in microtasks here, so once the fake service settles, one
 // real macrotask drains every pending adapter step. The contract suite installs
 // fake timers, so the real `setImmediate` is captured before it does.
-vi.mock("../sha256", async () => {
+vi.mock("../core/sha256", async () => {
   const { createHash } = await import("node:crypto")
   return {
     sha256Hex: vi.fn(async (input: string | Uint8Array) =>

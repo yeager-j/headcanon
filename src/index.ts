@@ -15,7 +15,7 @@ export {
   type RevisionValidationError,
   type RevisionVector,
   type RevisionVectorValidationError,
-} from "./revisions"
+} from "./core/revisions"
 export {
   defineMutation,
   defineProtocol,
@@ -28,13 +28,13 @@ export {
   type MutationRefusalOf,
   type ProtocolDefinition,
   type ProtocolInvocation,
-} from "./protocol"
+} from "./core/protocol"
 export {
   canonicalInvocation,
   type CanonicalInvocation,
   type CanonicalInvocationError,
   type PreparedCanonicalInvocation,
-} from "./canonical-invocation"
+} from "./core/canonical-invocation"
 // `createStampAccumulator` is framework-independent: it is the only way a
 // custom `MutationAuthorityAdapter` mints the accepted stamp for an attempt.
 // Commands for any adapter call `throwMutationContention` on a lost race.
@@ -52,7 +52,7 @@ export {
   type ProtocolIdentity,
   type ReadableStampAccumulator,
   type StampAccumulator,
-} from "./authority"
+} from "./core/authority"
 export {
   axisInvalidation,
   createLazyInvalidationAdapter,
@@ -69,4 +69,4 @@ export {
   type InvalidationSubscription,
   type LazyInvalidationAdapterOptions,
   type PollingFallbackOptions,
-} from "./invalidation"
+} from "./core/invalidation"

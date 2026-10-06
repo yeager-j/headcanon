@@ -2,7 +2,7 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { err, ok, type Result } from "serializable-result"
 import { describe, expect, it } from "vitest"
 
-import { hasExactKeys, isPlainRecord } from "../../admission"
+import { hasExactKeys, isPlainRecord } from "../../core/admission"
 import {
   DEFAULT_MUTATION_MAX_ATTEMPTS,
   executePreparedMutation,
@@ -11,9 +11,9 @@ import {
   type MutationAuthorityAdapter,
   type MutationExecutorError,
   type MutationTerminalOutcome,
-} from "../../authority"
-import { defineMutation, defineProtocol } from "../../protocol"
-import { axisId, revisionAt, type AcceptedStamp } from "../../revisions"
+} from "../../core/authority"
+import { defineMutation, defineProtocol } from "../../core/protocol"
+import { axisId, revisionAt, type AcceptedStamp } from "../../core/revisions"
 import {
   createInMemoryMutationAuthority,
   type InMemoryReader,

@@ -4,8 +4,8 @@ import type {
   InvalidationPublisher,
   InvalidationStatus,
   InvalidationSubscription,
-} from "../invalidation"
-import { revisionEntries } from "../revisions"
+} from "../core/invalidation"
+import { revisionEntries } from "../core/revisions"
 
 /** Synchronous in-memory invalidation bus for contract tests and fixtures. */
 export interface InMemoryInvalidationAdapter

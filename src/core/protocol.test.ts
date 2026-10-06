@@ -2,14 +2,14 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { ok, type Result } from "serializable-result"
 import { describe, expect, expectTypeOf, it } from "vitest"
 
-import { prepareMutationRequest } from "./authority"
 import {
   defineMutation,
   defineProtocol,
   type MutationErrorOf,
   type MutationInvocation,
   type ProtocolInvocation,
-} from "./index"
+} from "../index"
+import { prepareMutationRequest } from "./authority"
 import { findMutation } from "./protocol"
 
 type AmountArgs = { readonly amount: number }

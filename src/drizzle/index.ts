@@ -16,7 +16,7 @@ import {
   replayReceipt,
   type MutationAttemptFailure,
   type MutationAuthorityAdapter,
-} from "../authority"
+} from "../core/authority"
 import { isPostgresContention } from "./postgres-error"
 import {
   headcanonMutationReceipts,

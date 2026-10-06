@@ -15,7 +15,7 @@ import {
   type MutationReceipt,
   type MutationTerminalOutcome,
   type StampAccumulator,
-} from "../authority"
+} from "../core/authority"
 
 /** Read access to the in-memory authority's state cell. */
 export interface InMemoryReader<State> {

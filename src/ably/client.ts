@@ -4,8 +4,8 @@ import {
   type InvalidationAdapter,
   type InvalidationStatus,
   type InvalidationSubscription,
-} from "../invalidation"
-import type { AxisId } from "../revisions"
+} from "../core/invalidation"
+import type { AxisId } from "../core/revisions"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,

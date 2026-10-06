@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest"
 import {
   throwMutationContention,
   type MutationAuthorityRequest,
-} from "../authority"
+} from "../core/authority"
 import { createInMemoryMutationAuthority } from "./index"
 
 type Refusal = { readonly code: "refused" }

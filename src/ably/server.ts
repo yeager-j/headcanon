@@ -1,5 +1,5 @@
-import type { InvalidationPublisher } from "../invalidation"
-import { revisionEntries, type AxisId } from "../revisions"
+import type { InvalidationPublisher } from "../core/invalidation"
+import { revisionEntries, type AxisId } from "../core/revisions"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,

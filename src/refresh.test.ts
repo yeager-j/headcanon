@@ -6,6 +6,7 @@ import { useSyncExternalStore } from "react"
 import { ok, type Result } from "serializable-result"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { covers } from "./core/revisions"
 import {
   acceptedStamp,
   axisId,
@@ -37,7 +38,6 @@ import {
   type AcceptanceSource,
   type IncorporationStatus,
 } from "./refresh"
-import { covers } from "./revisions"
 import { createInMemoryInvalidationAdapter } from "./testing/index"
 import { verifyRefreshContract } from "./testing/react"
 
