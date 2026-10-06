@@ -9,9 +9,8 @@ import { packageEntries, ROOT } from "./package-entries.mjs"
 
 /**
  * Checks that every declaration exported from a public entry has JSDoc, and
- * that every exported callable documents each parameter and its return.
- * TypeScript's own rule matches a destructured parameter to the `@param` tag
- * at its position, so it needs no synthetic `@param __0`.
+ * that every exported callable documents each parameter and its return. A
+ * destructured parameter is documented by the `@param` tag at its position.
  *
  * @param {object} [options] What to check.
  * @param {import("./package-entries.mjs").PackageEntry[]} [options.entries]
@@ -20,8 +19,9 @@ import { packageEntries, ROOT } from "./package-entries.mjs"
  *   its `src/` are checked, and reports are relative to it.
  * @param {string} [options.tsconfig] The tsconfig whose compiler options the
  *   check uses.
- * @returns {{ failures: string[], declarations: number }} One message per
+ * @returns {{ failures: string[], declarationCount: number }} One message per
  *   missing piece of documentation, and how many declarations were checked.
+ * @throws Error when an entry's source is not a module.
  */
 export function checkPublicApiDocs({
   entries = packageEntries(),
@@ -67,17 +67,19 @@ export function checkPublicApiDocs({
     const paramNames = new Set(paramTags.map((tag) => tag.name.getText()))
     for (const signature of signatures) {
       signature.parameters.forEach((parameter, index) => {
-        const node = parameter.valueDeclaration
+        const parameterDeclaration = parameter.valueDeclaration
         const destructured =
-          node !== undefined &&
-          ts.isParameter(node) &&
-          !ts.isIdentifier(node.name)
-        if (destructured && index >= paramTags.length) {
-          report(
-            declaration,
-            `${symbol.name} is missing @param for parameter ${index + 1}`
-          )
-        } else if (!destructured && !paramNames.has(parameter.getName())) {
+          parameterDeclaration !== undefined &&
+          ts.isParameter(parameterDeclaration) &&
+          !ts.isIdentifier(parameterDeclaration.name)
+        if (destructured) {
+          if (index >= paramTags.length) {
+            report(
+              declaration,
+              `${symbol.name} is missing @param for parameter ${index + 1}`
+            )
+          }
+        } else if (!paramNames.has(parameter.getName())) {
           report(
             declaration,
             `${symbol.name} is missing @param ${parameter.getName()}`
@@ -117,19 +119,19 @@ export function checkPublicApiDocs({
     }
   }
 
-  return { failures, declarations: visited.size }
+  return { failures, declarationCount: visited.size }
 }
 
 function run() {
   const entries = packageEntries()
-  const { failures, declarations } = checkPublicApiDocs({ entries })
+  const { failures, declarationCount } = checkPublicApiDocs({ entries })
 
   if (failures.length > 0) {
     console.error(failures.join("\n"))
     process.exitCode = 1
   } else {
     console.log(
-      `✓ ${declarations} public declarations across ${entries.length} entries have JSDoc.`
+      `✓ ${declarationCount} public declarations across ${entries.length} entries have JSDoc.`
     )
   }
 }

@@ -6,9 +6,7 @@ import ts from "typescript"
 import { ROOT } from "./package-entries.mjs"
 
 /**
- * Reads the compiler options the build uses. The build's tsconfig is the one
- * authority for how a source import resolves; gates that follow imports or
- * read types ask TypeScript with these options instead of guessing.
+ * Reads a tsconfig's compiler options, by default the build's.
  *
  * @param {string} [tsconfig] The tsconfig to read.
  * @returns {ts.CompilerOptions} Its parsed compiler options.

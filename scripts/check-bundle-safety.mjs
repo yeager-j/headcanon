@@ -87,18 +87,26 @@ function lineAt(source, index) {
 }
 
 /**
+ * @param {string} root
+ * @param {string} file
+ */
+function reportPath(root, file) {
+  return relative(root, file).split("\\").join("/")
+}
+
+/**
  * @param {string} source
- * @returns {Array<{ specifier: string | undefined, line: number }>}
+ * @returns {Array<{ specifier: string, line: number }>}
  */
 function importSpecifiers(source) {
   const scanned = blankComments(source)
   const found = []
 
   for (const pattern of IMPORT_PATTERNS) {
-    pattern.lastIndex = 0
-    let match
-    while ((match = pattern.exec(scanned)) !== null) {
-      found.push({ specifier: match[1], line: lineAt(scanned, match.index) })
+    for (const match of scanned.matchAll(pattern)) {
+      const specifier = match[1]
+      if (!specifier) continue
+      found.push({ specifier, line: lineAt(scanned, match.index) })
     }
   }
 
@@ -174,7 +182,7 @@ export function scanSource(file, source, frameworkFree = false) {
   }
 
   for (const { specifier, line } of importSpecifiers(source)) {
-    if (!specifier || specifier.startsWith(".")) continue
+    if (specifier.startsWith(".")) continue
 
     if (BUILT_INS.has(specifier)) {
       violations.push({
@@ -258,11 +266,11 @@ function walkEntryGraph(entry, root, check) {
 
     visited.add(file)
     const source = readFileSync(file, "utf8")
-    const displayPath = relative(root, file).split("\\").join("/")
+    const displayPath = reportPath(root, file)
     violations.push(...check.file(displayPath, source))
 
     for (const { specifier, line } of importSpecifiers(source)) {
-      if (!specifier?.startsWith(".")) continue
+      if (!specifier.startsWith(".")) continue
 
       const target = resolveRelativeImport(file, specifier)
       if (!target) {
@@ -275,7 +283,7 @@ function walkEntryGraph(entry, root, check) {
         continue
       }
 
-      const targetPath = relative(root, target).split("\\").join("/")
+      const targetPath = reportPath(root, target)
       violations.push(
         ...(check.edge?.(displayPath, line, specifier, targetPath) ?? [])
       )
@@ -319,18 +327,16 @@ export function scanEntryGraph(
 export function scanTestDoubleGraph(entry, root = ROOT) {
   return walkEntryGraph(entry, root, {
     file: (file, source) =>
-      importSpecifiers(source).flatMap(({ specifier, line }) =>
-        specifier && inPackages(specifier, TEST_FRAMEWORK_PACKAGES)
-          ? [
-              {
-                file,
-                line,
-                specifier,
-                rule: "test framework in test-double graph",
-              },
-            ]
-          : []
-      ),
+      importSpecifiers(source)
+        .filter(({ specifier }) =>
+          inPackages(specifier, TEST_FRAMEWORK_PACKAGES)
+        )
+        .map(({ specifier, line }) => ({
+          file,
+          line,
+          specifier,
+          rule: "test framework in test-double graph",
+        })),
   })
 }
 

@@ -45,7 +45,7 @@ export function greet({ name }: { name: string }): string {
   return name
 }`,
       })
-    ).toEqual({ failures: [], declarations: 1 })
+    ).toEqual({ failures: [], declarationCount: 1 })
   })
 
   it("rejects a destructured parameter with no @param", () => {

@@ -14,13 +14,13 @@ export const ROOT = fileURLToPath(new URL("..", import.meta.url))
  */
 
 /**
- * Lists the package's public entry points. `package.json#exports` is the one
- * authority for which modules are public; every gate reads it from here, so a
- * new or split export reaches the gates with no edit to them. Each export's
- * built `./dist/*.js` target maps back to its `src/*.ts` source.
+ * Lists the package's public entry points from `package.json#exports`,
+ * mapping each export's `./dist/*.js` default target to its `src/*.ts` source.
  *
  * @param {string} [root] The package root that holds `package.json` and `src/`.
  * @returns {PackageEntry[]} One entry per export key, in manifest order.
+ * @throws Error when an export has no `./dist/*.js` default target, or its
+ *   `src/*.ts` source does not exist.
  */
 export function packageEntries(root = ROOT) {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
