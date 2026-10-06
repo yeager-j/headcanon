@@ -52,11 +52,7 @@ export const applyFixtureMutation = createNextMutationAction({
   protocol: fixtureProtocol,
   actor: fixtureActor,
   authority: fixtureAuthority,
+  // No `invalidations`: the fixture has no realtime transport, and the router
+  // carrier alone brings canon back.
   commands: [bindMutation(addItem, addItemCommand)],
-  // The fixture has no realtime transport: the router carrier alone brings
-  // canon, so there is nothing to publish to.
-  invalidations: { publish: () => undefined },
-  reportInvalidationFailure: (failure) => {
-    console.error("fixture invalidation publication failed", failure)
-  },
 })

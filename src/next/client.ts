@@ -111,6 +111,16 @@ function withRouterCarrier<
  * identity makes accidental cross-protocol binding a type error. Omit
  * `invalidations` when the surface intentionally has no push transport.
  *
+ * `DELIVERY_WAIT_MS` bounds the root's own Action, not the Server Action
+ * call. Next sends each call through the App Router's action queue, which
+ * keeps the router state on a pending promise inside a transition until the
+ * HTTP response arrives. React renders all transitions together, so while one
+ * call is unanswered no transition in the app commits, and the queue does not
+ * send the next Server Action call (a `retryDelivery()` included). A
+ * navigation still proceeds. Next exposes no way to abort the call, so bound
+ * it on the server: give the command's external work and database waits a
+ * deadline below the platform's request limit, so that every call answers.
+ *
  * @param options Protocol and either generated action or explicit delivery dependencies.
  * @returns A predicted-root hook for the Next App Router.
  */
