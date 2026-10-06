@@ -11,7 +11,7 @@ export interface FixtureState {
 
 export type FixtureRejection = "item-refused"
 
-const addItemArgsSchema: StandardSchemaV1<unknown, { text: string }> = {
+const addItemArgsSchema: StandardSchemaV1<{ text: string }> = {
   "~standard": {
     version: 1,
     vendor: "headcanon-fixture",
@@ -27,10 +27,27 @@ const addItemArgsSchema: StandardSchemaV1<unknown, { text: string }> = {
   },
 }
 
-/** Appends one item; refuses a duplicate so rejection paths stay testable. */
+const fixtureRejectionSchema: StandardSchemaV1<FixtureRejection> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon-fixture",
+    validate(value: unknown) {
+      return value === "item-refused"
+        ? { value }
+        : { issues: [{ message: "unknown fixture refusal" }] }
+    },
+  },
+}
+
+/**
+ * Appends one item. The predictor and the authority both refuse a duplicate,
+ * so the fixture can reach a local refusal, an authority refusal, and a
+ * replay conflict.
+ */
 export const addItem = defineMutation({
   name: "item.add",
   args: addItemArgsSchema,
+  refusal: fixtureRejectionSchema,
   predict(state: FixtureState, args) {
     if (state.items.includes(args.text)) return err("item-refused" as const)
     return ok({ items: [...state.items, args.text] })

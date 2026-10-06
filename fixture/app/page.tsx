@@ -1,6 +1,4 @@
-import { ITEMS_AXIS } from "@/lib/protocol"
-import { authority } from "@/lib/store"
-import { defineCanon } from "headcanon"
+import { readFixtureCanon } from "@/lib/authority"
 
 import { FixtureClient } from "./fixture-client"
 
@@ -9,10 +7,5 @@ import { FixtureClient } from "./fixture-client"
 export const dynamic = "force-dynamic"
 
 export default function Page() {
-  const canon = defineCanon({
-    value: { items: [...authority.items] },
-    revisions: { [ITEMS_AXIS]: authority.revision },
-  })
-
-  return <FixtureClient canon={canon} />
+  return <FixtureClient canon={readFixtureCanon()} />
 }

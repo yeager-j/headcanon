@@ -1,7 +1,10 @@
-import { resetAuthority } from "@/lib/store"
+import { resetFixture } from "@/lib/authority"
 
-/** Test isolation seam: each Playwright test starts from an empty authority. */
+/**
+ * Test isolation seam: each Playwright test starts from an empty authority
+ * with no receipts and no faults.
+ */
 export function POST(): Response {
-  resetAuthority()
+  resetFixture()
   return Response.json({ ok: true })
 }
