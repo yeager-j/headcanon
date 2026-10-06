@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import type { Realtime } from "ably"
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, expectTypeOf, it, vi } from "vitest"
 
 import {
   axisInvalidation,
@@ -136,7 +136,7 @@ class FakeAblyService {
   readonly failedAttachments = new Set<string>()
   readonly channels = new Map<string, FakeChannel>()
   authorized = new Set<string>()
-  authorization: "grant" | "reject" | "stall" = "grant"
+  authorizationMode: "grant" | "reject" | "stall" = "grant"
   private readonly stalledAuthorizations: (() => void)[] = []
   private readonly connectionListeners = new Set<
     (change: AblyConnectionStateChange) => void
@@ -157,13 +157,13 @@ class FakeAblyService {
       authorize: ({ capability }) => {
         const names = Object.keys(capability)
         this.history.push(`authorize:${names.join(",")}`)
-        if (this.authorization === "reject") {
+        if (this.authorizationMode === "reject") {
           return Promise.reject(new Error("authorization failed"))
         }
         const grant = () => {
           this.authorized = new Set(names)
         }
-        if (this.authorization === "stall") {
+        if (this.authorizationMode === "stall") {
           return new Promise<void>((resolve) => {
             this.stalledAuthorizations.push(() => {
               grant()
@@ -249,9 +249,10 @@ verifyInvalidationContract(ablyContractHarness())
 
 const axisA = axisId("entity/a")
 const axisB = axisId("entity/b")
+const namespace = ablyChannelNamespace("preview")
 
 function channelFor(axis: AxisId): Promise<string> {
-  return ablyAxisChannelName(ablyChannelNamespace("preview"), axis)
+  return ablyAxisChannelName(namespace, axis)
 }
 
 function subscription(axes: readonly AxisId[]) {
@@ -266,23 +267,24 @@ function subscription(axes: readonly AxisId[]) {
 function adapterFor(service: FakeAblyService) {
   return createAblyInvalidationAdapter({
     realtime: service.realtime,
-    namespace: "preview",
+    namespace,
   })
 }
 
 describe("Ably invalidation capability lifecycle", () => {
   it("accepts the official Ably v2 realtime client", () => {
-    const acceptsRealtime = (client: Realtime): AblyRealtimeClient => client
-
-    expect(acceptsRealtime).toBeTypeOf("function")
+    expectTypeOf<Realtime>().toExtend<AblyRealtimeClient>()
   })
 
   it("rejects an invalid namespace at construction", () => {
     const service = new FakeAblyService()
 
-    for (const namespace of ["", " preview", "preview:", "a::b"]) {
+    for (const invalidNamespace of ["", " preview", "preview:", "a::b"]) {
       expect(() =>
-        createAblyInvalidationAdapter({ realtime: service.realtime, namespace })
+        createAblyInvalidationAdapter({
+          realtime: service.realtime,
+          namespace: invalidNamespace,
+        })
       ).toThrow("Invalid Ably axis-channel namespace")
     }
   })
@@ -294,11 +296,11 @@ describe("Ably invalidation capability lifecycle", () => {
     const stopFirst = adapter.subscribe(first)
     await settle()
 
-    const channelA = await channelFor(axisA)
+    const channelNameA = await channelFor(axisA)
     expect(service.history.slice(0, 3)).toEqual([
-      `authorize:${channelA}`,
-      `subscribe:${channelA}`,
-      `attach:${channelA}`,
+      `authorize:${channelNameA}`,
+      `subscribe:${channelNameA}`,
+      `attach:${channelNameA}`,
     ])
     expect(first.onStatusChange).toHaveBeenLastCalledWith("active")
     expect(first.onSubscriptionGap).toHaveBeenCalledOnce()
@@ -309,11 +311,11 @@ describe("Ably invalidation capability lifecycle", () => {
     const stopSecond = adapter.subscribe(second)
     await settle()
 
-    const channelB = await channelFor(axisB)
-    const exactAuthorization = `authorize:${[channelA, channelB].sort().join(",")}`
+    const channelNameB = await channelFor(axisB)
+    const exactAuthorization = `authorize:${[channelNameA, channelNameB].sort().join(",")}`
     expect(service.history).toContain(exactAuthorization)
     expect(service.history.indexOf(exactAuthorization)).toBeLessThan(
-      service.history.indexOf(`attach:${channelB}`)
+      service.history.indexOf(`attach:${channelNameB}`)
     )
     expect(second.onStatusChange).toHaveBeenLastCalledWith("active")
     expect(second.onSubscriptionGap).toHaveBeenCalledOnce()
@@ -323,15 +325,15 @@ describe("Ably invalidation capability lifecycle", () => {
     adapter.subscribe(onlyB)
     await settle()
 
-    expect(service.history).toContain(`authorize:${channelB}`)
-    expect(service.history).toContain(`detach:${channelA}`)
+    expect(service.history).toContain(`authorize:${channelNameB}`)
+    expect(service.history).toContain(`detach:${channelNameA}`)
     expect(onlyB.onStatusChange).toHaveBeenLastCalledWith("active")
   })
 
   it("surfaces authorization and attachment failures as unavailable", async () => {
-    const authorizationFailure = new FakeAblyService()
-    authorizationFailure.authorization = "reject"
-    const authAdapter = adapterFor(authorizationFailure)
+    const rejectingService = new FakeAblyService()
+    rejectingService.authorizationMode = "reject"
+    const authAdapter = adapterFor(rejectingService)
     const authSubscription = subscription([axisA])
     authAdapter.subscribe(authSubscription)
     await settle()
@@ -339,13 +341,13 @@ describe("Ably invalidation capability lifecycle", () => {
     expect(authSubscription.onStatusChange).toHaveBeenLastCalledWith(
       "unavailable"
     )
-    expect(authorizationFailure.history).not.toContainEqual(
+    expect(rejectingService.history).not.toContainEqual(
       expect.stringMatching(/^attach:/u)
     )
 
-    const attachmentFailure = new FakeAblyService()
-    attachmentFailure.failedAttachments.add(await channelFor(axisA))
-    const attachAdapter = adapterFor(attachmentFailure)
+    const failingAttachService = new FakeAblyService()
+    failingAttachService.failedAttachments.add(await channelFor(axisA))
+    const attachAdapter = adapterFor(failingAttachService)
     const attachSubscription = subscription([axisA])
     attachAdapter.subscribe(attachSubscription)
     await settle()
@@ -357,9 +359,9 @@ describe("Ably invalidation capability lifecycle", () => {
 
   it("closes every attachment gap after a partial failure recovers", async () => {
     const service = new FakeAblyService()
-    const channelA = await channelFor(axisA)
-    const channelB = await channelFor(axisB)
-    service.failedAttachments.add(channelB)
+    const channelNameA = await channelFor(axisA)
+    const channelNameB = await channelFor(axisB)
+    service.failedAttachments.add(channelNameB)
     const observedA = subscription([axisA])
     const observedB = subscription([axisB])
     const adapter = adapterFor(service)
@@ -373,7 +375,7 @@ describe("Ably invalidation capability lifecycle", () => {
     expect(observedA.onSubscriptionGap).not.toHaveBeenCalled()
     expect(observedB.onSubscriptionGap).not.toHaveBeenCalled()
 
-    service.failedAttachments.delete(channelB)
+    service.failedAttachments.delete(channelNameB)
     adapter.retry()
     await settle()
 
@@ -382,10 +384,10 @@ describe("Ably invalidation capability lifecycle", () => {
     expect(observedA.onSubscriptionGap).toHaveBeenCalledOnce()
     expect(observedB.onSubscriptionGap).toHaveBeenCalledOnce()
     expect(
-      service.history.filter((entry) => entry === `attach:${channelA}`)
+      service.history.filter((entry) => entry === `attach:${channelNameA}`)
     ).toHaveLength(1)
     expect(
-      service.history.filter((entry) => entry === `attach:${channelB}`)
+      service.history.filter((entry) => entry === `attach:${channelNameB}`)
     ).toHaveLength(2)
   })
 
@@ -396,7 +398,7 @@ describe("Ably invalidation capability lifecycle", () => {
     adapter.subscribe(observed)
     await settle()
     observed.onSubscriptionGap.mockClear()
-    const authorizations = service.authorizations().length
+    const authorizationCount = service.authorizations().length
 
     service.setConnection("disconnected")
     expect(observed.onStatusChange).toHaveBeenLastCalledWith("unavailable")
@@ -407,7 +409,7 @@ describe("Ably invalidation capability lifecycle", () => {
     await settle()
     expect(observed.onStatusChange).toHaveBeenLastCalledWith("active")
     expect(observed.onSubscriptionGap).toHaveBeenCalledOnce()
-    expect(service.authorizations()).toHaveLength(authorizations)
+    expect(service.authorizations()).toHaveLength(authorizationCount)
   })
 
   it("reports unavailable, not reauthorizing, when subscribing during an outage", async () => {
@@ -519,7 +521,7 @@ describe("Ably invalidation capability lifecycle", () => {
   })
 
   it("releases channels without authorizing when the last subscription leaves", async () => {
-    for (const authorization of ["reject", "stall"] as const) {
+    for (const mode of ["reject", "stall"] as const) {
       const service = new FakeAblyService()
       const adapter = adapterFor(service)
       const observedA = subscription([axisA])
@@ -527,10 +529,10 @@ describe("Ably invalidation capability lifecycle", () => {
       await settle()
       const channelA = service.channel(await channelFor(axisA))
 
-      service.authorization = authorization
+      service.authorizationMode = mode
       const stopAB = adapter.subscribe(subscription([axisA, axisB]))
       await settle()
-      const authorizations = service.authorizations().length
+      const authorizationCount = service.authorizations().length
 
       stopAB()
       stopA()
@@ -538,7 +540,7 @@ describe("Ably invalidation capability lifecycle", () => {
 
       expect(channelA.messageListeners.size).toBe(0)
       expect(service.history).toContain(`detach:${channelA.name}`)
-      expect(service.authorizations()).toHaveLength(authorizations)
+      expect(service.authorizations()).toHaveLength(authorizationCount)
       expect(service.connectionListenerCount).toBe(0)
       expect(adapter.initialStatus).toBe("reauthorizing")
 
@@ -565,11 +567,11 @@ describe("Ably invalidation capability lifecycle", () => {
 
   it("rejects domain-bearing messages and messages for a different axis", async () => {
     const service = new FakeAblyService()
-    const malformed = vi.fn()
+    const onMalformedMessage = vi.fn()
     const adapter = createAblyInvalidationAdapter({
       realtime: service.realtime,
-      namespace: "preview",
-      onMalformedMessage: malformed,
+      namespace,
+      onMalformedMessage,
     })
     const observed = subscription([axisA])
     adapter.subscribe(observed)
@@ -585,7 +587,7 @@ describe("Ably invalidation capability lifecycle", () => {
     channelA.deliver({ eventId: "wrong-axis", axis: axisB, revision: 1 })
 
     expect(observed.onInvalidation).not.toHaveBeenCalled()
-    expect(malformed.mock.calls).toEqual([
+    expect(onMalformedMessage.mock.calls).toEqual([
       [expect.objectContaining({ reason: "unexpected-field" })],
       [
         {

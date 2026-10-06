@@ -1,5 +1,5 @@
 import type { InvalidationPublisher } from "../core/invalidation"
-import { revisionEntries, type AxisId } from "../core/revisions"
+import { revisionEntries, type AxisId, type Revision } from "../core/revisions"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
@@ -22,6 +22,10 @@ export interface AblyBatchPublishResult {
 
 /** Minimal Ably REST client contract used by the publisher. */
 export interface AblyRestClient {
+  /**
+   * Publishes each spec. Resolves with one result per spec, in the order of
+   * `specs`; a missing result counts as a failure for that channel.
+   */
   batchPublish(specs: AblyBatchPublishSpec[]): Promise<AblyBatchPublishResult[]>
 }
 
@@ -64,6 +68,56 @@ export class AblyInvalidationPublicationError extends Error {
 /** Ably accepts at most this many channels in one batch-publish request. */
 const MAX_BATCH_CHANNELS = 100
 
+interface AxisPublication {
+  readonly axis: AxisId
+  readonly channel: string
+  readonly revision: Revision
+}
+
+function inBatches<T>(items: readonly T[], size: number): T[][] {
+  const batches: T[][] = []
+  for (let start = 0; start < items.length; start += size) {
+    batches.push(items.slice(start, start + size))
+  }
+  return batches
+}
+
+function invalidationSpec(
+  eventId: string,
+  { axis, channel, revision }: AxisPublication
+): AblyBatchPublishSpec {
+  return {
+    channels: [channel],
+    messages: [
+      { name: ABLY_AXIS_INVALIDATION_EVENT, data: { eventId, axis, revision } },
+    ],
+  }
+}
+
+function batchFailures(
+  batch: readonly AxisPublication[],
+  outcome: PromiseSettledResult<AblyBatchPublishResult[]>
+): AblyAxisPublicationFailure[] {
+  if (outcome.status === "rejected") {
+    return batch.map(({ axis, channel }) => ({
+      axis,
+      channel,
+      error: outcome.reason,
+    }))
+  }
+  return batch.flatMap(({ axis, channel }, index) => {
+    const specResult = outcome.value[index]
+    if (!specResult) {
+      const error = new Error("Ably returned no result for this channel")
+      return [{ axis, channel, error }]
+    }
+    const refused = specResult.results.find(
+      (channelResult) => channelResult.error !== undefined
+    )
+    return refused ? [{ axis, channel, error: refused.error }] : []
+  })
+}
+
 /**
  * Creates the REST publisher used after an authoritative commit.
  *
@@ -91,60 +145,31 @@ export function createAblyInvalidationPublisher(options: {
 
   return {
     async publish(eventId, stamp) {
-      const entries = await Promise.all(
+      const publications: AxisPublication[] = await Promise.all(
         revisionEntries(stamp.revisions).map(async ([axis, revision]) => ({
           axis,
           channel: await ablyAxisChannelName(namespace, axis),
           revision,
         }))
       )
-
-      const batches: (typeof entries)[] = []
-      for (let start = 0; start < entries.length; start += MAX_BATCH_CHANNELS) {
-        batches.push(entries.slice(start, start + MAX_BATCH_CHANNELS))
-      }
+      const batches = inBatches(publications, MAX_BATCH_CHANNELS)
 
       const outcomes = await Promise.allSettled(
         batches.map((batch) =>
           options.rest.batchPublish(
-            batch.map(({ axis, channel, revision }) => ({
-              channels: [channel],
-              messages: [
-                {
-                  name: ABLY_AXIS_INVALIDATION_EVENT,
-                  data: { eventId, axis, revision },
-                },
-              ],
-            }))
+            batch.map((publication) => invalidationSpec(eventId, publication))
           )
         )
       )
-
-      const failures: AblyAxisPublicationFailure[] = []
-      outcomes.forEach((outcome, batchIndex) => {
-        batches[batchIndex]?.forEach(({ axis, channel }, specIndex) => {
-          if (outcome.status === "rejected") {
-            failures.push({ axis, channel, error: outcome.reason })
-            return
-          }
-          const result = outcome.value[specIndex]
-          if (!result) {
-            failures.push({
-              axis,
-              channel,
-              error: new Error("Ably returned no result for this channel"),
-            })
-            return
-          }
-          const failed = result.results.find(
-            (entry) => entry.error !== undefined
-          )
-          if (failed) failures.push({ axis, channel, error: failed.error })
-        })
-      })
+      const failures = outcomes.flatMap((outcome, index) =>
+        batchFailures(batches[index] ?? [], outcome)
+      )
 
       if (failures.length > 0) {
-        throw new AblyInvalidationPublicationError(failures, entries.length)
+        throw new AblyInvalidationPublicationError(
+          failures,
+          publications.length
+        )
       }
     },
   }

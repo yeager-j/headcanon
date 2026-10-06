@@ -89,6 +89,7 @@ export interface AblyRealtimeConnection {
 /** Minimal Ably realtime client contract required for exact-set authorization. */
 export interface AblyRealtimeClient {
   readonly auth: {
+    /** Requests a token whose capability is exactly `capability`, replacing the current token. */
     authorize(tokenParams: {
       readonly capability: Record<string, ["subscribe"]>
     }): Promise<unknown>
@@ -116,7 +117,11 @@ export type AblyInvalidationMessageError =
 
 /** Ably invalidation adapter with an explicit retry control. */
 export interface AblyInvalidationAdapter extends InvalidationAdapter {
-  /** Re-runs reconciliation: reauthorizes if needed and re-attaches every desired channel that is not attached. */
+  /**
+   * Retries after `unavailable`: reauthorizes when the axis set changed, the
+   * last authorization failed, or Ably reported an auth error, then re-attaches
+   * every observed channel that is not attached.
+   */
   retry(): void
 }
 
@@ -162,9 +167,9 @@ function sameMembers(
  * or Ably reports an auth error; connection recovery reuses the token. An
  * empty set requests nothing.
  *
- * Status is derived, never stored: `unavailable` while the connection is down,
- * a desired channel is `failed` or `suspended`, or the last reconciliation
- * failed for a channel that is still not attached; otherwise `reauthorizing`
+ * Status is `unavailable` while the connection is down, a desired channel is
+ * `failed` or `suspended`, or the last reconciliation failed for a channel
+ * that is still not attached; otherwise `reauthorizing`
  * until every desired channel is attached, then `active`. With no
  * subscriptions the status is `reauthorizing` (or `unavailable` while the
  * connection is down), never `active`.
@@ -175,10 +180,10 @@ function sameMembers(
  * with `resumed: false`) request the gap again for affected subscriptions;
  * the two can produce two refreshes for one outage.
  *
- * Unsubscribing releases channels no remaining subscription observes in a
- * microtask: listeners are removed and detach is attempted without waiting
- * for any authorization. Malformed payloads and lifecycle failures go to
- * optional diagnostics callbacks, isolated from the subscription lifecycle.
+ * Unsubscribing detaches, in a microtask, the channels no remaining
+ * subscription observes, without waiting for a pending authorization.
+ * Malformed payloads and lifecycle failures go to the optional diagnostics
+ * callbacks and do not affect subscriptions.
  *
  * @param options Realtime client, deployment namespace, and diagnostics.
  * @returns An Ably invalidation adapter with a `retry()` control.

@@ -1,5 +1,5 @@
 import type { Rest } from "ably"
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, expectTypeOf, it, vi } from "vitest"
 
 import { acceptedStamp, axisId, type AcceptedStamp } from "../core/revisions"
 import {
@@ -40,9 +40,7 @@ function restClient(failing: ReadonlySet<string> = new Set()) {
 
 describe("Ably invalidation publisher", () => {
   it("accepts the official Ably v2 REST client", () => {
-    const restCompatible: Rest extends AblyRestClient ? true : false = true
-
-    expect(restCompatible).toBe(true)
+    expectTypeOf<Rest>().toExtend<AblyRestClient>()
   })
 
   it("rejects an invalid namespace at construction", () => {
@@ -56,10 +54,7 @@ describe("Ably invalidation publisher", () => {
 
   it("batch-publishes one named singleton event per stamped axis", async () => {
     const rest = restClient()
-    const publisher = createAblyInvalidationPublisher({
-      rest,
-      namespace: "preview",
-    })
+    const publisher = createAblyInvalidationPublisher({ rest, namespace })
 
     await publisher.publish("shared-event", stamp({ [axisA]: 2, [axisB]: 4 }))
 
@@ -77,7 +72,7 @@ describe("Ably invalidation publisher", () => {
         channels: [await ablyAxisChannelName(namespace, axisB)],
         messages: [
           {
-            name: "headcanon.axis-invalidation.v1",
+            name: ABLY_AXIS_INVALIDATION_EVENT,
             data: { eventId: "shared-event", axis: axisB, revision: 4 },
           },
         ],
@@ -87,10 +82,7 @@ describe("Ably invalidation publisher", () => {
 
   it("splits more than 100 axes across requests", async () => {
     const rest = restClient()
-    const publisher = createAblyInvalidationPublisher({
-      rest,
-      namespace: "preview",
-    })
+    const publisher = createAblyInvalidationPublisher({ rest, namespace })
     const revisions = Object.fromEntries(
       Array.from({ length: 128 }, (_, index) => [`axis/${index}`, index])
     )
@@ -106,7 +98,7 @@ describe("Ably invalidation publisher", () => {
     const refused = await ablyAxisChannelName(namespace, axisB)
     const publisher = createAblyInvalidationPublisher({
       rest: restClient(new Set([refused])),
-      namespace: "preview",
+      namespace,
     })
 
     const publication = publisher.publish(
@@ -139,10 +131,7 @@ describe("Ably invalidation publisher", () => {
         return accepted.batchPublish(specs)
       }),
     }
-    const publisher = createAblyInvalidationPublisher({
-      rest,
-      namespace: "preview",
-    })
+    const publisher = createAblyInvalidationPublisher({ rest, namespace })
     const revisions = Object.fromEntries(
       Array.from({ length: 101 }, (_, index) => [`axis/${index}`, index])
     )

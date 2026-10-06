@@ -10,7 +10,7 @@ import {
 } from "./channels"
 
 describe("Ably axis channels", () => {
-  it("derives a stable deployment-scoped SHA-256 channel", async () => {
+  it("derives a stable deployment-scoped SHA-256 channel and the v1 event name", async () => {
     const axis = axisId("entity/storage/axis")
     const digest = createHash("sha256").update(axis, "utf8").digest("hex")
 
@@ -48,16 +48,17 @@ describe("Ably axis channels", () => {
     })
   })
 
-  it("measures a combat-scale exact capability claim", async () => {
+  it("pins the JSON size of a 128-channel capability claim", async () => {
+    const channelCount = 128
     const namespace = ablyChannelNamespace("production")
     const channels = await Promise.all(
-      Array.from({ length: 128 }, (_, index) =>
+      Array.from({ length: channelCount }, (_, index) =>
         ablyAxisChannelName(namespace, axisId(`combatant/${index}`))
       )
     )
     const capability = ablySubscribeCapability(channels)
 
-    expect(Object.keys(capability)).toHaveLength(128)
+    expect(Object.keys(capability)).toHaveLength(channelCount)
     expect(
       new TextEncoder().encode(JSON.stringify(capability)).byteLength
     ).toBe(14_081)
