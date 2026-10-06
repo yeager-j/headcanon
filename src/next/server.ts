@@ -305,6 +305,16 @@ export interface MutationCommand<
   }) => void | Promise<void>
 }
 
+declare const BINDER: unique symbol
+
+/**
+ * The identity of the binder that made a binding. It is a type-level brand
+ * with no runtime key; the action compares binder objects by reference.
+ */
+export interface MutationBinderIdentity {
+  readonly [BINDER]: true
+}
+
 /** Definition-keyed association between one mutation and its application command. */
 export interface MutationBinding<
   Mutation extends MutationWithRefusal,
@@ -312,35 +322,111 @@ export interface MutationBinding<
 > {
   readonly mutation: Mutation
   readonly command: Command
+  /** The binder that made this binding; only its action accepts the binding. */
+  readonly binder: MutationBinderIdentity
 }
 
-/** Binds by definition identity, preserving the mutation's exact argument type.
- * @param mutation Client-safe mutation definition.
- * @param command Application-owned command for that exact definition.
- * @returns A frozen mutation-command binding.
+/**
+ * The trusted actor and the authority that one set of commands runs with,
+ * and the `bind` that types those commands. Create it once per authority, at
+ * module level, and give the same binder to `createNextMutationAction`.
  */
-export function bindMutation<
-  const Mutation extends MutationWithRefusal,
+export interface MutationBinder<
+  Transaction,
   Actor,
   Preflight,
-  Transaction,
-  Projection,
-  Evidence,
->(
-  mutation: Mutation,
-  command: MutationCommand<
-    NoInfer<Mutation>,
-    Actor,
-    Preflight,
+> extends MutationBinderIdentity {
+  /** Derives the trusted actor. It never rides the wire. */
+  readonly actor: () => Actor | Promise<Actor>
+  /** The authority every command bound here runs inside. */
+  readonly authority: MutationAuthorityAdapter<
     Transaction,
-    Projection,
-    Evidence
+    Actor,
+    unknown,
+    Preflight
   >
-): MutationBinding<
-  Mutation,
-  MutationCommand<Mutation, Actor, Preflight, Transaction, Projection, Evidence>
-> {
-  return Object.freeze({ mutation, command })
+  /**
+   * Binds by definition identity, preserving the mutation's exact argument
+   * type. The command's `actor`, `executor`, and `tx` are this binder's, so a
+   * command needs no type annotation. Write its members in lifecycle order
+   * (`screen`, `admit`, `execute`, `finalizeAccepted`) so `evidence` and
+   * `projection` are inferred.
+   */
+  readonly bind: <
+    const Mutation extends MutationWithRefusal,
+    Projection,
+    Evidence,
+  >(
+    mutation: Mutation,
+    command: MutationCommand<
+      NoInfer<Mutation>,
+      Actor,
+      Preflight,
+      Transaction,
+      Projection,
+      Evidence
+    >
+    // NoInfer: inside `commands`, the action's contextual type would otherwise
+    // infer `Mutation` from this return type, and the command's return
+    // expressions would see that wide `Mutation`, so a literal refusal widens.
+  ) => NoInfer<
+    MutationBinding<
+      Mutation,
+      MutationCommand<
+        Mutation,
+        Actor,
+        Preflight,
+        Transaction,
+        Projection,
+        Evidence
+      >
+    >
+  >
+}
+
+/**
+ * Every actor the callback can return must be an actor the authority accepts.
+ * This is checked explicitly and as a whole, because the adapter's `execute`
+ * is a method, so plain assignability would compare its actor bivariantly.
+ */
+type AcceptsActor<Actor, AuthorityActor> = [Actor] extends [AuthorityActor]
+  ? unknown
+  : { readonly __authorityDoesNotAcceptActor: never }
+
+/**
+ * Creates the binder for one trusted actor callback and one authority. The
+ * actor type is the callback's; the compiler rejects an authority that
+ * cannot accept every actor the callback returns. Create it once, next to
+ * the authority, in a module that does not import the command modules.
+ * @param context The trusted actor callback and the authority it runs with.
+ * @returns A frozen binder whose `bind` types commands with this context.
+ */
+export function createMutationBinder<
+  Transaction,
+  Actor,
+  Preflight,
+  AuthorityActor,
+>(context: {
+  readonly actor: () => Actor | Promise<Actor>
+  readonly authority: MutationAuthorityAdapter<
+    Transaction,
+    AuthorityActor,
+    unknown,
+    Preflight
+  > &
+    AcceptsActor<Actor, AuthorityActor>
+}): MutationBinder<Transaction, Actor, Preflight> {
+  type Binder = MutationBinder<Transaction, Actor, Preflight>
+  const bind: Binder["bind"] = (mutation, command) =>
+    Object.freeze({ mutation, command, binder })
+  // The brand has no runtime key, so the object is asserted to carry it.
+  const binder = Object.freeze({
+    actor: context.actor,
+    // AcceptsActor proved that every Actor is an AuthorityActor.
+    authority: context.authority as Binder["authority"],
+    bind,
+  }) as Binder
+  return binder
 }
 
 type AnyMutationBinding = MutationBinding<MutationWithRefusal>
@@ -471,18 +557,24 @@ function parseMutationRefusal<Refusal>(
 
 function assertCompleteBindings(
   protocol: ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
+  binder: MutationBinderIdentity,
   commands: readonly AnyMutationBinding[]
 ): void {
   const expected = new Set(protocol.mutations.map(({ name }) => name))
   const registered = new Set<string>()
 
-  for (const { mutation } of commands) {
+  for (const { mutation, binder: madeBy } of commands) {
     if (registered.has(mutation.name)) {
       throw new Error(`Duplicate mutation binding: ${mutation.name}`)
     }
     if (findMutation(protocol, mutation.name) !== mutation) {
       throw new Error(
         `Mutation binding does not use the protocol definition: ${mutation.name}`
+      )
+    }
+    if (madeBy !== binder) {
+      throw new Error(
+        `Mutation binding was made by another binder: ${mutation.name}`
       )
     }
     registered.add(mutation.name)
@@ -512,9 +604,13 @@ type ActionInvalidations =
     }
 
 /**
- * Creates one Server Action from an exhaustive, definition-keyed command list.
+ * Creates one Server Action from a binder and an exhaustive, definition-keyed
+ * command list.
  *
- * `commands` must be one fixed list that binds every protocol mutation
+ * The binder supplies the trusted actor and the authority. Every binding in
+ * `commands` must be made by that same binder object; the action rejects a
+ * binding from another binder when it is created, even one with the same
+ * types. `commands` must be one fixed list that binds every protocol mutation
  * exactly once. The compiler checks this, and the action checks it again when
  * it is created. Write the list inline, or declare it elsewhere with
  * `as const`. Do not choose the list, or one of its entries, with a
@@ -524,7 +620,7 @@ type ActionInvalidations =
  * The returned action treats its argument as untrusted: it parses the envelope,
  * revalidates arguments, derives canonical identity, and resolves the matching
  * command by mutation-definition identity before it derives the actor from the
- * supplied trusted callback, so a malformed request never reaches application
+ * binder's trusted callback, so a malformed request never reaches application
  * code. It runs screening before receipt ownership, and runs admission plus
  * execution inside the authority's retryable transaction attempts. Every
  * command callback receives its own copy of the parsed arguments. The
@@ -551,8 +647,9 @@ type ActionInvalidations =
  * the application has no realtime transport: the action then only expires
  * tags and refreshes, and the router carries canon back.
  *
- * @param options Protocol, trusted actor, authority, exhaustive commands, and optionally an invalidation publisher with its failure reporter.
+ * @param options Protocol, binder, exhaustive commands made by that binder, and optionally an invalidation publisher with its failure reporter.
  * @returns A protocol-branded Server Action returning terminal outcomes (`accepted`, `refused`, or `denied`) or typed executor failures.
+ * @throws Error at creation when a binding is duplicated, uses another definition, was made by another binder, or the list is incomplete.
  * @throws Trusted actor or command callbacks may throw unexpected application/framework failures.
  */
 export function createNextMutationAction<
@@ -567,13 +664,7 @@ export function createNextMutationAction<
 >(
   options: {
     readonly protocol: Protocol
-    readonly actor: () => Actor | Promise<Actor>
-    readonly authority: MutationAuthorityAdapter<
-      Transaction,
-      Actor,
-      unknown,
-      Preflight
-    >
+    readonly binder: MutationBinder<Transaction, Actor, Preflight>
     readonly commands: Commands &
       ValidBindings<Protocol, Commands, Actor, Preflight, Transaction>
   } & ActionInvalidations
@@ -581,7 +672,8 @@ export function createNextMutationAction<
   type Refusal = MutationRefusalOf<BoundMutation<Commands>>
   type Terminal = MutationTerminalOutcome<Refusal>
 
-  assertCompleteBindings(options.protocol, options.commands)
+  const { binder } = options
+  assertCompleteBindings(options.protocol, binder, options.commands)
   const bindings = new Map(
     options.commands.map((binding) => [
       binding.mutation.name,
@@ -605,9 +697,9 @@ export function createNextMutationAction<
     if (!binding) {
       throw new Error(`Missing mutation binding: ${prepared.value.mutation}`)
     }
-    const actor = await options.actor()
+    const actor = await binder.actor()
     const screening = await binding.command.screen({
-      executor: options.authority.preflight,
+      executor: binder.authority.preflight,
       actor,
       args: structuredClone(prepared.value.args),
     })
@@ -621,7 +713,7 @@ export function createNextMutationAction<
     >({
       prepared: prepared.value,
       actor,
-      authority: options.authority as MutationAuthorityAdapter<
+      authority: binder.authority as MutationAuthorityAdapter<
         Transaction,
         Actor,
         Refusal,

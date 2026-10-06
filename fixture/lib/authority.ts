@@ -3,6 +3,7 @@ import {
   type Canon,
   type MutationAuthorityAdapter,
 } from "headcanon"
+import { createMutationBinder } from "headcanon/next/server"
 import {
   createInMemoryMutationAuthority,
   type InMemoryMutationAuthority,
@@ -127,6 +128,15 @@ export const fixtureAuthority: MutationAuthorityAdapter<
 export function fixtureActor(): FixtureActor {
   return { id: "fixture-user", role: server().faults.role }
 }
+
+/**
+ * Binds the fixture's commands to {@link fixtureActor} and
+ * {@link fixtureAuthority}. The Server Action takes this same binder.
+ */
+export const fixtureBinder = createMutationBinder({
+  actor: fixtureActor,
+  authority: fixtureAuthority,
+})
 
 /** The canon a page renders: committed state, or the frozen read. */
 export function readFixtureCanon(): Canon<FixtureState> {

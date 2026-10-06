@@ -1,4 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
+import type { NodePgDatabase } from "drizzle-orm/node-postgres"
+import { pgTable, text } from "drizzle-orm/pg-core"
 import { forbidden } from "next/navigation"
 import { err, ok, type Result } from "serializable-result"
 import {
@@ -12,6 +14,10 @@ import {
 } from "vitest"
 
 import { ablyAxisChannelName, ablyChannelNamespace } from "../ably/channels"
+import {
+  createDrizzleMutationAuthority,
+  type DrizzleMutationTx,
+} from "../drizzle"
 import {
   acceptedStamp,
   axisId,
@@ -33,13 +39,14 @@ import {
   allowMutationScreening,
   announceExternalCommit,
   axisCacheTag,
-  bindMutation,
+  createMutationBinder,
   createNextMutationAction,
   denyMutation,
   finalizeExternalActionCommit,
   MAX_VERSIONED_BASE_AXES,
   refuseMutation,
   tagVersionedBase,
+  type MutationBinder,
   type MutationCommand,
 } from "./server"
 
@@ -347,12 +354,6 @@ const renameCommand: MutationCommand<
   },
 }
 
-function rejectMismatchedBindingsAtCompileTime() {
-  // @ts-expect-error — the command accepts next.rename args, not increment args.
-  bindMutation(increment, renameCommand)
-}
-void rejectMismatchedBindingsAtCompileTime
-
 const plainIncrementCommand: MutationCommand<
   typeof increment,
   string,
@@ -387,9 +388,20 @@ const counterAuthority: CounterAuthority = createInMemoryMutationAuthority<
   string,
   unknown
 >({ initialState: 0, scope: (actor) => actor })
-const incrementBinding = bindMutation(increment, plainIncrementCommand)
-const renameBinding = bindMutation(rename, renameCommand)
-const numberActorIncrementBinding = bindMutation(
+const counterBinder = createMutationBinder({
+  actor: () => "actor",
+  authority: counterAuthority,
+})
+const numberActorBinder = createMutationBinder({
+  actor: () => 0,
+  authority: createInMemoryMutationAuthority<number, number, unknown>({
+    initialState: 0,
+    scope: String,
+  }),
+})
+const incrementBinding = counterBinder.bind(increment, plainIncrementCommand)
+const renameBinding = counterBinder.bind(rename, renameCommand)
+const numberActorIncrementBinding = numberActorBinder.bind(
   increment,
   numberActorIncrementCommand
 )
@@ -405,11 +417,7 @@ function typed<T>(value: T): T {
 // one whole: a check that split it into branches could pass every branch on
 // its own and miss the one list that really runs.
 function rejectInvalidCommandListsAtCompileTime() {
-  const context = {
-    protocol: pairProtocol,
-    actor: () => "actor",
-    authority: counterAuthority,
-  }
+  const context = { protocol: pairProtocol, binder: counterBinder }
 
   createNextMutationAction({
     ...context,
@@ -479,6 +487,113 @@ function rejectInvalidCommandListsAtCompileTime() {
 }
 void rejectInvalidCommandListsAtCompileTime
 
+function rejectMismatchedBindingsAtCompileTime() {
+  // @ts-expect-error — the command accepts next.rename args, not increment args.
+  counterBinder.bind(increment, renameCommand)
+
+  const textBinding = createMutationBinder({
+    actor: () => "actor",
+    authority: createInMemoryMutationAuthority<string, string, unknown>({
+      initialState: "",
+      scope: (actor) => actor,
+    }),
+  }).bind(increment, {
+    screen: () => allowMutationScreening(null),
+    admit: () => allowMutation(null),
+    execute: () => acceptMutation(),
+  })
+  createNextMutationAction({
+    protocol,
+    binder: counterBinder,
+    // @ts-expect-error — the binding's command runs in a text transaction, not a counter one.
+    commands: [textBinding],
+  })
+}
+void rejectMismatchedBindingsAtCompileTime
+
+interface User {
+  readonly id: string
+}
+interface Tenant {
+  readonly id: string
+  readonly tenantId: string
+}
+
+function counterAuthorityFor<Actor>(scope: (actor: Actor) => string) {
+  return createInMemoryMutationAuthority<number, Actor, unknown>({
+    initialState: 0,
+    scope,
+  })
+}
+
+// The actor type comes from the `actor` callback alone. An authority whose
+// actor type does not accept every actor the callback returns is rejected on
+// `authority`, even though the adapter's method parameter would let a plain
+// assignment through.
+function rejectAuthoritiesThatCannotAcceptTheActorAtCompileTime() {
+  const tenantAuthority = counterAuthorityFor((actor: Tenant) => actor.tenantId)
+
+  createMutationBinder({
+    actor: (): User => ({ id: "user" }),
+    // @ts-expect-error — the authority's scope reads tenantId, which a User lacks.
+    authority: tenantAuthority,
+  })
+  createMutationBinder({
+    actor: (): Tenant | User => ({ id: "user" }),
+    // @ts-expect-error — the User member lacks the tenantId the authority reads.
+    authority: tenantAuthority,
+  })
+  createMutationBinder({
+    actor: (): User => ({ id: "user" }),
+    // @ts-expect-error — the authority takes a numeric actor.
+    authority: counterAuthorityFor((actor: number) => actor.toFixed()),
+  })
+}
+void rejectAuthoritiesThatCannotAcceptTheActorAtCompileTime
+
+const notes = pgTable("notes", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+})
+type NotesDatabase = NodePgDatabase<{ readonly notes: typeof notes }>
+
+// Type-only: no database is reached, because nothing calls this.
+function inferDrizzleContextAtCompileTime(db: NotesDatabase) {
+  const authority = createDrizzleMutationAuthority({
+    db,
+    scope: (actor: User) => actor.id,
+  })
+  const binder = createMutationBinder({
+    actor: async (): Promise<User> => ({ id: "user" }),
+    authority,
+  })
+  binder.bind(increment, {
+    screen: async ({ actor, executor }) => {
+      expectTypeOf(actor).toEqualTypeOf<User>()
+      expectTypeOf(executor).toEqualTypeOf<(typeof authority)["preflight"]>()
+      await executor.query.notes.findFirst()
+      return allowMutationScreening(null)
+    },
+    admit: async ({ tx, args }) => {
+      expectTypeOf(tx).toEqualTypeOf<DrizzleMutationTx<NotesDatabase>>()
+      await tx.insert(notes).values({ id: "note", title: `${args.amount}` })
+      return allowMutation(null)
+    },
+    execute: () => acceptMutation(),
+  })
+
+  const tenantAuthority = createDrizzleMutationAuthority({
+    db,
+    scope: (actor: Tenant) => actor.tenantId,
+  })
+  createMutationBinder({
+    actor: (): User => ({ id: "user" }),
+    // @ts-expect-error — the authority's scope reads tenantId, which a User lacks.
+    authority: tenantAuthority,
+  })
+}
+void inferDrizzleContextAtCompileTime
+
 describe("Next mutation action", () => {
   type IncrementCommand = MutationCommand<
     typeof increment,
@@ -535,11 +650,14 @@ describe("Next mutation action", () => {
       readonly invalidations?: InvalidationPublisher
     } = {}
   ) {
-    return createNextMutationAction({
-      protocol,
+    const binder = createMutationBinder({
       actor: options.actor ?? (() => "actor"),
       authority,
-      commands: [bindMutation(increment, registered)],
+    })
+    return createNextMutationAction({
+      protocol,
+      binder,
+      commands: [binder.bind(increment, registered)],
       invalidations: options.invalidations ?? { publish: vi.fn() },
       reportInvalidationFailure: vi.fn(),
     })
@@ -722,11 +840,14 @@ describe("Next mutation action", () => {
     const events: string[] = []
     nextCache.updateTag.mockImplementation(() => events.push("update"))
     nextCache.refresh.mockImplementation(() => events.push("refresh"))
-    const execute = createNextMutationAction({
-      protocol,
+    const binder = createMutationBinder({
       actor: () => "actor",
       authority: createAuthority(),
-      commands: [bindMutation(increment, command())],
+    })
+    const execute = createNextMutationAction({
+      protocol,
+      binder,
+      commands: [binder.bind(increment, command())],
     })
 
     await expect(execute(envelope)).resolves.toMatchObject(
@@ -737,11 +858,14 @@ describe("Next mutation action", () => {
   })
 
   it("requires a publisher and its failure reporter together", () => {
-    const base = {
-      protocol,
+    const binder = createMutationBinder({
       actor: () => "actor",
       authority: createAuthority(),
-      commands: [bindMutation(increment, command())],
+    })
+    const base = {
+      protocol,
+      binder,
+      commands: [binder.bind(increment, command())],
     } as const
     // @ts-expect-error — a publisher needs a reporter for its failures.
     createNextMutationAction({ ...base, invalidations: { publish: vi.fn() } })
@@ -749,29 +873,125 @@ describe("Next mutation action", () => {
     createNextMutationAction({ ...base, reportInvalidationFailure: vi.fn() })
   })
 
-  // README, Drizzle section: an inline command gets `args` from its mutation
-  // but no context types, so commands are declared as `MutationCommand`s. If
-  // TypeScript starts inferring these, update the README.
-  it("infers an inline command's args but not its context", () => {
-    createNextMutationAction({
-      protocol,
+  // README, Drizzle section: the binder fixes a command's context, so a
+  // command needs no type annotation, inline or declared on its own.
+  it("infers a bound command's context, args, evidence, and projection", async () => {
+    const binder = createMutationBinder({
       actor: () => "actor",
       authority: createAuthority(),
+    })
+    const separate = binder.bind(increment, {
+      screen: ({ actor, executor, args }) => {
+        expectTypeOf(actor).toEqualTypeOf<string>()
+        expectTypeOf(executor).toEqualTypeOf<CounterPreflight>()
+        expectTypeOf(args).toEqualTypeOf<IncrementArgs>()
+        return allowMutationScreening({ screened: executor.read() })
+      },
+      admit: ({ tx, actor }) => {
+        expectTypeOf(tx).toEqualTypeOf<CounterTx>()
+        expectTypeOf(actor).toEqualTypeOf<string>()
+        return allowMutation({ observed: tx.read() })
+      },
+      execute: ({ evidence }) => {
+        expectTypeOf(evidence).toEqualTypeOf<{ observed: number }>()
+        return acceptMutation()
+      },
+      finalizeAccepted: ({ projection }) => {
+        expectTypeOf(projection).toEqualTypeOf<{ screened: number }>()
+      },
+    })
+    expect(() =>
+      createNextMutationAction({ protocol, binder, commands: [separate] })
+    ).not.toThrow()
+
+    const finalized = vi.fn()
+    const execute = createNextMutationAction({
+      protocol,
+      binder,
       commands: [
-        bindMutation(increment, {
+        binder.bind(increment, {
           screen: ({ actor, executor, args }) => {
-            expectTypeOf(actor).toBeUnknown()
-            expectTypeOf(executor).toBeUnknown()
-            expectTypeOf(args.amount).toBeNumber()
-            return allowMutationScreening(null)
+            expectTypeOf(actor).toEqualTypeOf<string>()
+            expectTypeOf(executor).toEqualTypeOf<CounterPreflight>()
+            expectTypeOf(args).toEqualTypeOf<IncrementArgs>()
+            return allowMutationScreening({ screened: executor.read() })
           },
-          admit: ({ tx }) => {
-            expectTypeOf(tx).toBeUnknown()
-            return allowMutation(null)
+          admit: ({ tx, actor }) => {
+            expectTypeOf(tx).toEqualTypeOf<CounterTx>()
+            expectTypeOf(actor).toEqualTypeOf<string>()
+            return allowMutation({ observed: tx.read() })
           },
-          execute: () => acceptMutation(),
+          execute: ({ tx, args, evidence, stamp }) => {
+            expectTypeOf(evidence).toEqualTypeOf<{ observed: number }>()
+            // The refusal keeps its literal type without `as const`.
+            if (args.amount < 0) return refuseMutation({ code: "refused" })
+            tx.write(evidence.observed + args.amount)
+            stamp.record(axisId("counter/value"), tx.read())
+            return acceptMutation()
+          },
+          finalizeAccepted: ({ projection }) => {
+            expectTypeOf(projection).toEqualTypeOf<{ screened: number }>()
+            finalized(projection)
+          },
         }),
       ],
+    })
+
+    await expect(execute(envelope)).resolves.toMatchObject(
+      ok({ kind: "accepted" })
+    )
+    expect(finalized).toHaveBeenCalledExactlyOnceWith({ screened: 0 })
+  })
+
+  it("declares the actor once, from the callback, for any authority that accepts it", () => {
+    const user = (): User => ({ id: "user" })
+    const tenant = (): Tenant => ({ id: "user", tenantId: "tenant" })
+    const byUser = (actor: User) => actor.id
+
+    const exact = createMutationBinder({
+      actor: user,
+      authority: counterAuthorityFor(byUser),
+    })
+    const broader = createMutationBinder({
+      actor: tenant,
+      authority: counterAuthorityFor(byUser),
+    })
+    const anyActor = createMutationBinder({
+      actor: user,
+      authority: counterAuthorityFor((_actor: unknown) => "everyone"),
+    })
+    const asyncActor = createMutationBinder({
+      actor: async () => user(),
+      authority: counterAuthorityFor(byUser),
+    })
+
+    expectTypeOf(exact).toEqualTypeOf<
+      MutationBinder<CounterTx, User, CounterPreflight>
+    >()
+    expectTypeOf(broader).toEqualTypeOf<
+      MutationBinder<CounterTx, Tenant, CounterPreflight>
+    >()
+    expectTypeOf(anyActor).toEqualTypeOf<
+      MutationBinder<CounterTx, User, CounterPreflight>
+    >()
+    expectTypeOf(asyncActor).toEqualTypeOf<
+      MutationBinder<CounterTx, User, CounterPreflight>
+    >()
+    broader.bind(increment, {
+      screen: ({ actor }) => {
+        expectTypeOf(actor).toEqualTypeOf<Tenant>()
+        return allowMutationScreening(null)
+      },
+      admit: () => allowMutation(null),
+      execute: () => acceptMutation(),
+    })
+    anyActor.bind(increment, {
+      screen: ({ actor }) => {
+        expectTypeOf(actor).toEqualTypeOf<User>()
+        return allowMutationScreening(null)
+      },
+      admit: () => allowMutation(null),
+      execute: () => acceptMutation(),
     })
   })
 
@@ -855,15 +1075,16 @@ describe("Next mutation action", () => {
     const authority = createAuthority()
     const registered = command()
 
+    const binder = createMutationBinder({ actor: () => "actor", authority })
+
     expect(() =>
       createNextMutationAction({
         protocol,
-        actor: () => "actor",
-        authority,
+        binder,
         // @ts-expect-error — the compiler rejects the duplicate too; this checks the runtime guard.
         commands: [
-          bindMutation(increment, registered),
-          bindMutation(increment, registered),
+          binder.bind(increment, registered),
+          binder.bind(increment, registered),
         ],
         invalidations: { publish: vi.fn() },
         reportInvalidationFailure: vi.fn(),
@@ -872,11 +1093,7 @@ describe("Next mutation action", () => {
   })
 
   it("accepts an inline list and an `as const` list declared elsewhere", () => {
-    const context = {
-      protocol: pairProtocol,
-      actor: () => "actor",
-      authority: counterAuthority,
-    }
+    const context = { protocol: pairProtocol, binder: counterBinder }
 
     expect(() =>
       createNextMutationAction({
@@ -889,12 +1106,27 @@ describe("Next mutation action", () => {
     ).not.toThrow()
   })
 
+  // Same-typed binders cannot be told apart by types, so this is checked only
+  // at runtime.
+  it("rejects a binding made by another binder at construction", () => {
+    const authority = createAuthority()
+    const binder = createMutationBinder({ actor: () => "actor", authority })
+    const other = createMutationBinder({ actor: () => "actor", authority })
+
+    expect(() =>
+      createNextMutationAction({
+        protocol,
+        binder,
+        commands: [other.bind(increment, command())],
+      })
+    ).toThrow("Mutation binding was made by another binder: next.increment")
+  })
+
   it("rejects missing command registration at construction", () => {
     expect(() =>
       createNextMutationAction({
         protocol,
-        actor: () => "actor",
-        authority: createAuthority(),
+        binder: counterBinder,
         commands: [] as never,
         invalidations: { publish: vi.fn() },
         reportInvalidationFailure: vi.fn(),

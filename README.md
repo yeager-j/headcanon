@@ -47,21 +47,37 @@ export const notesProtocol = defineProtocol({
 
 ### 2. Bind the server command and export the generated Server Action
 
+Create the binder once, next to the authority. It holds the trusted actor and
+the authority, and it types every command it binds.
+
+```ts
+// lib/notes-binder.ts (server-only; imports no command module)
+import { createDrizzleMutationAuthority } from "headcanon/drizzle"
+import { createMutationBinder } from "headcanon/next/server"
+
+export const notesAuthority = createDrizzleMutationAuthority({
+  db,
+  scope: (actor: Actor) => actor.userId,
+})
+
+export const notesBinder = createMutationBinder({
+  actor: requireActor, // derive the trusted actor; it never rides the wire
+  authority: notesAuthority,
+})
+```
+
 ```ts
 // lib/actions/notes/apply.ts
 "use server"
 
-import { createDrizzleMutationAuthority } from "headcanon/drizzle"
-import { bindMutation, createNextMutationAction } from "headcanon/next/server"
+import { createNextMutationAction } from "headcanon/next/server"
 
 export const applyNotesMutationAction = createNextMutationAction({
   protocol: notesProtocol,
-  actor: requireActor, // derive the trusted actor; it never rides the wire
-  authority: createDrizzleMutationAuthority({
-    db,
-    scope: (actor) => actor.userId,
-  }),
-  commands: [bindMutation(renameNote, renameNoteCommand)], // screen / admit / execute / repeat-safe finalizeAccepted
+  binder: notesBinder,
+  // renameNoteBinding = notesBinder.bind(renameNote, { screen, admit, execute,
+  // finalizeAccepted }), written in any module; see "Drizzle/Postgres authority"
+  commands: [renameNoteBinding],
   invalidations: notesInvalidationPublisher, // omit both lines without realtime
   reportInvalidationFailure,
 })
@@ -435,7 +451,7 @@ that need the request's `parseRefusal`, and a rerun when a command throws
 `MutationContentionError`. An attempt that wrote state commits only if no other
 commit landed since it began; otherwise it reruns. `contendNext(update)` commits
 `update` during the next attempt so a test can make that attempt lose a race.
-It passes to `createNextMutationAction` as is. The invalidation bus fans
+It passes to `createMutationBinder` as is. The invalidation bus fans
 accepted vectors into singleton per-axis entries and follows subscription
 lifetimes.
 
@@ -463,28 +479,71 @@ baseline SQL is checked in at `drizzle/0000_headcanon_mutation_receipts.sql` for
 migration review and fixtures, and a test fails if it drifts from the table
 definition. Receipts are written once; `created_at` is indexed for pruning.
 
-Declare each command with its context types. `bindMutation` infers a
-command's `args` from the mutation, but not its `actor`, `executor`, or `tx`:
-written inline in the `commands` list, those parameters are `unknown`. Name
-the transaction as `DrizzleMutationTx<typeof db>` rather than hand-deriving it
-from the client type, and the screening executor as the authority's
-`preflight`:
+Create one binder from the trusted actor callback and the authority, and bind
+every command with it. The actor type comes from the callback alone. The
+authority must accept every actor the callback can return: an authority whose
+`scope` reads a field that some returned actor lacks is a compile error on
+`authority`. A bound command needs no type annotation. `actor`, `executor` (the
+authority's `preflight`), and `tx` come from the binder, `args` comes from the
+mutation, and `evidence` and `projection` come from what `admit` and `screen`
+return. This is true inline in the `commands` list and in a command's own
+module:
 
 ```ts
-const authority = createDrizzleMutationAuthority({ db, scope })
+// lib/notes-binder.ts (server-only; imports no command module)
+export const notesAuthority = createDrizzleMutationAuthority({
+  db,
+  scope: (actor: Actor) => actor.userId,
+})
+export const notesBinder = createMutationBinder({
+  actor: requireActor,
+  authority: notesAuthority,
+})
 
-const renameNoteCommand: MutationCommand<
-  typeof renameNote,
-  Actor,
-  (typeof authority)["preflight"],
-  DrizzleMutationTx<typeof db>,
-  RenameProjection,
-  RenameEvidence
-> = { screen, admit, execute }
+// lib/commands/rename-note.ts
+export const renameNoteBinding = notesBinder.bind(renameNote, {
+  screen: async ({ executor, actor, args }) => {
+    const note = await executor.query.notes.findFirst(/* … */)
+    return note ? allowMutationScreening({ title: note.title }) : denyMutation()
+  },
+  admit: async ({ tx, actor, args }) => allowMutation({ row }),
+  execute: async ({ tx, args, evidence, stamp }) => {
+    /* write through tx, then stamp.record(axis, revision) */
+    return acceptMutation()
+  },
+  finalizeAccepted: async ({ projection }) => {
+    /* repeat-safe; projection is what screen returned */
+  },
+})
+
+// lib/commands/index.ts
+export const noteCommands = [renameNoteBinding, archiveNoteBinding] as const
+
+// lib/actions/notes/apply.ts ("use server")
+export const applyNotesMutationAction = createNextMutationAction({
+  protocol: notesProtocol,
+  binder: notesBinder,
+  commands: noteCommands,
+})
 ```
 
-`createNextMutationAction` then checks each declared command against its
-`actor` and `authority`.
+- Create the binder once, at module level, next to the authority. The binder
+  module must not import command modules: commands import the binder.
+- Write a command's members in lifecycle order: `screen`, `admit`, `execute`,
+  `finalizeAccepted`. TypeScript infers `evidence` from `admit` and
+  `projection` from `screen` only when that member comes first; otherwise they
+  are `unknown`.
+- `commands` must be one fixed list that binds each protocol mutation exactly
+  once. Write it inline, or declare it elsewhere with `as const`. Do not choose
+  the list, or one of its entries, with a condition: the compiler rejects a
+  union of lists or of bindings.
+- The action accepts only bindings made by the binder it is given. A binding
+  from another binder, even one with the same types, throws when the action is
+  created. Types cannot tell two such binders apart.
+
+`DrizzleMutationTx<typeof db>` names the transaction type for helpers that take
+a `tx`. A command object declared on its own, outside `bind`, is typed as a
+`MutationCommand`.
 
 The adapter requires an interactive Postgres Drizzle client: for Neon, use the
 WebSocket `Pool` integration rather than the HTTP query client. It acquires a

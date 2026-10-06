@@ -35,8 +35,8 @@ export type DrizzleMutationTransaction<
 
 /**
  * The transaction a mutation command runs inside, derived from the adopter's own
- * Drizzle database type. Use it as the `Transaction` of a declared
- * `MutationCommand`: `bindMutation` does not infer a command's `tx` type.
+ * Drizzle database type. A binder already types a bound command's `tx`; use
+ * this for helpers that take a `tx` and for a standalone `MutationCommand`.
  */
 export type DrizzleMutationTx<
   DB extends PgDatabase<PgQueryResultHKT, Record<string, unknown>>,
