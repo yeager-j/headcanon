@@ -1,12 +1,11 @@
-import { execFileSync } from "node:child_process"
 import { err, ok } from "serializable-result"
 import { describe, expect, it } from "vitest"
 
+import { createInMemoryMutationAuthority } from "."
 import {
   throwMutationContention,
   type MutationAuthorityRequest,
 } from "../core/authority"
-import { createInMemoryMutationAuthority } from "./index"
 
 type Refusal = { readonly code: "refused" }
 
@@ -168,48 +167,5 @@ describe("in-memory mutation authority", () => {
 
     expect(screenedMidAttempt).toBe(0)
     expect(authority.preflight.read()).toBe(5)
-  })
-})
-
-describe("headcanon/testing entry", () => {
-  it("imports in plain Node without vitest or Testing Library", () => {
-    // Resolves the extensionless source imports and refuses any test
-    // framework, so a stray import fails here rather than in an adopter's
-    // Jest run or Next server module.
-    const hook = `
-      export async function resolve(specifier, context, next) {
-        if (specifier === "vitest" || specifier.startsWith("vitest/") ||
-            specifier.startsWith("@testing-library/")) {
-          throw new Error("headcanon/testing imported " + specifier)
-        }
-        if (specifier.startsWith(".") && !/\\.[cm]?[jt]sx?$/.test(specifier)) {
-          return next(specifier + ".ts", context)
-        }
-        return next(specifier, context)
-      }`
-    const script = `
-      import { register } from "node:module"
-      register("data:text/javascript," + encodeURIComponent(${JSON.stringify(hook)}))
-      const testing = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)})
-      const authority = testing.createInMemoryMutationAuthority({
-        initialState: 0,
-        scope: (actor) => actor,
-      })
-      const invalidations = testing.createInMemoryInvalidationAdapter()
-      console.log(JSON.stringify([authority.read(), invalidations.published]))`
-
-    const output = execFileSync(
-      process.execPath,
-      [
-        "--experimental-strip-types",
-        "--no-warnings",
-        "--input-type=module",
-        "--eval",
-        script,
-      ],
-      { encoding: "utf8" }
-    )
-
-    expect(output.trim()).toBe("[0,[]]")
   })
 })

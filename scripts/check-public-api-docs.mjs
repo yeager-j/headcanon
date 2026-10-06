@@ -4,25 +4,8 @@ import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import ts from "typescript"
 
+import { compilerOptions } from "./compiler-options.mjs"
 import { packageEntries, ROOT } from "./package-entries.mjs"
-
-/** @param {string} tsconfig */
-function compilerOptions(tsconfig) {
-  const parsed = ts.getParsedCommandLineOfConfigFile(
-    tsconfig,
-    {},
-    {
-      ...ts.sys,
-      onUnRecoverableConfigFileDiagnostic(diagnostic) {
-        throw new Error(
-          ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")
-        )
-      },
-    }
-  )
-  if (!parsed) throw new Error(`Cannot read ${tsconfig}.`)
-  return parsed.options
-}
 
 /**
  * Checks that every declaration exported from a public entry has JSDoc, and

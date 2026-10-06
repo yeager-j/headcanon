@@ -62,33 +62,6 @@ export default [
     },
   },
   {
-    // `headcanon/testing` must load without a test framework; only the suites
-    // and the entries that publish them may import one. `src/testing/index.test.ts`
-    // checks the entry's whole import graph at run time; this rule names the
-    // offending file at lint time.
-    files: ["src/testing/**/*.ts"],
-    ignores: [
-      "src/testing/suites/**",
-      "src/testing/contracts.ts",
-      "src/testing/react.ts",
-      "src/testing/**/*.test.ts",
-    ],
-    rules: {
-      "no-restricted-imports": [
-        "error",
-        {
-          patterns: [
-            {
-              group: ["vitest", "vitest/*", "@testing-library/*"],
-              message:
-                "Test doubles must not import a test framework. Put suites in src/testing/suites/.",
-            },
-          ],
-        },
-      ],
-    },
-  },
-  {
     files: ["**/*.mjs"],
     languageOptions: {
       globals: globals.node,

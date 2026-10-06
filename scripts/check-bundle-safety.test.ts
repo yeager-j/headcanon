@@ -8,6 +8,8 @@ import {
   scanClientEntries,
   scanEntryGraph,
   scanSource,
+  scanTestDoubleGraph,
+  testDoubleEntries,
 } from "./check-bundle-safety.mjs"
 
 const roots: string[] = []
@@ -143,13 +145,28 @@ describe("client-graph walk", () => {
     }
   )
 
+  it("follows a folder import to its index file, as the build does", () => {
+    const root = tree({
+      "src/entry.ts": 'export { a } from "./a"',
+      "src/a/index.ts": 'import { readFileSync } from "node:fs"',
+    })
+
+    expect(scanEntryGraph(join(root, "src/entry.ts"), { root })).toEqual([
+      expect.objectContaining({
+        file: "src/a/index.ts",
+        specifier: "node:fs",
+        rule: "Node built-in in client graph",
+      }),
+    ])
+  })
+
   it("rejects a relative import that resolves to no file", () => {
     const root = tree({ "src/entry.ts": 'import { a } from "./missing"' })
 
     expect(scanEntryGraph(join(root, "src/entry.ts"), { root })).toEqual([
       expect.objectContaining({
         specifier: "./missing",
-        rule: "unresolved relative import in client graph",
+        rule: "unresolved relative import",
       }),
     ])
   })
@@ -189,6 +206,55 @@ describe("client-graph walk", () => {
     expect(scanClientEntries(entries, root)).toEqual([
       expect.objectContaining({ file: "src/shared.ts", specifier: "node:fs" }),
     ])
+  })
+})
+
+describe("test-double graph", () => {
+  it.each(["vitest", "vitest/config", "@testing-library/react"])(
+    "rejects a test framework reached through imports: %s",
+    (specifier) => {
+      const root = tree({
+        "src/testing/index.ts": 'export { double } from "./double"',
+        "src/testing/double.ts": `import { x } from "${specifier}"`,
+      })
+
+      expect(
+        scanTestDoubleGraph(join(root, "src/testing/index.ts"), root)
+      ).toEqual([
+        expect.objectContaining({
+          file: "src/testing/double.ts",
+          specifier,
+          rule: "test framework in test-double graph",
+        }),
+      ])
+    }
+  )
+
+  it("allows Node built-ins and other packages in a test-double graph", () => {
+    const root = tree({
+      "src/testing/index.ts":
+        'import { randomUUID } from "node:crypto"\nimport { ok } from "serializable-result"',
+    })
+
+    expect(
+      scanTestDoubleGraph(join(root, "src/testing/index.ts"), root)
+    ).toEqual([])
+  })
+
+  it("selects only the exact test-double export, not the suites", () => {
+    const entries = ["./testing", "./testing/contracts", "./testing/react"].map(
+      (key) => ({ key, source: `/src/${key}.ts` })
+    )
+
+    expect(testDoubleEntries(entries).map(({ key }) => key)).toEqual([
+      "./testing",
+    ])
+  })
+
+  it("keeps the real headcanon/testing graph free of test frameworks", () => {
+    const [testing] = testDoubleEntries()
+    expect(testing?.key).toBe("./testing")
+    expect(scanTestDoubleGraph(testing!.source)).toEqual([])
   })
 })
 

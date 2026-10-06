@@ -24,6 +24,12 @@ Inside `src`, export `./a` builds from `src/a/index.ts` and `./a/b` from
 `headcanon/drizzle-schema`, which builds from `src/drizzle/schema.ts`. Every
 other file is internal. Tests sit beside the file they test.
 
+Relative imports name no extension and no `/index`: write `../react`, not
+`../react/index`. `tsconfig.build.json` (`moduleResolution: "Bundler"`) is the
+one authority for how an import resolves. The build's `tsc-alias` step turns
+each into a full Node path, and the gates that follow imports ask TypeScript
+with the same options instead of guessing.
+
 | Folder        | What it holds                                                                    |
 | ------------- | -------------------------------------------------------------------------------- |
 | `src/core`    | The protocol model and authority. No React or Next: it is the `headcanon` graph. |
@@ -34,10 +40,8 @@ other file is internal. Tests sit beside the file they test.
 | `src/testing` | Test doubles; the contract suites are in `suites/`.                              |
 
 `headcanon/testing` holds only test doubles and must import no test framework:
-`src/testing/index.test.ts` imports it in plain Node with `vitest` and Testing
-Library blocked, and lint rejects a test-framework import anywhere in
-`src/testing/` outside `suites/` and the two entries that publish them.
-Contract suites go in `src/testing/suites/` and are published from
+`scripts/check-bundle-safety.mjs` walks its import graph and rejects `vitest`
+and Testing Library. Contract suites go in `src/testing/suites/` and are published from
 `headcanon/testing/contracts` (vitest) or `headcanon/testing/react` (vitest,
 Testing Library, DOM). Each suite's cases also run against deliberately broken
 harnesses in `src/testing/*.test.ts`, so a new case needs a broken harness that
@@ -52,7 +56,7 @@ script that needs it builds it first, and fixture scripts never do.
 npm install
 npm run lint
 npm run typecheck             # the package and gate scripts; no build
-npm run check:bundle-safety   # browser entries import nothing server-only
+npm run check:bundle-safety   # browser entries import nothing server-only; test doubles import no test framework
 npm run check:public-api-docs # every public export has JSDoc
 npm test                      # set HEADCANON_TEST_DATABASE_URL to run the Postgres suite
 npm run check:package         # builds; publint + Are the Types Wrong

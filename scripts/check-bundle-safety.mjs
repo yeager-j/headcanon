@@ -1,10 +1,12 @@
 // @ts-check
 
-import { existsSync, readFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { builtinModules } from "node:module"
-import { dirname, extname, join, relative, resolve } from "node:path"
+import { relative } from "node:path"
 import { pathToFileURL } from "node:url"
+import ts from "typescript"
 
+import { compilerOptions } from "./compiler-options.mjs"
 import { packageEntries, ROOT } from "./package-entries.mjs"
 
 /**
@@ -23,6 +25,16 @@ const SERVER_ONLY_EXPORTS = [
 
 /** The export whose graph must also stay free of React and Next. */
 const SHARED_EXPORT = "."
+
+/**
+ * Exports of test doubles. Their graphs must import no test framework, so the
+ * doubles load in any runner and in an application's server code. The exact
+ * key only: `./testing/contracts` and `./testing/react` publish vitest suites.
+ */
+const TEST_DOUBLE_EXPORTS = ["./testing"]
+
+/** Test frameworks a test-double graph may not import, subpaths included. */
+const TEST_FRAMEWORK_PACKAGES = ["vitest", "@testing-library"]
 
 /**
  * Third-party packages a client graph may import. The walk does not descend
@@ -44,8 +56,7 @@ const FRAMEWORK_PACKAGES = ["next", "react", "react-dom"]
 const BUILT_INS = new Set(
   builtinModules.flatMap((specifier) => [specifier, `node:${specifier}`])
 )
-// `./handler.server` has no source extension, so it still gets candidates.
-const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".mjs"]
+const RESOLUTION_OPTIONS = compilerOptions()
 const IMPORT_PATTERNS = [
   /^[ \t]*(?:import|export)\b[^"';]*?\bfrom\s*["']([^"']+)["']/gm,
   /^[ \t]*import\s*["']([^"']+)["']/gm,
@@ -126,6 +137,16 @@ export function clientEntries(entries = packageEntries()) {
 }
 
 /**
+ * Selects the entries that publish test doubles.
+ *
+ * @param {import("./package-entries.mjs").PackageEntry[]} [entries] The package's entries.
+ * @returns {import("./package-entries.mjs").PackageEntry[]} The test-double entries.
+ */
+export function testDoubleEntries(entries = packageEntries()) {
+  return entries.filter(({ key }) => TEST_DOUBLE_EXPORTS.includes(key))
+}
+
+/**
  * Checks one file's own source against the client-graph rules.
  *
  * @param {string} file Root-relative path, used in reports.
@@ -183,39 +204,50 @@ export function scanSource(file, source, frameworkFree = false) {
 }
 
 /**
- * @param {string} importer
- * @param {string} specifier
+ * Resolves a relative import exactly as the build does.
+ *
+ * @param {string} importer Absolute path of the importing file.
+ * @param {string} specifier The relative specifier.
+ * @returns {string | undefined} The resolved source file, if any.
  */
 function resolveRelativeImport(importer, specifier) {
-  const target = resolve(dirname(importer), specifier)
-  const candidates = SOURCE_EXTENSIONS.includes(extname(target))
-    ? [target]
-    : [
-        `${target}.ts`,
-        `${target}.tsx`,
-        `${target}.js`,
-        `${target}.mjs`,
-        join(target, "index.ts"),
-        join(target, "index.tsx"),
-      ]
-
-  return candidates.find(existsSync)
+  // Under Node16/NodeNext the importer's own format (ESM or CommonJS) picks
+  // the resolution rules; without it TypeScript falls back to CommonJS.
+  const mode = ts.getImpliedNodeFormatForFile(
+    importer,
+    undefined,
+    ts.sys,
+    RESOLUTION_OPTIONS
+  )
+  return ts.resolveModuleName(
+    specifier,
+    importer,
+    RESOLUTION_OPTIONS,
+    ts.sys,
+    undefined,
+    undefined,
+    mode
+  ).resolvedModule?.resolvedFileName
 }
 
 /**
- * Walks every relative import reachable from one entry file and checks each
- * file it reaches.
+ * @typedef {object} GraphCheck
+ * @property {(file: string, source: string) => Violation[]} file Checks one
+ *   reached file's own source.
+ * @property {(file: string, line: number, specifier: string, target: string) => Violation[]} [edge]
+ *   Checks one resolved relative import.
+ */
+
+/**
+ * Walks every relative import reachable from one entry file and applies a
+ * check to each file and import it reaches.
  *
  * @param {string} entry Absolute path of the entry's source file.
- * @param {{ frameworkFree?: boolean, root?: string }} [options] Whether React
- *   and Next are forbidden in this graph, and the root that report paths are
- *   relative to.
+ * @param {string} root The root that report paths are relative to.
+ * @param {GraphCheck} check The rules for this graph.
  * @returns {Violation[]} Every rule broken in the graph.
  */
-export function scanEntryGraph(
-  entry,
-  { frameworkFree = false, root = ROOT } = {}
-) {
+function walkEntryGraph(entry, root, check) {
   const pending = [entry]
   const visited = new Set()
   const violations = []
@@ -227,7 +259,7 @@ export function scanEntryGraph(
     visited.add(file)
     const source = readFileSync(file, "utf8")
     const displayPath = relative(root, file).split("\\").join("/")
-    violations.push(...scanSource(displayPath, source, frameworkFree))
+    violations.push(...check.file(displayPath, source))
 
     for (const { specifier, line } of importSpecifiers(source)) {
       if (!specifier?.startsWith(".")) continue
@@ -238,25 +270,68 @@ export function scanEntryGraph(
           file: displayPath,
           line,
           specifier,
-          rule: "unresolved relative import in client graph",
+          rule: "unresolved relative import",
         })
         continue
       }
 
       const targetPath = relative(root, target).split("\\").join("/")
-      if (/(^|\/)(server|[^/]+\.server)\b/.test(targetPath)) {
-        violations.push({
-          file: displayPath,
-          line,
-          specifier,
-          rule: "server module in client graph",
-        })
-      }
+      violations.push(
+        ...(check.edge?.(displayPath, line, specifier, targetPath) ?? [])
+      )
       pending.push(target)
     }
   }
 
   return violations
+}
+
+/**
+ * Walks every relative import reachable from one client entry file and checks
+ * each file it reaches.
+ *
+ * @param {string} entry Absolute path of the entry's source file.
+ * @param {{ frameworkFree?: boolean, root?: string }} [options] Whether React
+ *   and Next are forbidden in this graph, and the root that report paths are
+ *   relative to.
+ * @returns {Violation[]} Every rule broken in the graph.
+ */
+export function scanEntryGraph(
+  entry,
+  { frameworkFree = false, root = ROOT } = {}
+) {
+  return walkEntryGraph(entry, root, {
+    file: (file, source) => scanSource(file, source, frameworkFree),
+    edge: (file, line, specifier, target) =>
+      /(^|\/)(server|[^/]+\.server)\b/.test(target)
+        ? [{ file, line, specifier, rule: "server module in client graph" }]
+        : [],
+  })
+}
+
+/**
+ * Walks a test-double entry's graph and reports every test-framework import.
+ *
+ * @param {string} entry Absolute path of the entry's source file.
+ * @param {string} [root] The root that report paths are relative to.
+ * @returns {Violation[]} Every test-framework import in the graph.
+ */
+export function scanTestDoubleGraph(entry, root = ROOT) {
+  return walkEntryGraph(entry, root, {
+    file: (file, source) =>
+      importSpecifiers(source).flatMap(({ specifier, line }) =>
+        specifier && inPackages(specifier, TEST_FRAMEWORK_PACKAGES)
+          ? [
+              {
+                file,
+                line,
+                specifier,
+                rule: "test framework in test-double graph",
+              },
+            ]
+          : []
+      ),
+  })
 }
 
 /**
@@ -287,16 +362,23 @@ export function scanClientEntries(entries = clientEntries(), root = ROOT) {
 
 function run() {
   const entries = clientEntries()
-  const violations = scanClientEntries(entries)
+  const doubles = testDoubleEntries()
+  const violations = [
+    ...scanClientEntries(entries),
+    ...doubles.flatMap(({ source }) => scanTestDoubleGraph(source)),
+  ]
 
   if (violations.length === 0) {
     console.log(
       `✓ ${entries.length} client entries are bundle-safe: ${entries.map(({ key }) => key).join(", ")}`
     )
+    console.log(
+      `✓ ${doubles.length} test-double entry imports no test framework: ${doubles.map(({ key }) => key).join(", ")}`
+    )
     return
   }
 
-  console.error("✖ headcanon client entry dependency violations:\n")
+  console.error("✖ headcanon entry dependency violations:\n")
   for (const violation of violations) {
     console.error(
       `  ${violation.file}:${violation.line}  ${violation.specifier ?? violation.rule}\n    └─ ${violation.rule}`
