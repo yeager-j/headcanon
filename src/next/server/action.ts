@@ -15,12 +15,11 @@ import type {
   InvalidationPublisher,
 } from "../../core/invalidation"
 import type {
-  AnyMutationDefinition,
+  AnyProtocolDefinition,
   MutationRefusalOf,
-  ProtocolDefinition,
 } from "../../core/protocol"
 import {
-  assertCompleteBindings,
+  assertValidBindings,
   type AnyMutationBinding,
   type BoundMutation,
   type MutationBinder,
@@ -92,23 +91,20 @@ type ActionInvalidations =
  * condition: the compiler rejects a union of lists or of bindings instead of
  * guessing which one runs.
  *
- * The returned action treats its argument as untrusted: it parses the envelope,
- * revalidates arguments, derives canonical identity, and resolves the matching
- * command by mutation-definition identity before it derives the actor from the
- * binder's trusted callback, so a malformed request never reaches application
- * code. It runs screening before receipt ownership, and runs admission plus
- * execution inside the authority's retryable transaction attempts. Every
- * command callback receives its own copy of the parsed arguments. The
+ * The returned action treats its argument as untrusted: a malformed or unknown
+ * envelope returns an executor error before the binder's actor callback or any
+ * command runs. It runs `screen` before it claims a receipt, and runs `admit`
+ * and `execute` inside the authority's transaction attempts, which may repeat.
+ * `screen` and `finalizeAccepted` each receive their own copy of the parsed
+ * arguments; `admit` and `execute` share one fresh copy per attempt. The
  * authority owns receipt deduplication and contention; commands own
  * application authorization, domain writes, axis stamping, and the
  * repeat-safe `finalizeAccepted` projection.
  *
  * A denial, from screening or from a recorded transaction-time admission,
  * returns `ok({ kind: "denied" })`. It carries no reason, so it reveals no
- * more than an HTTP 403, and it needs no Next configuration: the action does
- * not throw Next's experimental `forbidden()`, which fails unless
- * `experimental.authInterrupts` is enabled. A screening denial claims no
- * receipt; a recorded denial replays on redelivery.
+ * more than an HTTP 403, and it needs no Next configuration. A screening denial
+ * claims no receipt; a recorded denial replays on redelivery.
  *
  * After acceptance the action first runs `finalizeAccepted`, then expires
  * the affected Next cache tags, refreshes the invoking route, and publishes
@@ -128,10 +124,7 @@ type ActionInvalidations =
  * @throws Trusted actor or command callbacks may throw unexpected application/framework failures.
  */
 export function createNextMutationAction<
-  const Protocol extends ProtocolDefinition<
-    string,
-    readonly AnyMutationDefinition[]
-  >,
+  const Protocol extends AnyProtocolDefinition,
   Transaction,
   Actor,
   Preflight,
@@ -148,7 +141,7 @@ export function createNextMutationAction<
   type Terminal = MutationTerminalOutcome<Refusal>
 
   const { binder } = options
-  assertCompleteBindings(options.protocol, binder, options.commands)
+  assertValidBindings(options.protocol, binder, options.commands)
   const bindings = new Map(
     options.commands.map((binding) => [
       binding.mutation.name,
@@ -223,7 +216,7 @@ export function createNextMutationAction<
         actor,
         args: structuredClone(prepared.value.args),
         stamp,
-        projection: screening.projection,
+        screened: screening.screened,
       })
     } finally {
       await finalizeStamp(

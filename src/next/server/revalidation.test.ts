@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   announceExternalCommit,
   axisCacheTag,
+  defineCachedCanon,
   finalizeExternalActionCommit,
-  MAX_VERSIONED_BASE_AXES,
-  tagVersionedBase,
+  MAX_CACHED_CANON_AXES,
 } from "."
 import {
   acceptedStamp,
@@ -74,7 +74,7 @@ describe("axis cache tags", () => {
   })
 
   it("parses the loader's observation and tags every axis in one call", async () => {
-    const canon = await tagVersionedBase({
+    const canon = await defineCachedCanon({
       value: "canon",
       revisions: { "entity/one": 1, "entity/two": 2 },
     })
@@ -93,7 +93,7 @@ describe("axis cache tags", () => {
 
   it("rejects an invalid revision like defineCanon, before tagging", async () => {
     await expect(
-      tagVersionedBase({ value: null, revisions: { "entity/one": -1 } })
+      defineCachedCanon({ value: null, revisions: { "entity/one": -1 } })
     ).rejects.toThrow(
       'defineCanon received an invalid revision vector: invalid-revision-vector at axis "entity/one" (negative)'
     )
@@ -102,13 +102,13 @@ describe("axis cache tags", () => {
 
   it("fails before cacheTag can accept a partial 129-axis entry", async () => {
     const revisions = Object.fromEntries(
-      Array.from({ length: MAX_VERSIONED_BASE_AXES + 1 }, (_, index) => [
+      Array.from({ length: MAX_CACHED_CANON_AXES + 1 }, (_, index) => [
         `axis/${index}`,
         index,
       ])
     )
 
-    await expect(tagVersionedBase({ value: null, revisions })).rejects.toThrow(
+    await expect(defineCachedCanon({ value: null, revisions })).rejects.toThrow(
       RangeError
     )
     expect(nextCache.cacheTag).not.toHaveBeenCalled()

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { cacheTag, refresh, revalidateTag, updateTag } from "next/cache"
 
 import type {
+  InvalidationPublicationFailure,
   InvalidationPublicationFailureReporter,
   InvalidationPublisher,
 } from "../../core/invalidation"
@@ -14,8 +15,8 @@ import {
 } from "../../core/revisions"
 import { sha256Hex } from "../../core/sha256"
 
-/** Maximum axis count supported by one Next cache-tagged versioned base. */
-export const MAX_VERSIONED_BASE_AXES = 128
+/** Maximum axis count one cache-tagged canon may observe: Next's tag limit. */
+export const MAX_CACHED_CANON_AXES = 128
 
 const AXIS_CACHE_TAG_PREFIX = "headcanon:axis:v1:"
 const INVALIDATION_PUBLICATION_TIMEOUT_MS = 1_000
@@ -34,17 +35,17 @@ export async function axisCacheTag(axis: AxisId): Promise<string> {
  * @param input Loader value and raw axis revisions observed together.
  * @returns A promise for the frozen canon, after registering its cache tags.
  * @throws Error when the supplied revision vector is invalid.
- * @throws RangeError when the base exceeds the Next tag limit.
+ * @throws RangeError when the canon observes more than {@link MAX_CACHED_CANON_AXES} axes.
  */
-export async function tagVersionedBase<State>(input: {
+export async function defineCachedCanon<State>(input: {
   readonly value: State
   readonly revisions: Readonly<Record<string, number>>
 }): Promise<Canon<State>> {
   const canon = defineCanon(input)
   const axes = revisionEntries(canon.revisions).map(([axis]) => axis)
-  if (axes.length > MAX_VERSIONED_BASE_AXES) {
+  if (axes.length > MAX_CACHED_CANON_AXES) {
     throw new RangeError(
-      `A versioned base may observe at most ${MAX_VERSIONED_BASE_AXES} axes; received ${axes.length}`
+      `A cached canon may observe at most ${MAX_CACHED_CANON_AXES} axes; received ${axes.length}`
     )
   }
 
@@ -52,16 +53,41 @@ export async function tagVersionedBase<State>(input: {
   return canon
 }
 
-type ExpireAxis = (tag: string) => void
+type ExpireTag = (tag: string) => void
 
 function recordPublicationFailure(
   reportFailure: InvalidationPublicationFailureReporter,
-  failure: Parameters<InvalidationPublicationFailureReporter>[0]
+  failure: InvalidationPublicationFailure
 ): void {
   try {
     reportFailure(failure)
   } catch {
     // Diagnostics remain advisory just like the publication they observe.
+  }
+}
+
+/**
+ * Waits for `work` to settle, or for `ms` to pass. A throw or rejection from
+ * `work` propagates.
+ */
+async function settleWithin(
+  work: () => unknown,
+  ms: number
+): Promise<"settled" | "timed-out"> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<"timed-out">((resolve) => {
+    timeout = setTimeout(() => resolve("timed-out"), ms)
+  })
+
+  try {
+    return await Promise.race([
+      Promise.resolve()
+        .then(work)
+        .then(() => "settled" as const),
+      timedOut,
+    ])
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
@@ -71,21 +97,11 @@ async function publishInvalidation(
   reportFailure: InvalidationPublicationFailureReporter
 ): Promise<void> {
   const eventId = randomUUID()
-  let timeout: ReturnType<typeof setTimeout> | undefined
-  const timedOut = new Promise<"timed-out">((resolve) => {
-    timeout = setTimeout(
-      () => resolve("timed-out"),
+  try {
+    const outcome = await settleWithin(
+      () => invalidations.publish(eventId, stamp),
       INVALIDATION_PUBLICATION_TIMEOUT_MS
     )
-  })
-
-  try {
-    const outcome = await Promise.race([
-      Promise.resolve()
-        .then(() => invalidations.publish(eventId, stamp))
-        .then(() => "published" as const),
-      timedOut,
-    ])
     if (outcome === "timed-out") {
       recordPublicationFailure(reportFailure, {
         kind: "timed-out",
@@ -100,8 +116,6 @@ async function publishInvalidation(
       stamp,
       error,
     })
-  } finally {
-    clearTimeout(timeout)
   }
 }
 
@@ -113,12 +127,12 @@ export interface Publication {
 
 export async function finalizeStamp(
   stamp: AcceptedStamp,
-  expireAxis: ExpireAxis,
+  expireTag: ExpireTag,
   refreshRoute: (() => void) | undefined,
   publication: Publication | undefined
 ): Promise<void> {
   for (const [axis] of revisionEntries(stamp.revisions)) {
-    expireAxis(await axisCacheTag(axis))
+    expireTag(await axisCacheTag(axis))
   }
 
   refreshRoute?.()
@@ -131,7 +145,9 @@ export async function finalizeStamp(
   }
 }
 
-/** Finalizes a non-protocol commit made inside a Server Action.
+/**
+ * Finalizes a non-protocol commit from inside a Server Action: expires its
+ * axis tags, refreshes the invoking route, then publishes.
  * @param stamp Accepted revisions advanced by the commit.
  * @param invalidations Application-owned invalidation publisher.
  * @param reportFailure Diagnostic sink for publication failures.
@@ -148,7 +164,10 @@ export function finalizeExternalActionCommit(
   })
 }
 
-/** Finalizes a non-protocol commit without an invoking route to refresh.
+/**
+ * Finalizes a non-protocol commit outside a Server Action (Route Handler,
+ * webhook, job): expires its axis tags at once, then publishes. It refreshes
+ * no route.
  * @param stamp Accepted revisions advanced by the commit.
  * @param invalidations Application-owned invalidation publisher.
  * @param reportFailure Diagnostic sink for publication failures.

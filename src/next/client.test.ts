@@ -4,7 +4,7 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { forbidden, notFound, redirect, unauthorized } from "next/navigation"
 import { err, ok, type Result } from "serializable-result"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest"
 
 import {
   acceptedStamp,
@@ -114,6 +114,22 @@ function thrownBy(raise: () => never): unknown {
   }
 }
 
+/**
+ * Records `signal` when it reaches the window's error handler, and stops jsdom
+ * reporting it.
+ */
+function captureWindowSignal(signal: unknown) {
+  const propagated = vi.fn()
+  const listener = (event: ErrorEvent) => {
+    if (event.error !== signal) return
+    event.preventDefault()
+    propagated(event.error)
+  }
+  window.addEventListener("error", listener)
+  onTestFinished(() => window.removeEventListener("error", listener))
+  return propagated
+}
+
 /** Mounts a root over `action` and records one mutation. */
 function mountAction(
   action: GuardedAction,
@@ -185,54 +201,34 @@ describe("Next client binding", () => {
       vi.stubEnv("__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS", "true")
       const signal = thrownBy(raise)
       expect(signal).toHaveProperty("digest")
-      const propagated = vi.fn()
-      const captureSignal = (event: ErrorEvent) => {
-        if (event.error !== signal) return
-        event.preventDefault()
-        propagated(event.error)
-      }
-      window.addEventListener("error", captureSignal)
+      const propagated = captureWindowSignal(signal)
 
-      try {
-        const { receipt, result } = mountAction(async () => {
-          throw signal
-        })
-        const cancellation = err({ kind: "delivery-cancelled" } as const)
-        await expect(receipt.accepted).resolves.toEqual(cancellation)
-        await expect(receipt.canonized).resolves.toEqual(cancellation)
-        await waitFor(() => {
-          expect(result.current.status.pending).toBe(0)
-          expect(propagated).toHaveBeenCalledWith(signal)
-        })
-        expect(result.current.status.delivery).toBe("idle")
-      } finally {
-        window.removeEventListener("error", captureSignal)
-      }
+      const { receipt, result } = mountAction(async () => {
+        throw signal
+      })
+      const cancellation = err({ kind: "delivery-cancelled" } as const)
+      await expect(receipt.accepted).resolves.toEqual(cancellation)
+      await expect(receipt.canonized).resolves.toEqual(cancellation)
+      await waitFor(() => {
+        expect(result.current.status.pending).toBe(0)
+        expect(propagated).toHaveBeenCalledWith(signal)
+      })
+      expect(result.current.status.delivery).toBe("idle")
     }
   )
 
   it("propagates a control-flow signal nested as an error cause", async () => {
     const signal = thrownBy(() => redirect("/elsewhere"))
     const wrapped = new Error("wrapped by the application", { cause: signal })
-    const propagated = vi.fn()
-    const captureSignal = (event: ErrorEvent) => {
-      if (event.error !== signal) return
-      event.preventDefault()
-      propagated(event.error)
-    }
-    window.addEventListener("error", captureSignal)
+    const propagated = captureWindowSignal(signal)
 
-    try {
-      const { receipt } = mountAction(async () => {
-        throw wrapped
-      })
-      await expect(receipt.accepted).resolves.toEqual(
-        err({ kind: "delivery-cancelled" })
-      )
-      await waitFor(() => expect(propagated).toHaveBeenCalledWith(signal))
-    } finally {
-      window.removeEventListener("error", captureSignal)
-    }
+    const { receipt } = mountAction(async () => {
+      throw wrapped
+    })
+    await expect(receipt.accepted).resolves.toEqual(
+      err({ kind: "delivery-cancelled" })
+    )
+    await waitFor(() => expect(propagated).toHaveBeenCalledWith(signal))
   })
 
   it("returns accepted outcomes unchanged", async () => {
@@ -423,8 +419,8 @@ describe("Next action golden path", () => {
   })
 })
 
-// Compile-time regression (P2-13): the action form accepts every root option
-// except the two it replaces, so a new root option cannot be silently dropped.
+// Compile-time check: the action form accepts every root option except `send`,
+// which `action` replaces, so a new root option cannot be dropped silently.
 type ForwardedRootOption = Exclude<
   keyof PredictedRootOptions<typeof actionProtocol>,
   "send"

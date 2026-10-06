@@ -3,9 +3,9 @@
 export {
   announceExternalCommit,
   axisCacheTag,
+  defineCachedCanon,
   finalizeExternalActionCommit,
-  MAX_VERSIONED_BASE_AXES,
-  tagVersionedBase,
+  MAX_CACHED_CANON_AXES,
 } from "./revalidation"
 export {
   acceptMutation,

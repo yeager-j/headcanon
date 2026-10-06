@@ -131,15 +131,15 @@ const renameCommand: MutationCommand<
   undefined
 > = {
   screen: ({ args }) => {
-    void args.value
+    expectTypeOf(args).toEqualTypeOf<{ readonly value: string }>()
     return allowMutationScreening(undefined)
   },
   admit: ({ args }) => {
-    void args.value
+    expectTypeOf(args).toEqualTypeOf<{ readonly value: string }>()
     return allowMutation(undefined)
   },
   execute: ({ args }) => {
-    void args.value
+    expectTypeOf(args).toEqualTypeOf<{ readonly value: string }>()
     return acceptMutation()
   },
 }
@@ -166,7 +166,7 @@ const numberActorIncrementCommand: MutationCommand<
   null
 > = {
   screen: ({ actor }) => {
-    void actor.toFixed()
+    expectTypeOf(actor).toEqualTypeOf<number>()
     return allowMutationScreening(null)
   },
   admit: () => allowMutation(null),
@@ -390,7 +390,7 @@ describe("Next mutation action", () => {
     string,
     CounterPreflight,
     CounterTx,
-    { readonly screened: number },
+    { readonly count: number },
     { readonly observed: number }
   >
   type IncrementFinalization = NonNullable<IncrementCommand["finalizeAccepted"]>
@@ -414,7 +414,7 @@ describe("Next mutation action", () => {
         options.lifecycle?.push(`screen:${executor.read()}`)
         return options.denyScreen
           ? denyMutation()
-          : allowMutationScreening({ screened: executor.read() })
+          : allowMutationScreening({ count: executor.read() })
       },
       admit({ tx }) {
         options.lifecycle?.push(`admit:${tx.read()}`)
@@ -526,7 +526,7 @@ describe("Next mutation action", () => {
     let transactionAdmissions = 0
     const registered = {
       screen: ({ executor }) =>
-        allowMutationScreening({ screened: executor.read() }),
+        allowMutationScreening({ count: executor.read() }),
       admit() {
         transactionAdmissions += 1
         return denyMutation()
@@ -572,7 +572,7 @@ describe("Next mutation action", () => {
     expect(authority.read()).toBe(1)
   })
 
-  it("passes screening projection, never attempt evidence, to finalization", async () => {
+  it("passes the screened value, never attempt evidence, to finalization", async () => {
     const authority = createAuthority()
     const finalizeAccepted = vi.fn()
     const execute = action(authority, command({ finalizeAccepted }))
@@ -581,7 +581,7 @@ describe("Next mutation action", () => {
 
     expect(finalizeAccepted).toHaveBeenCalledWith(
       expect.objectContaining({
-        projection: { screened: 0 },
+        screened: { count: 0 },
       })
     )
     expect(finalizeAccepted.mock.calls[0]![0]).not.toHaveProperty("evidence")
@@ -665,7 +665,7 @@ describe("Next mutation action", () => {
 
   // README, Drizzle section: the binder fixes a command's context, so a
   // command needs no type annotation, inline or declared on its own.
-  it("infers a bound command's context, args, evidence, and projection", async () => {
+  it("infers a bound command's context, args, evidence, and screened value", async () => {
     const binder = createMutationBinder({
       actor: () => "actor",
       authority: createAuthority(),
@@ -675,7 +675,7 @@ describe("Next mutation action", () => {
         expectTypeOf(actor).toEqualTypeOf<string>()
         expectTypeOf(executor).toEqualTypeOf<CounterPreflight>()
         expectTypeOf(args).toEqualTypeOf<IncrementArgs>()
-        return allowMutationScreening({ screened: executor.read() })
+        return allowMutationScreening({ count: executor.read() })
       },
       admit: ({ tx, actor }) => {
         expectTypeOf(tx).toEqualTypeOf<CounterTx>()
@@ -686,8 +686,8 @@ describe("Next mutation action", () => {
         expectTypeOf(evidence).toEqualTypeOf<{ observed: number }>()
         return acceptMutation()
       },
-      finalizeAccepted: ({ projection }) => {
-        expectTypeOf(projection).toEqualTypeOf<{ screened: number }>()
+      finalizeAccepted: ({ screened }) => {
+        expectTypeOf(screened).toEqualTypeOf<{ count: number }>()
       },
     })
     expect(() =>
@@ -704,7 +704,7 @@ describe("Next mutation action", () => {
             expectTypeOf(actor).toEqualTypeOf<string>()
             expectTypeOf(executor).toEqualTypeOf<CounterPreflight>()
             expectTypeOf(args).toEqualTypeOf<IncrementArgs>()
-            return allowMutationScreening({ screened: executor.read() })
+            return allowMutationScreening({ count: executor.read() })
           },
           admit: ({ tx, actor }) => {
             expectTypeOf(tx).toEqualTypeOf<CounterTx>()
@@ -719,9 +719,9 @@ describe("Next mutation action", () => {
             stamp.record(axisId("counter/value"), tx.read())
             return acceptMutation()
           },
-          finalizeAccepted: ({ projection }) => {
-            expectTypeOf(projection).toEqualTypeOf<{ screened: number }>()
-            finalized(projection)
+          finalizeAccepted: ({ screened }) => {
+            expectTypeOf(screened).toEqualTypeOf<{ count: number }>()
+            finalized(screened)
           },
         }),
       ],
@@ -730,7 +730,7 @@ describe("Next mutation action", () => {
     await expect(execute(envelope)).resolves.toMatchObject(
       ok({ kind: "accepted" })
     )
-    expect(finalized).toHaveBeenCalledExactlyOnceWith({ screened: 0 })
+    expect(finalized).toHaveBeenCalledExactlyOnceWith({ count: 0 })
   })
 
   it("declares the actor once, from the callback, for any authority that accepts it", () => {
@@ -791,7 +791,7 @@ describe("Next mutation action", () => {
       ...command({ finalizeAccepted }),
       screen: ({ args }) => {
         ;(args as { amount: number }).amount = 99
-        return allowMutationScreening({ screened: 0 })
+        return allowMutationScreening({ count: 0 })
       },
     } satisfies IncrementCommand
 
@@ -806,7 +806,7 @@ describe("Next mutation action", () => {
     const authority = createAuthority()
     const registered: IncrementCommand = {
       screen: ({ executor }) =>
-        allowMutationScreening({ screened: executor.read() }),
+        allowMutationScreening({ count: executor.read() }),
       admit: ({ tx }) => allowMutation({ observed: tx.read() }),
       execute: ({ tx, args, stamp }) => {
         tx.write(tx.read() + args.amount)

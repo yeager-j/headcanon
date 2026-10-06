@@ -198,7 +198,7 @@ context to enforce them.
   boundary.
 - **Canon construction.** `defineCanon({ value, revisions })` parses a loader's
   raw axis keys and revision integers into a validated, frozen `Canon<State>`
-  for the uncached read path. `tagVersionedBase` in `headcanon/next/server`
+  for the uncached read path. `defineCachedCanon` in `headcanon/next/server`
   runs the same parse for `"use cache"` loaders and also tags the cache entry.
   Both throw on an invalid revision vector, since a loader emitting a malformed
   coordinate is a data-integrity fault rather than an expected boundary.
@@ -360,8 +360,8 @@ and default `refresh` to the App Router carrier. The same entry owns
 
 The server binding derives one bounded SHA-256 cache tag per axis (hashed the
 same way as the Ably channel name, so `axisCacheTag` is async),
-`tagVersionedBase` parses a `"use cache"` loader's `{ value, revisions }` into a
-canon and fails closed above Next's 128-tag ceiling, and
+`defineCachedCanon` parses a `"use cache"` loader's `{ value, revisions }`
+into a canon and fails closed above Next's 128-tag ceiling, and
 `createNextMutationAction` finalizes accepted stamps with `updateTag`, one
 shared-event invalidation publication, and server `refresh()`. It runs the
 command's `finalizeAccepted` projection first, so the projection exists before
@@ -485,7 +485,7 @@ authority must accept every actor the callback can return: an authority whose
 `scope` reads a field that some returned actor lacks is a compile error on
 `authority`. A bound command needs no type annotation. `actor`, `executor` (the
 authority's `preflight`), and `tx` come from the binder, `args` comes from the
-mutation, and `evidence` and `projection` come from what `admit` and `screen`
+mutation, and `evidence` and `screened` come from what `admit` and `screen`
 return. This is true inline in the `commands` list and in a command's own
 module:
 
@@ -511,8 +511,8 @@ export const renameNoteBinding = notesBinder.bind(renameNote, {
     /* write through tx, then stamp.record(axis, revision) */
     return acceptMutation()
   },
-  finalizeAccepted: async ({ projection }) => {
-    /* repeat-safe; projection is what screen returned */
+  finalizeAccepted: async ({ screened }) => {
+    /* repeat-safe; screened is what screen returned */
   },
 })
 
@@ -531,7 +531,7 @@ export const applyNotesMutationAction = createNextMutationAction({
   module must not import command modules: commands import the binder.
 - Write a command's members in lifecycle order: `screen`, `admit`, `execute`,
   `finalizeAccepted`. TypeScript infers `evidence` from `admit` and
-  `projection` from `screen` only when that member comes first; otherwise they
+  `screened` from `screen` only when that member comes first; otherwise they
   are `unknown`.
 - `commands` must be one fixed list that binds each protocol mutation exactly
   once. Write it inline, or declare it elsewhere with `as const`. Do not choose

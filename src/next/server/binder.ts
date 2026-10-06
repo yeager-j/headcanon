@@ -8,8 +8,10 @@ import type {
 import {
   findMutation,
   type AnyMutationDefinition,
+  type AnyProtocolDefinition,
+  type MutationContext,
   type MutationRefusalOf,
-  type ProtocolDefinition,
+  type ProtocolMutation,
 } from "../../core/protocol"
 import type { AcceptedStamp } from "../../core/revisions"
 
@@ -23,17 +25,20 @@ type MutationArgs<Mutation extends AnyMutationDefinition> = Mutation extends (
   ? Args
   : never
 
-type ProtocolMutation<Protocol> =
-  Protocol extends ProtocolDefinition<string, infer Mutations>
-    ? Mutations[number]
-    : never
-
-/** Immutable application context retained for repeat-safe accepted projections. */
-export type MutationScreening<Projection> =
-  | { readonly kind: "allowed"; readonly projection: Projection }
+/**
+ * A command's `screen` result: allowed, carrying the value `finalizeAccepted`
+ * receives as `screened`, or denied. Build it with
+ * {@link allowMutationScreening} or {@link denyMutation}.
+ */
+export type MutationScreening<Screened> =
+  | { readonly kind: "allowed"; readonly screened: Screened }
   | { readonly kind: "denied" }
 
-/** Evidence that transactional admission succeeded for one authority attempt. */
+/**
+ * A command's `admit` result for one transaction attempt: allowed, carrying
+ * trusted evidence for `execute`, or denied. Build it with
+ * {@link allowMutation} or {@link denyMutation}.
+ */
 export type MutationAdmission<Evidence> =
   | { readonly kind: "allowed"; readonly evidence: Evidence }
   | { readonly kind: "denied" }
@@ -56,18 +61,22 @@ export function allowMutation<Evidence>(
   return Object.freeze({ kind: "allowed", evidence })
 }
 
-/** Marks preflight screening as allowed and carries its repeat-safe projection.
- * @param projection Repeat-safe projection retained for accepted finalization.
+/**
+ * Marks preflight screening as allowed and carries the value
+ * `finalizeAccepted` receives as `screened`.
+ * @param screened Value retained for accepted finalization.
  * @returns An allowed screening decision.
  */
-export function allowMutationScreening<Projection>(
-  projection: Projection
-): MutationScreening<Projection> {
-  return Object.freeze({ kind: "allowed", projection })
+export function allowMutationScreening<Screened>(
+  screened: Screened
+): MutationScreening<Screened> {
+  return Object.freeze({ kind: "allowed", screened })
 }
 
-/** Returns the private denial decision, which is not exposed as a refusal.
- * @returns A denied command decision.
+/**
+ * Denies the mutation from `screen`, `admit`, or `execute`. The generated
+ * action returns `ok({ kind: "denied" })` with no reason, unlike a refusal.
+ * @returns A denied decision.
  */
 export function denyMutation(): { readonly kind: "denied" } {
   return Object.freeze({ kind: "denied" })
@@ -96,28 +105,47 @@ export interface MutationCommand<
   Actor,
   Preflight,
   Transaction,
-  Projection,
+  Screened,
   Evidence,
 > {
+  /**
+   * Runs once per delivery, outside any transaction and before the authority
+   * claims a receipt. Return {@link allowMutationScreening} or
+   * {@link denyMutation}; a denial claims no receipt.
+   */
   readonly screen: (context: {
+    /** The authority's preflight executor, which reads committed state only. */
     readonly executor: Preflight
     readonly actor: Actor
     readonly args: MutationArgs<Mutation>
-  }) => MutationScreening<Projection> | Promise<MutationScreening<Projection>>
+  }) => MutationScreening<Screened> | Promise<MutationScreening<Screened>>
+  /**
+   * Runs at the start of each transaction attempt, so it runs again after
+   * contention; read and write only through `tx`. Return
+   * {@link allowMutation} or {@link denyMutation}; a denial is recorded and
+   * replays on redelivery.
+   */
   readonly admit: (context: {
     readonly tx: Transaction
     readonly actor: Actor
     readonly args: MutationArgs<Mutation>
   }) => MutationAdmission<Evidence> | Promise<MutationAdmission<Evidence>>
-  readonly execute: (context: {
-    readonly tx: Transaction
-    readonly actor: Actor
-    readonly args: MutationArgs<Mutation>
-    readonly evidence: Evidence
-    readonly stamp: StampAccumulator
-    /** The package-owned identity parsed from the invocation envelope. */
-    readonly mutationId: string
-  }) =>
+  /**
+   * Runs after `admit` in the same attempt. Write domain rows through `tx`,
+   * record each axis the attempt advances on `stamp`, and return
+   * {@link acceptMutation}, {@link refuseMutation}, or {@link denyMutation}.
+   */
+  readonly execute: (
+    context: {
+      readonly tx: Transaction
+      readonly actor: Actor
+      readonly args: MutationArgs<Mutation>
+      /** The evidence `admit` returned in this attempt. */
+      readonly evidence: Evidence
+      /** Records each axis revision this attempt advances. */
+      readonly stamp: StampAccumulator
+    } & MutationContext
+  ) =>
     | MutationCommandDecision<MutationRefusalOf<Mutation>>
     | Promise<MutationCommandDecision<MutationRefusalOf<Mutation>>>
   /**
@@ -129,7 +157,8 @@ export interface MutationCommand<
     readonly actor: Actor
     readonly args: MutationArgs<Mutation>
     readonly stamp: AcceptedStamp
-    readonly projection: Projection
+    /** The value `screen` returned for this delivery. */
+    readonly screened: Screened
   }) => void | Promise<void>
 }
 
@@ -148,7 +177,9 @@ export interface MutationBinding<
   Mutation extends MutationWithRefusal,
   Command = unknown,
 > {
+  /** The protocol's definition object for this mutation. */
   readonly mutation: Mutation
+  /** The application command that runs this mutation. */
   readonly command: Command
   /** The binder that made this binding; only its action accepts the binding. */
   readonly binder: MutationBinderIdentity
@@ -178,11 +209,11 @@ export interface MutationBinder<
    * type. The command's `actor`, `executor`, and `tx` are this binder's, so a
    * command needs no type annotation. Write its members in lifecycle order
    * (`screen`, `admit`, `execute`, `finalizeAccepted`) so `evidence` and
-   * `projection` are inferred.
+   * `screened` are inferred.
    */
   readonly bind: <
     const Mutation extends MutationWithRefusal,
-    Projection,
+    Screened,
     Evidence,
   >(
     mutation: Mutation,
@@ -191,7 +222,7 @@ export interface MutationBinder<
       Actor,
       Preflight,
       Transaction,
-      Projection,
+      Screened,
       Evidence
     >
     // NoInfer: inside `commands`, the action's contextual type would otherwise
@@ -205,7 +236,7 @@ export interface MutationBinder<
         Actor,
         Preflight,
         Transaction,
-        Projection,
+        Screened,
         Evidence
       >
     >
@@ -317,7 +348,7 @@ type EachBinding<
                     Actor,
                     Preflight,
                     Transaction,
-                    infer _Projection,
+                    infer _Screened,
                     infer _Evidence
                   >,
                 ]
@@ -334,7 +365,7 @@ type EachBinding<
     : { readonly __commandsMustBeFixedList: never }
 
 /**
- * Compile-time form of `assertCompleteBindings`: one fixed list that binds
+ * Compile-time form of `assertValidBindings`: one fixed list that binds
  * every protocol mutation exactly once, each to a command that accepts the
  * action's context. A union of lists is rejected, not split.
  */
@@ -350,8 +381,8 @@ export type ValidBindings<
     : CompleteBindings<Protocol, Commands> &
         EachBinding<Commands, Actor, Preflight, Transaction>
 
-export function assertCompleteBindings(
-  protocol: ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
+export function assertValidBindings(
+  protocol: AnyProtocolDefinition,
   binder: MutationBinderIdentity,
   commands: readonly AnyMutationBinding[]
 ): void {
@@ -376,10 +407,10 @@ export function assertCompleteBindings(
   }
 
   const missing = [...expected].filter((name) => !registered.has(name))
-  const unknown = [...registered].filter((name) => !expected.has(name))
-  if (missing.length === 0 && unknown.length === 0) return
+  const unexpected = [...registered].filter((name) => !expected.has(name))
+  if (missing.length === 0 && unexpected.length === 0) return
 
   throw new Error(
-    `Incomplete mutation bindings: missing [${missing.join(", ")}], unknown [${unknown.join(", ")}]`
+    `Incomplete mutation bindings: missing [${missing.join(", ")}], unknown [${unexpected.join(", ")}]`
   )
 }
