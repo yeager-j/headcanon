@@ -8,10 +8,11 @@ import {
   useSyncExternalStore,
 } from "react"
 
-import type {
-  AxisInvalidation,
-  InvalidationAdapter,
-  InvalidationStatus,
+import {
+  createNoRealtimeInvalidationAdapter,
+  type AxisInvalidation,
+  type InvalidationAdapter,
+  type InvalidationStatus,
 } from "../core/invalidation"
 import {
   covers,
@@ -74,14 +75,27 @@ export type FreshnessState =
 
 /** Combined freshness and invalidation state exposed by root APIs. */
 export type IncorporationStatus = FreshnessState & {
+  /** Status of the invalidation subscription; `disabled` without an adapter. */
   readonly invalidations: InvalidationStatus
   /** Required axes the mounted canon does not carry at all. */
   readonly missingAxes: readonly AxisId[]
 }
 
-/** Creates the refresh carrier for a snapshot or non-router data source.
- * @param refetch Snapshot refetch operation.
- * @returns A refresh adapter with the snapshot grace policy.
+/**
+ * Creates the refresh carrier for a snapshot or non-router data source. Call
+ * it from the hook passed as a root's `refresh` option.
+ * @param refetch Snapshot refetch operation. Keep its identity stable: a new
+ *   function creates a new adapter. If it returns a promise, the attempt
+ *   completes when the promise settles; if it returns nothing, see
+ *   {@link RefreshAdapter} for when the attempt completes.
+ * @returns A refresh adapter that requests immediately after an acceptance.
+ * @example
+ * ```ts
+ * function useNotesRefresh() {
+ *   return useSnapshotRefresh(refetchNotes)
+ * }
+ * const useNotes = createPredictedRoot({ protocol, send, refresh: useNotesRefresh })
+ * ```
  */
 export function useSnapshotRefresh(
   refetch: () => void | Promise<void>
@@ -103,7 +117,7 @@ export function useSnapshotRefresh(
 type Wait =
   | { readonly kind: "grace"; readonly ms: number }
   | { readonly kind: "scheduled" }
-  | { readonly kind: "retry" }
+  | { readonly kind: "retry"; readonly ms: number }
 
 interface Attempt {
   /** Clock tick when the attempt started; a later gap is not closed by it. */
@@ -163,7 +177,7 @@ const CURRENT: FreshnessState = { freshness: "current" }
 const GRACE: FreshnessState = { freshness: "grace" }
 const REFRESHING: FreshnessState = { freshness: "refreshing" }
 const SCHEDULED: Wait = { kind: "scheduled" }
-const RETRY: Wait = { kind: "retry" }
+const RETRY: Wait = { kind: "retry", ms: UNCOVERED_REFRESH_RETRY_MS }
 
 function initialState(
   canon: Canon<unknown>,
@@ -491,10 +505,7 @@ function createIncorporation(
       queueMicrotask(elapse)
       return
     }
-    timer = setTimeout(
-      elapse,
-      wait.kind === "grace" ? wait.ms : UNCOVERED_REFRESH_RETRY_MS
-    )
+    timer = setTimeout(elapse, wait.ms)
   }
 
   const run = ({ startedAt }: Attempt) => {
@@ -605,6 +616,9 @@ function createIncorporation(
 // ---------------------------------------------------------------------------
 // Hook.
 
+/** Stands in for an omitted invalidation adapter. */
+const NO_REALTIME = createNoRealtimeInvalidationAdapter()
+
 /** Incorporation status and control shared by predicted and observed roots. */
 export interface IncorporationCoordinator {
   readonly status: IncorporationStatus
@@ -627,11 +641,11 @@ export interface IncorporationCoordinator {
  * - At most one carrier request runs at a time; requests that arrive in the
  *   same tick, or while one runs, coalesce.
  * - An acceptance waits `acceptanceGraceMs` before its first request.
- * - New requirements get a budget of two attempts. An attempt that completes
- *   without meeting them is retried after {@link UNCOVERED_REFRESH_RETRY_MS};
- *   after the second the root reports `stalled` with a reason: `refresh-error`
- *   when both attempts failed, `missing-axis` when canon lacks a required
- *   axis, and `behind` otherwise.
+ * - New requirements get a budget of {@link REFRESH_ATTEMPT_LIMIT} attempts.
+ *   An attempt that completes without meeting them is retried after
+ *   {@link UNCOVERED_REFRESH_RETRY_MS}; after the last the root reports
+ *   `stalled` with a reason: `refresh-error` when every attempt failed,
+ *   `missing-axis` when canon lacks a required axis, and `behind` otherwise.
  * - A stall lasts until requirements are met, `retryRefresh()` is called, or
  *   a new requirement arrives (an acceptance, a fresher invalidation, or a
  *   gap while none is open). Accepted predictions stay mounted throughout.
@@ -650,12 +664,9 @@ export function useIncorporation<State>(
   invalidations?: InvalidationAdapter,
   acceptances?: AcceptanceSource
 ): IncorporationCoordinator {
+  const transport = invalidations ?? NO_REALTIME
   const [incorporation] = useState(() =>
-    createIncorporation(
-      canon,
-      refresh,
-      invalidations?.initialStatus ?? "disabled"
-    )
+    createIncorporation(canon, refresh, transport.initialStatus)
   )
 
   useEffect(() => incorporation.connect(), [incorporation])
@@ -665,6 +676,8 @@ export function useIncorporation<State>(
     if (acceptances) return incorporation.followAcceptances(acceptances)
   }, [acceptances, incorporation])
 
+  // Keyed by content, so a new canon with the same axes keeps this array and
+  // the invalidation subscription below.
   const axesKey = JSON.stringify(
     revisionEntries(canon.revisions)
       .map(([axis]) => axis)
@@ -675,18 +688,14 @@ export function useIncorporation<State>(
   useEffect(() => {
     // The adapter's `initialStatus` is the status a subscription made now
     // starts in, so it is read again for every subscription.
-    incorporation.reportInvalidationStatus(
-      invalidations?.initialStatus ?? "disabled"
-    )
-    if (!invalidations) return
-
-    return invalidations.subscribe({
+    incorporation.reportInvalidationStatus(transport.initialStatus)
+    return transport.subscribe({
       axes,
       onInvalidation: incorporation.observeInvalidation,
       onStatusChange: incorporation.reportInvalidationStatus,
       onSubscriptionGap: incorporation.signalGap,
     })
-  }, [axes, incorporation, invalidations])
+  }, [axes, incorporation, transport])
 
   const state = useSyncExternalStore(
     incorporation.subscribe,

@@ -1,9 +1,7 @@
 "use client"
 
 // The predicted-root hook. Not a package entry: `headcanon/react` and
-// `headcanon/next/client` build their public factories on
-// `createPredictedRootHook`, and only the Next binding supplies a
-// control-flow classifier.
+// `headcanon/next/client` build their public factories on it.
 import {
   useCallback,
   useEffect,
@@ -19,23 +17,20 @@ import type { InvalidationAdapter } from "../core/invalidation"
 import {
   findMutation,
   type AnyMutationDefinition,
+  type AnyProtocolDefinition,
   type InvocationOf,
   type MutationContext,
-  type MutationDefinition,
   type MutationErrorOf,
   type MutationInvocation,
   type MutationRefusalOf,
-  type ProtocolDefinition,
+  type MutationState,
   type ProtocolInvocation,
+  type ProtocolMutation,
 } from "../core/protocol"
-import {
-  covers,
-  type AcceptedStamp,
-  type AxisId,
-  type Canon,
-} from "../core/revisions"
+import type { AcceptedStamp, AxisId, Canon } from "../core/revisions"
 import {
   createLedgerStore,
+  isCanonized,
   queueHead,
   type LedgerEntry,
   type MutationLifecycleError,
@@ -49,31 +44,8 @@ import {
   type RefreshStallReason,
 } from "./refresh"
 
-/** The mutation union a protocol registers. */
-export type MutationOf<Protocol> =
-  Protocol extends ProtocolDefinition<string, infer Mutations>
-    ? Mutations[number]
-    : never
-
-// Both extractors re-alias the mutation union through `extends infer` so the
-// conditional distributes per member. Matching the whole union against one
-// `MutationDefinition<...>` fails inference as soon as a protocol registers
-// mutations with different argument schemas (the schema sits in both co- and
-// contravariant positions), silently collapsing State and Error to `never`.
-
 /** The one state type every mutation of a protocol predicts. */
-export type StateOf<Protocol> =
-  MutationOf<Protocol> extends infer Mutation
-    ? Mutation extends MutationDefinition<
-        string,
-        infer _Schema,
-        infer State,
-        infer _Error,
-        infer _Refusal
-      >
-      ? State
-      : never
-    : never
+export type StateOf<Protocol> = MutationState<ProtocolMutation<Protocol>>
 
 /**
  * A protocol's internal ledger error union: predictor errors plus
@@ -81,18 +53,16 @@ export type StateOf<Protocol> =
  * back to the selected invocation.
  */
 export type ErrorOf<Protocol> =
-  | (MutationOf<Protocol> extends infer Mutation
-      ? Mutation extends MutationDefinition<
-          string,
-          infer _Schema,
-          infer _State,
-          infer Error,
-          infer _Refusal
-        >
-        ? Error
+  // `MutationErrorOf` reads one mutation. Re-aliasing the union through
+  // `extends infer` makes the conditional distribute over each member.
+  | (ProtocolMutation<Protocol> extends infer Mutation
+      ? Mutation extends AnyMutationDefinition
+        ? MutationErrorOf<Mutation>
         : never
       : never)
-  | MutationRefusalOf<MutationOf<Protocol>>
+  // `MutationErrorOf` already includes each refusal. Naming the refusals again
+  // lets generic code, such as a sender, return one before `Protocol` is known.
+  | MutationRefusalOf<ProtocolMutation<Protocol>>
 
 /** Observers for the three mutation stages represented by a receipt. */
 export interface MutationStageListeners<Error> {
@@ -112,15 +82,44 @@ export interface MutationStageListeners<Error> {
 
 /** State and controls exposed by a mounted optimistic predicted root. */
 export interface PredictedRoot<State, Invocation, Error> {
+  /**
+   * Canon's state with every pending prediction applied in invocation order.
+   * An accepted prediction keeps applying until canon covers its stamp.
+   */
   readonly value: State
+  /**
+   * Predicts `invocation` over `value` and, when the prediction succeeds,
+   * queues it for delivery and returns its receipt. An `err` is the local
+   * prediction's refusal: nothing was queued. `listeners` override the
+   * factory's `mutationListeners` one stage at a time.
+   */
   readonly mutate: (
     invocation: Invocation,
     listeners?: MutationStageListeners<Error>
   ) => Result<MutationReceipt<Error>, Error>
+  /**
+   * Redelivers an `uncertain` queue head with the same envelope and mutation
+   * ID, and a fresh budget of automatic redeliveries. Does nothing unless
+   * `status.delivery` is `uncertain`.
+   */
   readonly retryDelivery: () => void
+  /**
+   * Refreshes now with a fresh attempt budget when canon does not meet the
+   * root's requirements, such as after a stall.
+   */
   readonly retryRefresh: () => void
+  /** Delivery status, plus freshness and invalidation status of the mounted canon. */
   readonly status: {
+    /** Mutations not yet settled, including accepted ones waiting for canon to cover them. */
     readonly pending: number
+    /**
+     * `idle` when no mutation awaits acceptance, even while `pending` is above
+     * zero. `uncertain` when the queue head's outcome is unknown: `send` threw
+     * an ordinary error, gave no answer within `DELIVERY_WAIT_MS`, or used up
+     * its automatic redeliveries. The queue then waits for `retryDelivery()`
+     * or a late answer. `sending` otherwise, including a queued head and
+     * redelivery backoff.
+     */
     readonly delivery: "idle" | "sending" | "uncertain"
   } & IncorporationStatus
   /** The most recent replay conflicts (up to 50), oldest first. */
@@ -128,7 +127,7 @@ export interface PredictedRoot<State, Invocation, Error> {
 }
 
 type MutationForInvocation<Protocol, Invocation> =
-  MutationOf<Protocol> extends infer Mutation
+  ProtocolMutation<Protocol> extends infer Mutation
     ? Mutation extends AnyMutationDefinition
       ? Invocation extends InvocationOf<Mutation>
         ? Mutation
@@ -141,33 +140,33 @@ type ErrorForInvocation<Protocol, Invocation> = MutationErrorOf<
 >
 
 /** Protocol-specialized predicted-root shape with correlated mutation errors. */
-export type ProtocolPredictedRoot<
-  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
-> = Omit<
-  PredictedRoot<
-    StateOf<Protocol>,
-    ProtocolInvocation<Protocol>,
-    ErrorOf<Protocol>
-  >,
-  "mutate"
-> & {
-  readonly mutate: <Invocation extends ProtocolInvocation<Protocol>>(
-    invocation: Invocation,
-    listeners?: MutationStageListeners<ErrorForInvocation<Protocol, Invocation>>
-  ) => Result<
-    MutationReceipt<ErrorForInvocation<Protocol, Invocation>>,
-    ErrorForInvocation<Protocol, Invocation>
-  >
-}
+export type ProtocolPredictedRoot<Protocol extends AnyProtocolDefinition> =
+  Omit<
+    PredictedRoot<
+      StateOf<Protocol>,
+      ProtocolInvocation<Protocol>,
+      ErrorOf<Protocol>
+    >,
+    "mutate"
+  > & {
+    readonly mutate: <Invocation extends ProtocolInvocation<Protocol>>(
+      invocation: Invocation,
+      listeners?: MutationStageListeners<
+        ErrorForInvocation<Protocol, Invocation>
+      >
+    ) => Result<
+      MutationReceipt<ErrorForInvocation<Protocol, Invocation>>,
+      ErrorForInvocation<Protocol, Invocation>
+    >
+  }
 
 /** Protocol, delivery, refresh, and invalidation dependencies for a root factory. */
-export interface PredictedRootOptions<
-  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
-> {
+export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
+  /** The protocol whose mutations the root predicts and delivers. */
   readonly protocol: Protocol
   /**
-   * Delivers one envelope after framework control-flow throws have been
-   * classified. An ordinary throw at this seam means delivery is uncertain
+   * Delivers one envelope to the authority and resolves with its accepted
+   * stamp or domain refusal. An ordinary throw means delivery is uncertain
    * (the commit may exist). Throw {@link RetryableDeliveryError} instead when
    * the authority verifiably stored no receipt and the same envelope should
    * simply be redelivered (exhausted contention), and
@@ -177,7 +176,17 @@ export interface PredictedRootOptions<
   readonly send: (
     envelope: MutationEnvelope<ProtocolInvocation<Protocol>>
   ) => Promise<Result<AcceptedStamp, ErrorOf<Protocol>>>
+  /**
+   * A React hook the root calls during every render to get its refresh
+   * carrier. It must follow the Rules of Hooks: pass `useRouterRefresh`, or a
+   * function that calls `useSnapshotRefresh`. The adapter returned on the
+   * latest render serves each request.
+   */
   readonly refresh: () => RefreshAdapter
+  /**
+   * Push-invalidation transport for canon's axes. Without it,
+   * `status.invalidations` is `disabled`.
+   */
   readonly invalidations?: InvalidationAdapter
   /** Default stage observers used when a mutate call does not override a stage. */
   readonly mutationListeners?: MutationStageListeners<ErrorOf<Protocol>>
@@ -195,10 +204,11 @@ export interface PredictedRootInput<
   Error = unknown,
 > {
   /**
-   * The current complete authoritative canon. Keep it **referentially stable
-   * per authoritative observation** — RSC props and snapshot state naturally
-   * are. A void refresh carrier counts a new canon object as the delivery it
-   * asked for, and every new object re-folds the pending predictions.
+   * The current complete authoritative canon. Every new canon object re-folds
+   * the pending predictions, so keep it referentially stable per
+   * authoritative observation (RSC props and snapshot state are). A void
+   * refresh carrier counts a canon as its delivery only when the state value
+   * (by identity) or the revisions change; see {@link RefreshAdapter}.
    */
   readonly canon: Canon<State>
   /** Root-recovery observers scoped to this mounted aggregate. */
@@ -208,12 +218,10 @@ export interface PredictedRootInput<
 /**
  * The public hook type returned by a predicted-root factory. Its protocol fixes
  * the canon state, invocation union, and correlated mutation error types.
- * @param input Current complete authoritative canon.
+ * @param input The current canon and optional per-mount recovery listeners.
  * @returns Protocol-specialized predicted root state and controls.
  */
-export type PredictedRootHook<
-  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
-> = (
+export type PredictedRootHook<Protocol extends AnyProtocolDefinition> = (
   input: PredictedRootInput<
     StateOf<Protocol>,
     ProtocolInvocation<Protocol>,
@@ -223,24 +231,40 @@ export type PredictedRootHook<
 
 /** Delivery recovery controls supplied while the queue head is uncertain. */
 export interface DeliveryRecovery {
+  /** Redelivers the uncertain queue head; see {@link PredictedRoot.retryDelivery}. */
   readonly retry: () => void
 }
 
 /** Canon recovery facts supplied while authoritative incorporation is stalled. */
 export interface FreshnessRecovery {
+  /** Refreshes now with a fresh attempt budget; see {@link PredictedRoot.retryRefresh}. */
   readonly retry: () => void
+  /** Why the refresh attempts ran out. */
   readonly reason: RefreshStallReason
+  /** Required axes the mounted canon does not carry at all. */
   readonly missingAxes: readonly AxisId[]
 }
 
 /** Application-owned listeners for a predicted root's degraded states and conflicts. */
 export interface PredictedRootRecoveryListeners<Invocation, Error> {
+  /**
+   * Called when delivery becomes `uncertain`. A returned cleanup runs when
+   * delivery recovers or the root unmounts.
+   */
   readonly onDeliveryUncertain?: (
     recovery: DeliveryRecovery
   ) => void | (() => void)
+  /**
+   * Called when freshness becomes `stalled`. A returned cleanup runs when
+   * freshness recovers or the root unmounts.
+   */
   readonly onFreshnessStalled?: (
     recovery: FreshnessRecovery
   ) => void | (() => void)
+  /**
+   * Called once per mutation ID, during the mounted lifetime, when newer
+   * canon refuses a pending prediction.
+   */
   readonly onConflict?: (conflict: ReplayConflict<Invocation, Error>) => void
 }
 
@@ -260,10 +284,6 @@ interface ReplayRefusal<Error> {
 interface Projection<State, Error> {
   readonly value: State
   readonly refusals: readonly ReplayRefusal<Error>[]
-}
-
-function mutationContext(mutationId: string): MutationContext {
-  return Object.freeze({ mutationId })
 }
 
 function freezeEnvelope<Invocation>(
@@ -338,35 +358,30 @@ function useDegradedStateListeners(
 }
 
 /**
- * Builds a predicted-root hook. `headcanon/react` passes a classifier that
- * classifies nothing; the Next binding passes `unstable_rethrow`.
+ * Builds a predicted-root hook.
  * @param options Protocol, delivery, refresh, invalidation, and listener configuration.
- * @param classifyDeliveryError Throws when a delivery error is framework control flow.
+ * @param rethrowControlFlow Rethrows `error` when it is framework control
+ *   flow that must reach the framework; returns otherwise.
  * @returns The predicted-root hook.
  */
 export function createPredictedRootHook<
-  const Protocol extends ProtocolDefinition<
-    string,
-    readonly AnyMutationDefinition[]
-  >,
+  const Protocol extends AnyProtocolDefinition,
 >(
   options: PredictedRootOptions<Protocol>,
-  classifyDeliveryError: (error: unknown) => void
+  rethrowControlFlow: (error: unknown) => void
 ): PredictedRootHook<Protocol> {
   type State = StateOf<Protocol>
   type Invocation = ProtocolInvocation<Protocol>
   type Error = ErrorOf<Protocol>
 
-  const runtimeInvocation = (
-    invocation: Invocation
-  ): MutationInvocation<string, unknown> =>
-    invocation as MutationInvocation<string, unknown>
-
   const predict = (
     state: State,
     envelope: MutationEnvelope<Invocation>
   ): Result<State, Error> => {
-    const invocation = runtimeInvocation(envelope.invocation)
+    const invocation = envelope.invocation as MutationInvocation<
+      string,
+      unknown
+    >
     const mutation = findMutation(
       options.protocol,
       invocation.name
@@ -374,7 +389,7 @@ export function createPredictedRootHook<
     return mutation.predict(
       state,
       invocation.args,
-      mutationContext(envelope.mutationId)
+      Object.freeze({ mutationId: envelope.mutationId })
     )
   }
 
@@ -392,13 +407,7 @@ export function createPredictedRootHook<
     let value = canon.value
     const refusals: ReplayRefusal<Error>[] = []
     for (const entry of entries) {
-      if (entry.conflicted) continue
-      if (
-        entry.delivery.kind === "accepted" &&
-        covers(canon.revisions, entry.delivery.stamp.revisions)
-      ) {
-        continue
-      }
+      if (entry.conflicted || isCanonized(entry, canon.revisions)) continue
       const predicted = predict(value, entry.envelope)
       if (predicted.ok) value = predicted.value
       else
@@ -412,7 +421,7 @@ export function createPredictedRootHook<
 
   return function usePredictedRoot({ canon, recoveryListeners }) {
     const [store] = useState(() =>
-      createLedgerStore<Invocation, Error>(options.send, classifyDeliveryError)
+      createLedgerStore<Invocation, Error>(options.send, rethrowControlFlow)
     )
     const ledger = useSyncExternalStore(
       store.subscribe,

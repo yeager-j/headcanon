@@ -19,15 +19,16 @@ import {
   createNoRealtimeInvalidationAdapter,
   defineMutation,
   defineProtocol,
+  revision,
   revisionVector,
   withPollingFallback,
   type AcceptedStamp,
+  type AxisId,
   type AxisInvalidation,
   type Canon,
   type InvalidationAdapter,
   type InvalidationSubscription,
   type MutationEnvelope,
-  type Revision,
 } from ".."
 import { covers } from "../core/revisions"
 import { ROUTER_ACCEPTANCE_GRACE_MS } from "../next/client"
@@ -86,6 +87,16 @@ function stamp(entries: Record<string, number>): AcceptedStamp {
   return parsed.value
 }
 
+function invalidation(
+  eventId: string,
+  value: number,
+  axis: AxisId = valueAxis
+): AxisInvalidation {
+  const parsed = revision(value)
+  if (!parsed.ok) throw new Error("Invalid refresh test revision")
+  return { eventId, axis, revision: parsed.value }
+}
+
 /** Stands in for a predicted root's ledger: the one store of acceptances. */
 function testAcceptances() {
   let accepted: ReadonlyMap<string, AcceptedStamp> = new Map()
@@ -130,7 +141,7 @@ function advance(ms: number) {
   })
 }
 
-function setupPredictedRefresh(options: {
+function setupAcceptedMutation(options: {
   readonly acceptanceGraceMs: number
   readonly acceptedStamp?: AcceptedStamp
   readonly invalidations?: InvalidationAdapter
@@ -173,6 +184,25 @@ function setupPredictedRefresh(options: {
   return { ...rendered, request, send }
 }
 
+interface ControlledInvalidations {
+  readonly adapter: InvalidationAdapter
+  readonly subscriptions: InvalidationSubscription[]
+}
+
+function controlledInvalidations(): ControlledInvalidations {
+  const subscriptions: InvalidationSubscription[] = []
+  return {
+    subscriptions,
+    adapter: {
+      initialStatus: "active",
+      subscribe(subscription) {
+        subscriptions.push(subscription)
+        return () => undefined
+      },
+    },
+  }
+}
+
 beforeEach(() => {
   vi.useFakeTimers()
 })
@@ -213,7 +243,7 @@ verifyRefreshContract({
 
 describe("refresh incorporation", () => {
   it("uses acceptance grace only for the router-shaped carrier", async () => {
-    const router = setupPredictedRefresh({
+    const router = setupAcceptedMutation({
       acceptanceGraceMs: ROUTER_ACCEPTANCE_GRACE_MS,
     })
     await flushMicrotasks()
@@ -226,7 +256,7 @@ describe("refresh incorporation", () => {
     expect(router.request).toHaveBeenCalledOnce()
     router.unmount()
 
-    const snapshot = setupPredictedRefresh({
+    const snapshot = setupAcceptedMutation({
       acceptanceGraceMs: SNAPSHOT_ACCEPTANCE_GRACE_MS,
     })
     await flushMicrotasks()
@@ -235,7 +265,7 @@ describe("refresh incorporation", () => {
   })
 
   it("waits for a void carrier to deliver canon before consuming an attempt", async () => {
-    const { request, result, rerender } = setupPredictedRefresh({
+    const { request, result, rerender } = setupAcceptedMutation({
       acceptanceGraceMs: 0,
       acceptedStamp: stamp({ [valueAxis]: 3 }),
       request: () => undefined,
@@ -309,7 +339,7 @@ describe("refresh incorporation", () => {
   it("owns stalled-freshness listener cleanup until the root recovers", async () => {
     const cleanup = vi.fn()
     const onFreshnessStalled = vi.fn(() => cleanup)
-    const { result, rerender } = setupPredictedRefresh({
+    const { result, rerender } = setupAcceptedMutation({
       acceptanceGraceMs: 0,
       recoveryListeners: { onFreshnessStalled },
     })
@@ -331,18 +361,16 @@ describe("refresh incorporation", () => {
 
   it("deduplicates an own-write invalidation against recorded acceptance", async () => {
     const invalidations = controlledInvalidations()
-    const { request, result } = setupPredictedRefresh({
+    const { request, result } = setupAcceptedMutation({
       acceptanceGraceMs: ROUTER_ACCEPTANCE_GRACE_MS,
       invalidations: invalidations.adapter,
     })
     await flushMicrotasks()
 
     act(() =>
-      invalidations.subscriptions[0]?.onInvalidation({
-        eventId: "own-write",
-        axis: valueAxis,
-        revision: 1 as Revision,
-      })
+      invalidations.subscriptions[0]?.onInvalidation(
+        invalidation("own-write", 1)
+      )
     )
     await flushMicrotasks()
 
@@ -351,7 +379,7 @@ describe("refresh incorporation", () => {
   })
 
   it("classifies a stamped axis absent from canon as missing-axis", async () => {
-    const { result } = setupPredictedRefresh({
+    const { result } = setupAcceptedMutation({
       acceptanceGraceMs: 0,
       acceptedStamp: stamp({ [valueAxis]: 1, [missingAxis]: 1 }),
     })
@@ -367,7 +395,7 @@ describe("refresh incorporation", () => {
   })
 
   it("completes the dedicated refresh cycle while an optimistic Action remains open", async () => {
-    const { result, request } = setupPredictedRefresh({
+    const { result, request } = setupAcceptedMutation({
       acceptanceGraceMs: 0,
     })
 
@@ -383,7 +411,7 @@ describe("refresh incorporation", () => {
   })
 
   it("classifies two adapter failures as refresh-error", async () => {
-    const { result, request } = setupPredictedRefresh({
+    const { result, request } = setupAcceptedMutation({
       acceptanceGraceMs: 0,
       request: async () => {
         throw new Error("refresh failed")
@@ -401,7 +429,7 @@ describe("refresh incorporation", () => {
   })
 
   it("returns to current when a later canon covers the requirement", async () => {
-    const { result, rerender } = setupPredictedRefresh({
+    const { result, rerender } = setupAcceptedMutation({
       acceptanceGraceMs: 0,
     })
 
@@ -539,29 +567,9 @@ describe("status in the render that receives canon", () => {
   )
 })
 
-interface ControlledInvalidations {
-  readonly adapter: InvalidationAdapter
-  readonly subscriptions: InvalidationSubscription[]
-}
-
-function controlledInvalidations(): ControlledInvalidations {
-  const subscriptions: InvalidationSubscription[] = []
-  return {
-    subscriptions,
-    adapter: {
-      initialStatus: "active",
-      subscribe(subscription) {
-        subscriptions.push(subscription)
-        return () => undefined
-      },
-    },
-  }
-}
-
 describe("createObservedRoot", () => {
-  it("exposes watch-only value and status without a mutation surface", async () => {
+  function setupObservedRoot(request: RefreshAdapter["request"]) {
     const invalidations = controlledInvalidations()
-    const request = vi.fn()
     const adapter: RefreshAdapter = { acceptanceGraceMs: 0, request }
     function useRefresh() {
       return adapter
@@ -570,6 +578,12 @@ describe("createObservedRoot", () => {
       refresh: useRefresh,
       invalidations: invalidations.adapter,
     })
+    return { invalidations, useObserved }
+  }
+
+  it("exposes watch-only value and status without a mutation surface", async () => {
+    const request = vi.fn()
+    const { invalidations, useObserved } = setupObservedRoot(request)
     const { result } = renderHook(() => useObserved({ canon: canon(7, 0) }))
 
     expect(result.current.value).toBe(7)
@@ -581,11 +595,7 @@ describe("createObservedRoot", () => {
     expect(invalidations.subscriptions[0]?.axes).toEqual([valueAxis])
 
     act(() =>
-      invalidations.subscriptions[0]?.onInvalidation({
-        eventId: "event-1",
-        axis: valueAxis,
-        revision: 1 as Revision,
-      })
+      invalidations.subscriptions[0]?.onInvalidation(invalidation("event-1", 1))
     )
     await flushMicrotasks()
 
@@ -594,30 +604,14 @@ describe("createObservedRoot", () => {
   })
 
   it("ignores old and unrelated invalidations", async () => {
-    const invalidations = controlledInvalidations()
     const request = vi.fn()
-    const adapter: RefreshAdapter = { acceptanceGraceMs: 0, request }
-    function useRefresh() {
-      return adapter
-    }
-    const useObserved = createObservedRoot({
-      refresh: useRefresh,
-      invalidations: invalidations.adapter,
-    })
+    const { invalidations, useObserved } = setupObservedRoot(request)
     renderHook(() => useObserved({ canon: canon(7, 2) }))
 
     const subscription = invalidations.subscriptions[0]
     act(() => {
-      subscription?.onInvalidation({
-        eventId: "old",
-        axis: valueAxis,
-        revision: 2 as Revision,
-      })
-      subscription?.onInvalidation({
-        eventId: "unrelated",
-        axis: missingAxis,
-        revision: 10 as Revision,
-      })
+      subscription?.onInvalidation(invalidation("old", 2))
+      subscription?.onInvalidation(invalidation("unrelated", 10, missingAxis))
     })
     await flushMicrotasks()
 
@@ -625,16 +619,8 @@ describe("createObservedRoot", () => {
   })
 
   it("coalesces post-attachment gap recovery even when canon appears current", async () => {
-    const invalidations = controlledInvalidations()
     const request = vi.fn(async () => undefined)
-    const adapter: RefreshAdapter = { acceptanceGraceMs: 0, request }
-    function useRefresh() {
-      return adapter
-    }
-    const useObserved = createObservedRoot({
-      refresh: useRefresh,
-      invalidations: invalidations.adapter,
-    })
+    const { invalidations, useObserved } = setupObservedRoot(request)
     const rendered = renderHook(() => useObserved({ canon: canon(7, 2) }))
 
     act(() => {
@@ -648,18 +634,7 @@ describe("createObservedRoot", () => {
   })
 
   it("tracks unrestricted axis IDs without dependency-key collisions", () => {
-    const invalidations = controlledInvalidations()
-    const adapter: RefreshAdapter = {
-      acceptanceGraceMs: 0,
-      request: () => undefined,
-    }
-    function useRefresh() {
-      return adapter
-    }
-    const useObserved = createObservedRoot({
-      refresh: useRefresh,
-      invalidations: invalidations.adapter,
-    })
+    const { invalidations, useObserved } = setupObservedRoot(() => undefined)
     const { rerender } = renderHook(
       ({ currentCanon }: { readonly currentCanon: Canon<number> }) =>
         useObserved({ canon: currentCanon }),
@@ -689,30 +664,14 @@ describe("createObservedRoot", () => {
   })
 
   it("coalesces a burst after merging every fresher observation", async () => {
-    const invalidations = controlledInvalidations()
     const request = vi.fn()
-    const adapter: RefreshAdapter = { acceptanceGraceMs: 0, request }
-    function useRefresh() {
-      return adapter
-    }
-    const useObserved = createObservedRoot({
-      refresh: useRefresh,
-      invalidations: invalidations.adapter,
-    })
+    const { invalidations, useObserved } = setupObservedRoot(request)
     renderHook(() => useObserved({ canon: canon(0, 0) }))
     const subscription = invalidations.subscriptions[0]
 
     act(() => {
-      subscription?.onInvalidation({
-        eventId: "shared-event",
-        axis: valueAxis,
-        revision: 1 as Revision,
-      })
-      subscription?.onInvalidation({
-        eventId: "shared-event",
-        axis: valueAxis,
-        revision: 2 as Revision,
-      })
+      subscription?.onInvalidation(invalidation("shared-event", 1))
+      subscription?.onInvalidation(invalidation("shared-event", 2))
     })
     await flushMicrotasks()
 
@@ -720,24 +679,12 @@ describe("createObservedRoot", () => {
   })
 
   it("resets a stalled budget only for a genuinely fresher invalidation", async () => {
-    const invalidations = controlledInvalidations()
     const request = vi.fn(async () => undefined)
-    const adapter: RefreshAdapter = { acceptanceGraceMs: 0, request }
-    function useRefresh() {
-      return adapter
-    }
-    const useObserved = createObservedRoot({
-      refresh: useRefresh,
-      invalidations: invalidations.adapter,
-    })
+    const { invalidations, useObserved } = setupObservedRoot(request)
     const { result } = renderHook(() => useObserved({ canon: canon(0, 0) }))
     const subscription = invalidations.subscriptions[0]
     const invalidate = (revision: number, eventId: string) =>
-      subscription?.onInvalidation({
-        eventId,
-        axis: valueAxis,
-        revision: revision as Revision,
-      } satisfies AxisInvalidation)
+      subscription?.onInvalidation(invalidation(eventId, revision))
 
     act(() => invalidate(1, "first"))
     await flushMicrotasks()
@@ -835,8 +782,8 @@ describe("subscription gaps", () => {
   })
 })
 
-// Moved from the invalidation adapter contract: these exercise how
-// useIncorporation consumes invalidations, which does not vary by adapter.
+// useIncorporation consumes invalidations the same way for every adapter, so
+// these cases run once here.
 describe("incorporation of published invalidations", () => {
   const axisA = axisId("refresh/published/a")
   const axisB = axisId("refresh/published/b")
@@ -899,7 +846,6 @@ describe("incorporation of published invalidations", () => {
   })
 })
 
-// Moved from the former public `verifyPollingFallbackContract`.
 describe("polling fallback", () => {
   let visibility: DocumentVisibilityState
   let originalVisibility: PropertyDescriptor | undefined

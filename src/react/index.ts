@@ -3,10 +3,7 @@
 import { createContext, createElement, useContext, type ReactNode } from "react"
 
 import type { InvalidationAdapter } from "../core/invalidation"
-import type {
-  AnyMutationDefinition,
-  ProtocolDefinition,
-} from "../core/protocol"
+import type { AnyProtocolDefinition } from "../core/protocol"
 import type { Canon } from "../core/revisions"
 import {
   createPredictedRootHook,
@@ -22,28 +19,34 @@ import {
 
 /** Read-only state and lifecycle controls exposed by an observed root. */
 export interface ObservedRoot<State> {
+  /** The authoritative canon's state. */
   readonly value: State
+  /**
+   * Refreshes now with a fresh attempt budget when canon does not meet the
+   * root's requirements, such as after a stall.
+   */
   readonly retryRefresh: () => void
+  /** Freshness and invalidation status of the mounted canon. */
   readonly status: IncorporationStatus
 }
 
 /** Human-readable identity used in generated provider names and missing-provider errors. */
 export interface PredictedRootContextOptions {
+  /** Display name for React tools; also names the Provider and the missing-provider error. */
   readonly name: string
 }
 
 /** Props accepted by a generated predicted-root provider. */
-export type PredictedRootProviderProps<
-  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
-> = Parameters<PredictedRootHook<Protocol>>[0] & {
-  readonly children: ReactNode
-}
+export type PredictedRootProviderProps<Protocol extends AnyProtocolDefinition> =
+  Parameters<PredictedRootHook<Protocol>>[0] & {
+    readonly children: ReactNode
+  }
 
 /** One mounted predicted-root provider and its context-bound consumer hook. */
-export interface PredictedRootContext<
-  Protocol extends ProtocolDefinition<string, readonly AnyMutationDefinition[]>,
-> {
+export interface PredictedRootContext<Protocol extends AnyProtocolDefinition> {
+  /** Mounts one predicted root over `canon` for its subtree. */
   readonly Provider: (props: PredictedRootProviderProps<Protocol>) => ReactNode
+  /** Returns the nearest Provider's root. Throws outside a Provider. */
   readonly useRoot: () => ProtocolPredictedRoot<Protocol>
 }
 
@@ -57,12 +60,33 @@ export interface PredictedRootContext<
  * @param usePredictedRoot Protocol-specialized root hook to mount once.
  * @param options Human-readable context identity for React tools and errors.
  * @returns A provider that accepts the latest canon and a context-bound root hook.
+ * @example
+ * ```tsx
+ * const useNotes = createPredictedRoot({
+ *   protocol: notesProtocol,
+ *   send: sendNotesMutation,
+ *   refresh: useNotesRefresh,
+ * })
+ * const NoteRoot = createPredictedRootContext(useNotes, { name: "NoteRoot" })
+ *
+ * function NoteSurface({ canon }: { canon: Canon<NotesState> }) {
+ *   return (
+ *     <NoteRoot.Provider canon={canon}>
+ *       <RenameButton />
+ *     </NoteRoot.Provider>
+ *   )
+ * }
+ *
+ * function RenameButton() {
+ *   const { value, mutate } = NoteRoot.useRoot()
+ *   const rename = () =>
+ *     mutate(renameNote({ noteId: value.focused, title: "Chapter Two" }))
+ *   return <button onClick={rename}>Rename</button>
+ * }
+ * ```
  */
 export function createPredictedRootContext<
-  const Protocol extends ProtocolDefinition<
-    string,
-    readonly AnyMutationDefinition[]
-  >,
+  const Protocol extends AnyProtocolDefinition,
 >(
   usePredictedRoot: PredictedRootHook<Protocol>,
   options: PredictedRootContextOptions
@@ -74,11 +98,10 @@ export function createPredictedRootContext<
   Context.displayName = options.name
 
   function Provider({
-    canon,
-    recoveryListeners,
     children,
+    ...input
   }: PredictedRootProviderProps<Protocol>): ReactNode {
-    const root = usePredictedRoot({ canon, recoveryListeners })
+    const root = usePredictedRoot(input)
     return createElement(Context.Provider, { value: root }, children)
   }
   Provider.displayName = `${options.name}.Provider`
@@ -98,37 +121,40 @@ export function createPredictedRootContext<
 
 /** Refresh and optional invalidation dependencies for an observed root. */
 export interface ObservedRootOptions {
+  /**
+   * A React hook the root calls during every render to get its refresh
+   * carrier. It must follow the Rules of Hooks: pass `useRouterRefresh`, or a
+   * function that calls `useSnapshotRefresh`. The adapter returned on the
+   * latest render serves each request.
+   */
   readonly refresh: () => RefreshAdapter
+  /**
+   * Push-invalidation transport for canon's axes. Without it,
+   * `status.invalidations` is `disabled`.
+   */
   readonly invalidations?: InvalidationAdapter
 }
 
+/** Plain React has no framework control flow to rethrow. */
+function rethrowNoControlFlow(): void {}
+
 /**
- * Creates a framework-independent React predicted-root hook.
- *
- * The returned hook keeps the latest complete `Canon` as the authoritative
- * base and folds every live prediction over it in invocation order. A
- * successful local prediction returns a receipt with independent `accepted`
- * and `canonized` promises: acceptance means the authority committed an
- * `AcceptedStamp`, while canonization waits until this root's canon covers
- * that stamp. The prediction renders until then, however long the refresh
- * carrier takes. Delivery is serialized in invocation order; each attempt
- * holds a React Action open for at most {@link DELIVERY_WAIT_MS}, uncertain
- * envelopes keep their mutation ID for an exact retry, and replay-refused
- * predictions are reported as conflicts rather than silently disappearing.
- * Callers own the refresh carrier, optional invalidation transport, and
- * application-owned listeners; the root owns subscription and listener
- * cleanup plus pending-receipt settlement on unmount.
+ * Creates a framework-independent React hook that mounts one predicted root.
+ * The root renders canon with every pending prediction applied, delivers
+ * mutations through `send` one at a time in invocation order, and keeps canon
+ * fresh through `refresh` and optional `invalidations`. Each call of the
+ * returned hook mounts an independent root; share one root with a subtree
+ * through {@link createPredictedRootContext}. While a delivery attempt is
+ * unanswered, the root holds a React Action open for at most
+ * {@link DELIVERY_WAIT_MS}. Unmounting the root settles every pending receipt.
  *
  * @param options Protocol, delivery, refresh, invalidation, and listener configuration.
  * @returns A hook exposing predicted state, mutation receipts, retry controls, and status.
  */
 export function createPredictedRoot<
-  const Protocol extends ProtocolDefinition<
-    string,
-    readonly AnyMutationDefinition[]
-  >,
+  const Protocol extends AnyProtocolDefinition,
 >(options: PredictedRootOptions<Protocol>): PredictedRootHook<Protocol> {
-  return createPredictedRootHook(options, () => undefined)
+  return createPredictedRootHook(options, rethrowNoControlFlow)
 }
 
 /**

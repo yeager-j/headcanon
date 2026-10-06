@@ -15,28 +15,56 @@ import {
 
 /** Terminal lifecycle failures surfaced by a predicted root's receipts. */
 export type MutationLifecycleError<Error> =
+  /** The authority refused the mutation. */
   | { readonly kind: "domain"; readonly error: Error }
+  /**
+   * Newer canon refused the prediction before the authority stored it, so
+   * the mutation was withdrawn.
+   */
   | { readonly kind: "replay-refused"; readonly error: Error }
+  /**
+   * `send` threw framework control flow, such as a redirect, which the root
+   * passed on to the framework.
+   */
   | { readonly kind: "delivery-cancelled" }
+  /** The authority's answer is final but is not a domain refusal. */
   | TerminalDeliveryFailure
+  /** The root unmounted before the mutation settled. */
   | {
       readonly kind: "root-unmounted"
+      /**
+       * `accepted` only when acceptance arrived before unmount; otherwise
+       * the authority's answer is unknown.
+       */
       readonly outcome: "unknown" | "accepted"
     }
 
 /** Independent acceptance and canonization milestones for one mutation. */
 export interface MutationReceipt<Error> {
+  /** The mutation ID the authority deduplicates by. */
   readonly id: string
+  /**
+   * Resolves when the authority accepts or refuses, or the mutation ends
+   * without an answer. Never rejects.
+   */
   readonly accepted: Promise<
     Result<AcceptedStamp, MutationLifecycleError<Error>>
   >
+  /**
+   * Resolves ok once this root's canon covers the accepted stamp; otherwise
+   * resolves with the same failure as `accepted`, or `root-unmounted`. Never
+   * rejects.
+   */
   readonly canonized: Promise<Result<void, MutationLifecycleError<Error>>>
 }
 
 /** A pending invocation jossed while replaying newer authoritative canon. */
 export interface ReplayConflict<Invocation, Error> {
+  /** The refused mutation's ID, the same as its receipt's `id`. */
   readonly mutationId: string
+  /** The refused invocation. */
   readonly invocation: Invocation
+  /** The error the prediction returned on newer canon. */
   readonly error: Error
 }
 
@@ -81,6 +109,7 @@ export type TerminalDeliveryFailure =
  * would get the same answer.
  */
 export class TerminalDeliveryError extends Error {
+  /** The final answer; both receipt milestones settle with it. */
   readonly failure: TerminalDeliveryFailure
 
   constructor(failure: TerminalDeliveryFailure) {
@@ -108,7 +137,7 @@ export const DELIVERY_WAIT_MS = 10_000
 
 /** Redelivery backoff for {@link RetryableDeliveryError} — bounded so persistent
  *  contention degrades to an honest uncertain state instead of hammering. */
-const DELIVERY_RETRY_DELAYS_MS = [300, 1000, 3000] as const
+export const DELIVERY_RETRY_DELAYS_MS = [300, 1000, 3000] as const
 
 /** How many recent replay conflicts a root keeps in `conflicts`. */
 const RETAINED_CONFLICTS = 50
@@ -175,6 +204,14 @@ const DELIVERY_TRANSITIONS: Readonly<
   accepted: [],
 }
 
+/**
+ * No commit can exist for this envelope: it was never sent, or the authority
+ * verifiably stored no receipt and it awaits redelivery.
+ */
+function isUnsent(delivery: DeliveryState): boolean {
+  return delivery.kind === "queued" || delivery.kind === "retry-scheduled"
+}
+
 export interface LedgerEntry<Invocation> {
   readonly envelope: MutationEnvelope<Invocation>
   readonly delivery: DeliveryState
@@ -221,6 +258,17 @@ export function queueHead<Invocation>(
   return entries.find((entry) => entry.delivery.kind !== "accepted")
 }
 
+/** Canon covers this entry's accepted stamp: the entry is canonized and no longer predicts. */
+export function isCanonized(
+  entry: LedgerEntry<unknown>,
+  revisions: RevisionVector
+): boolean {
+  return (
+    entry.delivery.kind === "accepted" &&
+    covers(revisions, entry.delivery.stamp.revisions)
+  )
+}
+
 /**
  * The one authority for a root's mutation lifecycle: the rendered ledger, the
  * receipts, and the delivery queue. React reads the ledger through
@@ -231,7 +279,7 @@ export function createLedgerStore<Invocation, Error>(
   send: (
     envelope: MutationEnvelope<Invocation>
   ) => Promise<Result<AcceptedStamp, Error>>,
-  classifyDeliveryError: (error: unknown) => void
+  rethrowControlFlow: (error: unknown) => void
 ) {
   let ledger: Ledger<Invocation, Error> = { entries: [], conflicts: [] }
   const lifetimes = new Map<string, EntryLifetime<Error>>()
@@ -346,7 +394,7 @@ export function createLedgerStore<Invocation, Error>(
     }
 
     try {
-      classifyDeliveryError(error)
+      rethrowControlFlow(error)
     } catch (controlFlow) {
       // Framework control flow (a redirect, say) must reach the framework.
       // The attempt's Action carries it; once that Action has been
@@ -402,6 +450,23 @@ export function createLedgerStore<Invocation, Error>(
     if (advance(mutationId, { kind: "uncertain" })) lifetime.hold?.resolve()
   }
 
+  /**
+   * Sends each envelope in order once every attempt already in flight has
+   * been answered, ignoring every outcome.
+   */
+  async function sendInOrder(
+    envelopes: readonly MutationEnvelope<Invocation>[]
+  ): Promise<void> {
+    await outstanding
+    for (const envelope of envelopes) {
+      try {
+        await send(envelope)
+      } catch {
+        // No mounted root remains to observe a farewell send.
+      }
+    }
+  }
+
   /** Sends whatever is still unsent and settles every receipt as unmounted. */
   function dispose(): void {
     // Unmount ends this root's ability to *observe* an outcome; it does not
@@ -415,15 +480,8 @@ export function createLedgerStore<Invocation, Error>(
     //
     // A `sending` or `uncertain` entry may already have committed; its
     // receipt, not a second send, is what would resolve it.
-    const unsent = ledger.entries.filter(
-      (entry) =>
-        entry.delivery.kind === "queued" ||
-        entry.delivery.kind === "retry-scheduled"
-    )
-    void unsent.reduce(
-      (chain, entry) => chain.then(() => send(entry.envelope)).then(noop, noop),
-      outstanding
-    )
+    const unsent = ledger.entries.filter((entry) => isUnsent(entry.delivery))
+    void sendInOrder(unsent.map((entry) => entry.envelope))
 
     for (const entry of ledger.entries) {
       const lifetime = lifetimes.get(entry.envelope.mutationId)
@@ -553,10 +611,7 @@ export function createLedgerStore<Invocation, Error>(
         ),
         conflicts: [...ledger.conflicts, conflict].slice(-RETAINED_CONFLICTS),
       })
-      if (
-        entry.delivery.kind === "queued" ||
-        entry.delivery.kind === "retry-scheduled"
-      ) {
+      if (isUnsent(entry.delivery)) {
         settle(mutationId, err({ kind: "replay-refused", error }))
       }
       return conflict
@@ -565,10 +620,7 @@ export function createLedgerStore<Invocation, Error>(
     /** Settles canonization for every accepted entry the canon covers. */
     canonize(revisions: RevisionVector): void {
       for (const entry of ledger.entries) {
-        if (
-          entry.delivery.kind === "accepted" &&
-          covers(revisions, entry.delivery.stamp.revisions)
-        ) {
+        if (isCanonized(entry, revisions)) {
           settle(entry.envelope.mutationId, ok(undefined))
         }
       }
