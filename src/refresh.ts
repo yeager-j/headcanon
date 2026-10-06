@@ -433,20 +433,6 @@ function transition(
 // Runtime. Runs the machine's waits and attempts and publishes snapshots. It
 // owns timers and the carrier call; it makes no decisions of its own.
 
-interface IncorporationSnapshot {
-  readonly freshness: FreshnessState
-  readonly invalidations: InvalidationStatus
-  readonly required: RevisionVector
-}
-
-function snapshotOf(state: IncorporationState): IncorporationSnapshot {
-  return {
-    freshness: state.freshness,
-    invalidations: state.invalidations,
-    required: state.required,
-  }
-}
-
 /**
  * The store that owns a root's accepted mutations: for a predicted root, its
  * ledger. Incorporation requires canon to cover every stamp it lists and keeps
@@ -459,6 +445,21 @@ export interface AcceptanceSource {
   readonly subscribe: (listener: () => void) => () => void
 }
 
+/**
+ * Whether two states differ in anything but the canon object. A canon-only
+ * change is not published: the hook derives status from the snapshot and its
+ * own render's canon, so the result is the same, and publishing would let a
+ * parent that builds a new canon value in every render re-render forever.
+ */
+function differsBeyondCanon(
+  left: IncorporationState,
+  right: IncorporationState
+): boolean {
+  return (Object.keys(left) as (keyof IncorporationState)[]).some(
+    (key) => key !== "canon" && left[key] !== right[key]
+  )
+}
+
 function createIncorporation(
   canon: Canon<unknown>,
   carrier: RefreshAdapter,
@@ -468,7 +469,7 @@ function createIncorporation(
   let currentCarrier = carrier
   let connected = false
   let timer: ReturnType<typeof setTimeout> | null = null
-  let snapshot = snapshotOf(state)
+  let snapshot = state
   const listeners = new Set<() => void>()
 
   const cancelTimer = () => {
@@ -524,22 +525,10 @@ function createIncorporation(
     })
   }
 
-  const publish = () => {
-    const next = snapshotOf(state)
-    if (
-      next.freshness === snapshot.freshness &&
-      next.invalidations === snapshot.invalidations &&
-      next.required === snapshot.required
-    ) {
-      return
-    }
-    snapshot = next
-    for (const listener of listeners) listener()
-  }
-
   function dispatch(event: IncorporationEvent) {
     const previous = state
     state = transition(previous, event)
+    if (state === previous) return
     if (state.wait !== previous.wait) arm(state.wait)
     if (
       state.attempt !== null &&
@@ -547,7 +536,9 @@ function createIncorporation(
     ) {
       run(state.attempt)
     }
-    publish()
+    if (!differsBeyondCanon(snapshot, state)) return
+    snapshot = state
+    for (const listener of listeners) listener()
   }
 
   return {
@@ -600,6 +591,11 @@ function createIncorporation(
         listeners.delete(listener)
       }
     },
+    /**
+     * The machine's state as of its latest change beyond `canon`. The hook
+     * applies its render's canon to it, so a snapshot that holds an older canon
+     * object derives the same status.
+     */
     getSnapshot() {
       return snapshot
     },
@@ -692,18 +688,30 @@ export function useIncorporation<State>(
     })
   }, [axes, incorporation, invalidations])
 
-  const snapshot = useSyncExternalStore(
+  const state = useSyncExternalStore(
     incorporation.subscribe,
     incorporation.getSnapshot,
     incorporation.getSnapshot
   )
+  // The machine learns this render's canon in an effect, after commit. Until
+  // then the status is the state it will reach: the same pure transition the
+  // effect dispatches, applied to the store's snapshot and this render's
+  // canon. So every field comes from one state and one canon, and a render
+  // that receives covering canon is `current` in that render. Nothing is
+  // stored; the runtime arms timers and starts requests when the effect runs.
+  const rendered = transition(state, { type: "canon-received", canon })
   const status = useMemo<IncorporationStatus>(
     () => ({
-      ...snapshot.freshness,
-      invalidations: snapshot.invalidations,
-      missingAxes: missingAxes(canon.revisions, snapshot.required),
+      ...rendered.freshness,
+      invalidations: rendered.invalidations,
+      missingAxes: missingAxes(canon.revisions, rendered.required),
     }),
-    [canon.revisions, snapshot]
+    [
+      canon.revisions,
+      rendered.freshness,
+      rendered.invalidations,
+      rendered.required,
+    ]
   )
 
   return useMemo(

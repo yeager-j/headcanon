@@ -471,6 +471,74 @@ describe("acceptance requirements", () => {
   })
 })
 
+describe("status in the render that receives canon", () => {
+  it.each([
+    {
+      outstanding: "grace",
+      graceMs: ROUTER_ACCEPTANCE_GRACE_MS,
+      request: async () => undefined,
+      settle: async () => undefined,
+    },
+    {
+      outstanding: "refreshing",
+      graceMs: 0,
+      request: () => new Promise<void>(() => undefined),
+      settle: flushMicrotasks,
+    },
+    {
+      outstanding: "stalled",
+      graceMs: 0,
+      request: async () => undefined,
+      settle: async () => {
+        await flushMicrotasks()
+        await advance(UNCOVERED_REFRESH_RETRY_MS)
+      },
+    },
+  ])(
+    "reports current with no missing axes together while $outstanding",
+    async ({ outstanding, graceMs, request, settle }) => {
+      const acceptances = testAcceptances()
+      const refresh: RefreshAdapter = { acceptanceGraceMs: graceMs, request }
+      const renders: IncorporationStatus[] = []
+      const { rerender } = renderHook(
+        ({ currentCanon }: { readonly currentCanon: Canon<number> }) => {
+          const { status } = useIncorporation(
+            currentCanon,
+            refresh,
+            undefined,
+            acceptances.source
+          )
+          renders.push(status)
+        },
+        { initialProps: { currentCanon: canon(0, 0) } }
+      )
+
+      act(() => acceptances.accept("missing", stamp({ [missingAxis]: 1 })))
+      await settle()
+      expect(renders.at(-1)?.freshness).toBe(outstanding)
+
+      const coveredFrom = renders.length
+      rerender({
+        currentCanon: {
+          value: 0,
+          revisions: revisions({ [valueAxis]: 0, [missingAxis]: 1 }),
+        },
+      })
+      await flushMicrotasks()
+
+      expect(renders.length).toBeGreaterThan(coveredFrom)
+      for (const status of renders.slice(coveredFrom)) {
+        expect(status).toMatchObject({ freshness: "current", missingAxes: [] })
+      }
+      for (const status of renders) {
+        expect(status.freshness === "current").toBe(
+          status.missingAxes.length === 0
+        )
+      }
+    }
+  )
+})
+
 interface ControlledInvalidations {
   readonly adapter: InvalidationAdapter
   readonly subscriptions: InvalidationSubscription[]
