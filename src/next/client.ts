@@ -17,7 +17,6 @@ import type {
   ProtocolInvocation,
 } from "../core/protocol"
 import type { AcceptedStamp } from "../core/revisions"
-import { createPredictedRootHook } from "../react/predicted-root"
 import {
   createObservedRoot,
   RetryableDeliveryError,
@@ -26,6 +25,7 @@ import {
   type PredictedRootHook,
   type PredictedRootOptions,
 } from "../react/index"
+import { createPredictedRootHook } from "../react/predicted-root"
 import type { RefreshAdapter } from "../react/refresh"
 
 /** Grace period allowing a Server Action's RSC response to carry acceptance. */
