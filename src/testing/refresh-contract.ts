@@ -4,9 +4,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   UNCOVERED_REFRESH_RETRY_MS,
   useIncorporation,
+  type AcceptanceSource,
   type RefreshAdapter,
 } from "../refresh"
-import { acceptedStamp, axisId, revisionVector, type Canon } from "../revisions"
+import {
+  acceptedStamp,
+  axisId,
+  revisionVector,
+  type AcceptedStamp,
+  type Canon,
+} from "../revisions"
 import type { ContractCase } from "./contract-case"
 
 /** Refresh carrier fixture used by reusable stall-state assertions. */
@@ -33,6 +40,28 @@ function contractStamp(revision: number) {
   return parsed.value
 }
 
+/** Stands in for a predicted root's ledger: the one store of acceptances. */
+function contractAcceptances() {
+  let accepted: ReadonlyMap<string, AcceptedStamp> = new Map()
+  const listeners = new Set<() => void>()
+  const source: AcceptanceSource = {
+    getAccepted: () => accepted,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+  }
+  return {
+    source,
+    accept(mutationId: string, stamp: AcceptedStamp) {
+      accepted = new Map(accepted).set(mutationId, stamp)
+      for (const listener of listeners) listener()
+    },
+  }
+}
+
 async function flushMicrotasks() {
   await act(async () => Promise.resolve())
 }
@@ -44,6 +73,7 @@ async function advance(ms: number) {
 function setupRefreshContract(harness: RefreshContractHarness) {
   const request = vi.fn()
   const useRefresh = harness.useRefresh
+  const acceptances = contractAcceptances()
   let acceptanceGraceMs = 0
   const rendered = renderHook(
     ({
@@ -53,19 +83,32 @@ function setupRefreshContract(harness: RefreshContractHarness) {
     }) => {
       const refresh = useRefresh(request)
       acceptanceGraceMs = refresh.acceptanceGraceMs
-      return useIncorporation(currentCanon, refresh)
+      return useIncorporation(
+        currentCanon,
+        refresh,
+        undefined,
+        acceptances.source
+      )
     },
     { initialProps: { currentCanon: contractCanon(0) } }
   )
 
-  act(() =>
-    rendered.result.current.recordAcceptance(
-      "refresh-contract-mutation",
-      contractStamp(1)
-    )
-  )
+  act(() => acceptances.accept("refresh-contract-mutation", contractStamp(1)))
 
   return { ...rendered, acceptanceGraceMs, request }
+}
+
+/** Runs one case on a fresh root and unmounts it however the case ends. */
+async function withRefreshContract(
+  harness: RefreshContractHarness,
+  run: (rendered: ReturnType<typeof setupRefreshContract>) => Promise<void>
+) {
+  const rendered = setupRefreshContract(harness)
+  try {
+    await run(rendered)
+  } finally {
+    rendered.unmount()
+  }
 }
 
 async function completeAttempt(
@@ -91,54 +134,52 @@ export function refreshContractCases(
   return [
     {
       name: "honors carrier grace and stalls after two uncovered refreshes",
-      async run() {
-        const rendered = setupRefreshContract(harness)
-        const { acceptanceGraceMs, result, request } = rendered
+      run: () =>
+        withRefreshContract(harness, async (rendered) => {
+          const { acceptanceGraceMs, result, request } = rendered
 
-        await flushMicrotasks()
-        if (acceptanceGraceMs > 0) {
-          expect(result.current.status.freshness).toBe("grace")
-          expect(request).not.toHaveBeenCalled()
-          await advance(acceptanceGraceMs)
-        }
+          await flushMicrotasks()
+          if (acceptanceGraceMs > 0) {
+            expect(result.current.status.freshness).toBe("grace")
+            expect(request).not.toHaveBeenCalled()
+            await advance(acceptanceGraceMs)
+          }
 
-        expect(request).toHaveBeenCalledTimes(1)
-        await completeAttempt(harness, rendered)
-        await advance(UNCOVERED_REFRESH_RETRY_MS)
+          expect(request).toHaveBeenCalledTimes(1)
+          await completeAttempt(harness, rendered)
+          await advance(UNCOVERED_REFRESH_RETRY_MS)
 
-        expect(request).toHaveBeenCalledTimes(2)
-        await completeAttempt(harness, rendered)
-        expect(result.current.status).toMatchObject({
-          freshness: "stalled",
-          stallReason: "behind",
-        })
-        rendered.unmount()
-      },
+          expect(request).toHaveBeenCalledTimes(2)
+          await completeAttempt(harness, rendered)
+          expect(result.current.status).toMatchObject({
+            freshness: "stalled",
+            stallReason: "behind",
+          })
+        }),
     },
     {
       name: "gives manual retry a fresh two-attempt budget",
-      async run() {
-        const rendered = setupRefreshContract(harness)
-        const { acceptanceGraceMs, result, request } = rendered
+      run: () =>
+        withRefreshContract(harness, async (rendered) => {
+          const { acceptanceGraceMs, result, request } = rendered
 
-        await flushMicrotasks()
-        if (acceptanceGraceMs > 0) await advance(acceptanceGraceMs)
-        await completeAttempt(harness, rendered)
-        await advance(UNCOVERED_REFRESH_RETRY_MS)
-        await completeAttempt(harness, rendered)
-        expect(result.current.status.freshness).toBe("stalled")
+          await flushMicrotasks()
+          if (acceptanceGraceMs > 0) await advance(acceptanceGraceMs)
+          await completeAttempt(harness, rendered)
+          await advance(UNCOVERED_REFRESH_RETRY_MS)
+          await completeAttempt(harness, rendered)
+          expect(result.current.status.freshness).toBe("stalled")
 
-        act(() => result.current.retryRefresh())
-        await flushMicrotasks()
-        expect(request).toHaveBeenCalledTimes(3)
-        await completeAttempt(harness, rendered)
+          act(() => result.current.retryRefresh())
+          await flushMicrotasks()
+          expect(request).toHaveBeenCalledTimes(3)
+          await completeAttempt(harness, rendered)
 
-        await advance(UNCOVERED_REFRESH_RETRY_MS)
-        expect(request).toHaveBeenCalledTimes(4)
-        await completeAttempt(harness, rendered)
-        expect(result.current.status.freshness).toBe("stalled")
-        rendered.unmount()
-      },
+          await advance(UNCOVERED_REFRESH_RETRY_MS)
+          expect(request).toHaveBeenCalledTimes(4)
+          await completeAttempt(harness, rendered)
+          expect(result.current.status.freshness).toBe("stalled")
+        }),
     },
   ]
 }
@@ -148,7 +189,7 @@ export function refreshContractCases(
  * Registers one vitest `describe` block, so call it at a test file's top
  * level. Needs `@testing-library/react` and a DOM: run the file in the
  * `jsdom` environment (`// @vitest-environment jsdom`). The block installs
- * vitest fake timers for its own tests.
+ * vitest fake timers for its own tests and unmounts every root it renders.
  * @param harness Refresh carrier fixture to exercise.
  * @returns Nothing; registers the contract's tests.
  */
