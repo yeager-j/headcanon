@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-import { act, renderHook, waitFor } from "@testing-library/react"
-import { createElement, StrictMode, type ReactNode } from "react"
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react"
+import {
+  createElement,
+  startTransition,
+  StrictMode,
+  useState,
+  type ReactNode,
+} from "react"
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -17,15 +23,19 @@ import {
   type MutationContext,
   type MutationEnvelope,
 } from "./index"
+import { createPredictedRootHook } from "./predicted-root"
 import {
   createPredictedRoot,
   createPredictedRootContext,
+  DELIVERY_WAIT_MS,
   RetryableDeliveryError,
+  TerminalDeliveryError,
   useSnapshotRefresh,
   type MutationReceipt,
   type PredictedRootOptions,
   type PredictedRootRecoveryListeners,
 } from "./react"
+import { UNCOVERED_REFRESH_RETRY_MS } from "./refresh"
 
 type CounterError = { readonly code: "prediction-refused" }
 type CounterArgs = {
@@ -139,12 +149,16 @@ function mutate(
   return outcome.value
 }
 
+// Unmount every root after each test: a root left mounted with a delivery in
+// flight holds a React Action open, and React entangles every later
+// transition with it, in any root.
 afterEach(() => {
+  cleanup()
   vi.restoreAllMocks()
 })
 
 describe("createPredictedRoot", () => {
-  it("predicts immediately and accumulates a burst through useOptimistic", () => {
+  it("predicts immediately and accumulates a burst", () => {
     const { result, send } = setup()
 
     act(() => {
@@ -396,10 +410,10 @@ describe("createPredictedRoot", () => {
 
   it("canonizes A and B independently after their Actions settle at acceptance", async () => {
     // UNN-682: Actions settle at the terminal acceptance, not canonization.
-    // The predictions stay rendered because React retains the optimistic
-    // updates and the reducer applies an accepted-but-uncovered update over
-    // the newer canon; coverage — not Action settlement — reduces each to
-    // identity and resolves its `canonized` independently.
+    // The predictions stay rendered because the ledger keeps each accepted
+    // stamp and the projection applies an accepted-but-uncovered mutation
+    // over the newer canon; coverage — not Action settlement — reduces each
+    // to identity and resolves its `canonized` independently.
     const { result, deliveries, rerender, send } = setup()
     let first: MutationReceipt<CounterError>
     let second: MutationReceipt<CounterError>
@@ -431,10 +445,10 @@ describe("createPredictedRoot", () => {
   })
 
   it("reduces a covered accepted update to identity while a sibling keeps it replayed", async () => {
-    // The sibling B's open Action keeps A's settled optimistic update in
-    // React's replay queue; the acceptedById bookkeeping must reduce A to
-    // identity in the very first covering render, so A is never applied on
-    // top of a canon that already contains it.
+    // A stays in the ledger until coverage is reconciled after the render;
+    // the projection must reduce A to identity in the very first covering
+    // render, so A is never applied on top of a canon that already contains
+    // it.
     const predict = vi.fn(
       (state: number, args: CounterArgs): Result<number, CounterError> =>
         ok(state + args.amount)
@@ -485,7 +499,14 @@ describe("createPredictedRoot", () => {
 
     // A reduces to identity — its predictor never re-runs — while B replays
     // over the covering canon, applying A's effect exactly once in total.
-    expect(predict).not.toHaveBeenCalledWith(expect.anything(), { amount: 1 })
+    // `predict` takes (state, args, context): the matchers name all three, and
+    // the positive control proves they can match at all.
+    expect(predict).not.toHaveBeenCalledWith(
+      expect.anything(),
+      { amount: 1 },
+      expect.anything()
+    )
+    expect(predict).toHaveBeenCalledWith(1, { amount: 10 }, expect.anything())
     expect(result.current.value).toBe(11)
     expect(canonized).toBe(false)
     await expect(receipt!.canonized).resolves.toEqual(ok(undefined))
@@ -651,11 +672,12 @@ describe("createPredictedRoot", () => {
     await expect(receipt!.canonized).resolves.toEqual(ok(undefined))
   })
 
-  it("pauses later intent on uncertain delivery and yields predictions to canon truth", async () => {
-    // UNN-682: an unbounded wait for a manual retry may not hold Actions open
-    // (a held Action freezes canon delivery and navigation), so the paused
-    // queue's predictions revert to canon while the envelopes and receipts
-    // stay pending for honest same-ID redelivery.
+  it("pauses later intent on uncertain delivery and keeps every prediction rendered", async () => {
+    // The wait for a manual retry is unbounded, so no Action stays open (a
+    // held Action freezes canon delivery and navigation). Visibility comes
+    // from the ledger, not the Action: the paused queue's predictions stay
+    // rendered while their envelopes and receipts wait for honest same-ID
+    // redelivery.
     const recoveryCleanup = vi.fn()
     const defaultDeliveryListener = vi.fn()
     const onDeliveryUncertain = vi.fn(() => recoveryCleanup)
@@ -679,7 +701,8 @@ describe("createPredictedRoot", () => {
       retry: result.current.retryDelivery,
     })
     expect(defaultDeliveryListener).not.toHaveBeenCalled()
-    await waitFor(() => expect(result.current.value).toBe(0))
+    await act(async () => {})
+    expect(result.current.value).toBe(3)
     expect(result.current.status.pending).toBe(2)
     expect(send).toHaveBeenCalledTimes(1)
 
@@ -711,9 +734,8 @@ describe("createPredictedRoot", () => {
     expect(deliveries[1]?.envelope).toBe(originalEnvelope)
     expect(deliveries[1]?.envelope.mutationId).toBe(uncertain!.id)
 
-    // The resumed queue re-mounts every paused prediction for the duration
-    // of the attempt (same mutation IDs, same replay order).
-    await waitFor(() => expect(result.current.value).toBe(3))
+    // Both predictions stayed rendered through the pause and the retry.
+    expect(result.current.value).toBe(3)
 
     act(() => deliveries[1]?.resolve(ok(stamp(1))))
     await expect(uncertain!.accepted).resolves.toEqual(ok(stamp(1)))
@@ -1006,10 +1028,10 @@ describe("createPredictedRoot — retryable delivery", () => {
 
       expect(send).toHaveBeenCalledTimes(4)
       expect(result.current.status.delivery).toBe("uncertain")
-      // The envelope is preserved for the honest retry affordance; the
-      // prediction yields to canon truth while the queue is paused (UNN-682).
+      // The envelope is preserved for the honest retry affordance, and the
+      // prediction stays rendered while the queue is paused.
       await act(async () => {})
-      expect(result.current.value).toBe(0)
+      expect(result.current.value).toBe(1)
       expect(result.current.status.pending).toBe(1)
 
       act(() => result.current.retryDelivery())
@@ -1027,12 +1049,25 @@ describe("createPredictedRoot — retryable delivery", () => {
 // ---------------------------------------------------------------------------
 
 describe("createPredictedRoot — unmount does not discard unsent intent", () => {
-  it("sends queued envelopes on the way down, in queue order", async () => {
+  it("sends queued envelopes on the way down, after the in-flight head", async () => {
     // The motivating case: a debounced autosave flushed from a leaf's unmount
     // cleanup. The leaf tears down before the provider, so the mutation is
     // queued into a root that is already unmounting; dropping it silently
-    // loses the user's last edit.
+    // loses the user's last edit. Two edits to one field must still commit
+    // in order, so the farewell waits for the head that is in flight.
     const { result, deliveries, send, unmount } = setup()
+    const writes: number[] = []
+    // The authority answers the most recently sent request first: the worst
+    // case for a farewell that does not wait.
+    const answerNewestFirst = async () => {
+      for (const delivery of [...deliveries].reverse()) {
+        const amount = delivery.envelope.invocation.args.amount
+        if (writes.includes(amount)) continue
+        writes.push(amount)
+        delivery.resolve(ok(stamp(writes.length)))
+      }
+      await act(async () => {})
+    }
 
     act(() => {
       mutate(result, add({ amount: 1 }))
@@ -1043,11 +1078,14 @@ describe("createPredictedRoot — unmount does not discard unsent intent", () =>
 
     unmount()
     await act(async () => {})
+    expect(send).toHaveBeenCalledTimes(1)
 
+    await answerNewestFirst()
     expect(send).toHaveBeenCalledTimes(2)
-    expect(deliveries[1]?.envelope.invocation.args.amount).toBe(2)
+    await answerNewestFirst()
 
-    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    expect(deliveries[1]?.envelope.invocation.args.amount).toBe(2)
+    expect(writes).toEqual([1, 2])
   })
 
   it("does not re-send an envelope whose delivery may already have committed", async () => {
@@ -1084,5 +1122,273 @@ describe("createPredictedRoot — unmount does not discard unsent intent", () =>
     )
 
     act(() => deliveries[0]?.resolve(ok(stamp(1))))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Prediction lifetime is the ledger's, not the Action's (review P1-11, P1-12)
+// ---------------------------------------------------------------------------
+
+describe("createPredictedRoot — prediction lifetime", () => {
+  it("keeps an accepted prediction rendered after its Action ends, until canon covers it", async () => {
+    // A zero-grace snapshot carrier whose refetch never delivers canon: the
+    // Action ends at acceptance and nothing covers the stamp.
+    const { result, deliveries, rerender } = setup()
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    await act(async () => {})
+
+    expect(result.current.value).toBe(1)
+    expect(result.current.status.pending).toBe(1)
+
+    // Later intent predicts from the rendered value, not stale canon.
+    act(() => {
+      mutate(result, add({ amount: 2 }))
+    })
+    expect(result.current.value).toBe(3)
+
+    rerender({ currentCanon: canon(1, 1) })
+    await act(async () => {})
+    expect(result.current.value).toBe(3)
+    expect(result.current.status.pending).toBe(1)
+
+    await act(async () => deliveries[1]?.resolve(ok(stamp(2))))
+    rerender({ currentCanon: canon(3, 2) })
+    await act(async () => {})
+    expect(result.current.value).toBe(3)
+    expect(result.current.status.pending).toBe(0)
+  })
+
+  it("keeps an accepted prediction rendered while the refresh carrier stalls", async () => {
+    vi.useFakeTimers()
+    try {
+      const controlled = createControlledSender()
+      const refetch = vi.fn(async () => undefined)
+      const useResolvingRefresh = () => useSnapshotRefresh(refetch)
+      const usePredictions = createPredictedRoot({
+        protocol: counterProtocol,
+        send: controlled.send,
+        refresh: useResolvingRefresh,
+      })
+      const initialCanon = canon(0, 0)
+      const { result } = renderHook(() =>
+        usePredictions({ canon: initialCanon })
+      )
+
+      act(() => {
+        mutate(result, add({ amount: 1 }))
+      })
+      await act(async () => controlled.deliveries[0]?.resolve(ok(stamp(1))))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(UNCOVERED_REFRESH_RETRY_MS)
+      })
+
+      expect(refetch).toHaveBeenCalledTimes(2)
+      expect(result.current.status.freshness).toBe("stalled")
+      expect(result.current.value).toBe(1)
+      expect(result.current.status.pending).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("releases a stalled sender's Action into uncertain delivery after the bounded wait", async () => {
+    vi.useFakeTimers()
+    try {
+      const controlled = createControlledSender()
+      const usePredictions = createPredictedRoot({
+        protocol: counterProtocol,
+        send: controlled.send,
+        refresh: useNoRefresh,
+      })
+      const initialCanon = canon(0, 0)
+      const { result } = renderHook(() => {
+        const root = usePredictions({ canon: initialCanon })
+        const [unrelated, setUnrelated] = useState(0)
+        return { root, unrelated, setUnrelated }
+      })
+
+      let receipt!: MutationReceipt<CounterError>
+      act(() => {
+        const outcome = result.current.root.mutate(add({ amount: 1 }))
+        if (!outcome.ok) throw new Error("unexpected local refusal")
+        receipt = outcome.value
+      })
+      await act(async () => {
+        startTransition(() => result.current.setUnrelated(1))
+      })
+      // React entangles transitions with the open delivery Action.
+      expect(result.current.unrelated).toBe(0)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DELIVERY_WAIT_MS)
+      })
+      await act(async () => {})
+
+      expect(result.current.root.status.delivery).toBe("uncertain")
+      expect(result.current.unrelated).toBe(1)
+      expect(result.current.root.value).toBe(1)
+      expect(result.current.root.status.pending).toBe(1)
+
+      // Exact-envelope retry while the first request is still unanswered.
+      act(() => result.current.root.retryDelivery())
+      expect(controlled.send).toHaveBeenCalledTimes(2)
+      expect(controlled.deliveries[1]?.envelope).toBe(
+        controlled.deliveries[0]?.envelope
+      )
+
+      // The late answer to the first request is still the authority's answer
+      // for this mutation ID.
+      await act(async () => controlled.deliveries[0]?.resolve(ok(stamp(1))))
+      await expect(receipt.accepted).resolves.toEqual(ok(stamp(1)))
+      expect(result.current.root.status.delivery).toBe("idle")
+
+      // The retry's answer is the same receipt and changes nothing.
+      await act(async () => controlled.deliveries[1]?.resolve(ok(stamp(1))))
+      expect(result.current.root.value).toBe(1)
+      expect(result.current.root.status.pending).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("ignores a superseded attempt's late failure while the retry is in flight", async () => {
+    vi.useFakeTimers()
+    try {
+      const { result, deliveries } = setup()
+      let receipt!: MutationReceipt<CounterError>
+      act(() => {
+        receipt = mutate(result, add({ amount: 1 }))
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DELIVERY_WAIT_MS)
+      })
+      expect(result.current.status.delivery).toBe("uncertain")
+
+      act(() => result.current.retryDelivery())
+      await act(async () => deliveries[0]?.reject(new Error("late failure")))
+      expect(result.current.status.delivery).toBe("sending")
+
+      await act(async () => deliveries[1]?.resolve(ok(stamp(1))))
+      await expect(receipt.accepted).resolves.toEqual(ok(stamp(1)))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Terminal delivery failures, uncertain heads, and control flow
+// ---------------------------------------------------------------------------
+
+describe("createPredictedRoot — terminal and paused delivery", () => {
+  it("settles a terminal delivery failure without retrying and releases the queue", async () => {
+    const { result, deliveries, send } = setup()
+    let refused!: MutationReceipt<CounterError>
+    let next!: MutationReceipt<CounterError>
+    act(() => {
+      refused = mutate(result, add({ amount: 1 }))
+      next = mutate(result, add({ amount: 2 }))
+    })
+
+    const failure = {
+      kind: "undeliverable",
+      error: { code: "invalid-envelope", reason: "invalid-protocol" },
+    } as const
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError(failure))
+    )
+
+    await expect(refused.accepted).resolves.toEqual(err(failure))
+    await expect(refused.canonized).resolves.toEqual(err(failure))
+    expect(result.current.status.delivery).toBe("sending")
+    expect(result.current.value).toBe(2)
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(deliveries[1]?.envelope.mutationId).toBe(next.id)
+  })
+
+  it("queues intent recorded while the head is uncertain behind that head", async () => {
+    const { result, deliveries, send } = setup()
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+    await act(async () => deliveries[0]?.reject(new Error("response lost")))
+    expect(result.current.status.delivery).toBe("uncertain")
+
+    let later!: MutationReceipt<CounterError>
+    act(() => {
+      later = mutate(result, add({ amount: 2 }))
+    })
+    expect(result.current.value).toBe(3)
+    expect(result.current.status.delivery).toBe("uncertain")
+    expect(send).toHaveBeenCalledTimes(1)
+
+    act(() => result.current.retryDelivery())
+    await act(async () => deliveries[1]?.resolve(ok(stamp(1))))
+    expect(send).toHaveBeenCalledTimes(3)
+    expect(deliveries[2]?.envelope.mutationId).toBe(later.id)
+  })
+
+  it("lets a mounted conflict listener override the factory default", async () => {
+    const defaultConflict = vi.fn()
+    const mountedConflict = vi.fn()
+    const { result, rerender } = setup(
+      canon(0, 0),
+      { onConflict: defaultConflict },
+      { onConflict: mountedConflict }
+    )
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+      mutate(result, add({ amount: 1, refuseAt: 11 }))
+    })
+    rerender({ currentCanon: canon(10, 10) })
+    await act(async () => {})
+
+    expect(mountedConflict).toHaveBeenCalledOnce()
+    expect(defaultConflict).not.toHaveBeenCalled()
+  })
+
+  it("cancels a mutation and propagates a classified control-flow throw", async () => {
+    const signal = new Error("framework control flow")
+    const propagated = vi.fn()
+    const captureSignal = (event: ErrorEvent) => {
+      if (event.error !== signal) return
+      event.preventDefault()
+      propagated(event.error)
+    }
+    window.addEventListener("error", captureSignal)
+    try {
+      const controlled = createControlledSender()
+      const usePredictions = createPredictedRootHook(
+        {
+          protocol: counterProtocol,
+          send: controlled.send,
+          refresh: useNoRefresh,
+        },
+        (error) => {
+          if (error === signal) throw error
+        }
+      )
+      const initialCanon = canon(0, 0)
+      const { result } = renderHook(() =>
+        usePredictions({ canon: initialCanon })
+      )
+      let receipt!: MutationReceipt<CounterError>
+      act(() => {
+        receipt = mutate(result, add({ amount: 1 }))
+      })
+      await act(async () => controlled.deliveries[0]?.reject(signal))
+
+      const cancelled = err({ kind: "delivery-cancelled" } as const)
+      await expect(receipt.accepted).resolves.toEqual(cancelled)
+      await expect(receipt.canonized).resolves.toEqual(cancelled)
+      await waitFor(() => expect(propagated).toHaveBeenCalledWith(signal))
+      expect(result.current.value).toBe(0)
+      expect(result.current.status.pending).toBe(0)
+    } finally {
+      window.removeEventListener("error", captureSignal)
+    }
   })
 })

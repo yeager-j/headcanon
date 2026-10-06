@@ -233,10 +233,12 @@ context to enforce them.
 
 `createPredictedRoot` binds a protocol, delivery function, refresh carrier, and
 optional invalidation adapter once, then returns a hook that accepts the latest
-complete `Canon<State>`. Its reducer-form
-`useOptimistic` projection accumulates pending intent, rebases over newer canons,
-and treats an accepted mutation as identity as soon as canon covers its complete
-revision vector.
+complete `Canon<State>`. The rendered value is every live prediction folded over
+that canon in invocation order: it rebases over newer canons, and it treats an
+accepted mutation as identity as soon as canon covers its complete revision
+vector, in the same render that delivers that canon. The root's mutation ledger
+is the one authority for this: the value, `status`, and `conflicts` all read it
+through `useSyncExternalStore`.
 
 Each call to that hook mounts an independent root with its own queue, receipt
 ledger, and subscription lifetime. `createPredictedRootContext` turns one
@@ -260,11 +262,28 @@ Factory-level listeners provide defaults; a mutate call overrides only the
 stages it supplies. Delivery uncertainty remains root status because it is a
 queue condition, not a terminal mutation stage.
 
-When delivery becomes uncertain, `retryDelivery()` redelivers the queue head
-with the exact same envelope and mutation ID. Automatic reconnect policy remains
+Each delivery attempt holds a React Action open, so canon that rides back with
+the response cannot commit before its acceptance is recorded. React holds every
+other transition while an Action is open, so the hold is bounded: after
+`DELIVERY_WAIT_MS` (10 seconds) without an answer, delivery becomes uncertain
+and the Action ends. An ordinary throw from `send` also makes delivery
+uncertain. While the head is uncertain, the queue waits and every prediction
+stays rendered. `retryDelivery()` redelivers the queue head with the exact same
+envelope and mutation ID. An answer that arrives late, to the first attempt or
+to a retry, still settles the mutation: the authority deduplicates by mutation
+ID, so every attempt gets the same answer. Automatic reconnect policy remains
 outside the React core.
 
-Accepted mutations remain predicted while the carrier catches up. Router-carried
+A `send` adapter reports the authority's other answers with two error classes.
+`RetryableDeliveryError` means the authority stored no receipt (exhausted
+contention): the root redelivers the same envelope on a bounded backoff.
+`TerminalDeliveryError` means the answer is final but is not a domain refusal:
+a private denial (`denied`) or an executor refusal of the envelope itself
+(`undeliverable`, for example arguments that do not parse). The root settles
+both receipt milestones with that failure and never retries it.
+
+Accepted mutations remain predicted while the carrier catches up, however long
+that takes, including when the carrier stalls. Router-carried
 canons receive 250 ms for the Server Action's RSC payload before the package
 requests `router.refresh()`; snapshot carriers refetch immediately. A dedicated
 refresh transition coalesces requests and retries one uncovered refresh after one
@@ -290,15 +309,21 @@ invalidation comparison, refresh coalescing, and stall state machine.
 
 Calls made in the same event synchronously pre-check against the same rendered
 projection. If later same-tick intent becomes invalid only after an earlier
-prediction, it is jossed during reducer replay and is never delivered. Headcanon
+prediction, it is jossed during replay and is never delivered. `conflicts`
+keeps the 50 most recent replay conflicts. Headcanon
 does not maintain the synchronous shadow projection that would be required to
 turn that case into an immediate local refusal.
 
 Use `createNextPredictedRoot` from `headcanon/next/client` when a raw
 Server Action may throw Next navigation or authorization control flow. The
-binding runs `unstable_rethrow` before ordinary thrown requests become uncertain
-delivery. The same entry owns `useRouterRefresh`; snapshot refresh remains in
-`headcanon/react`.
+binding runs Next's `unstable_rethrow` on every delivery throw first: a
+`redirect()`, `notFound()`, `forbidden()`, or `unauthorized()` signal settles the
+mutation as `delivery-cancelled` and reaches Next instead of becoming uncertain
+delivery. Its `action` form maps the generated action's outcomes: contention is
+retryable, while a denial or any other executor error is a terminal
+`TerminalDeliveryError`. Both forms accept every `createPredictedRoot` option
+and default `refresh` to the App Router carrier. The same entry owns
+`useRouterRefresh`; snapshot refresh remains in `headcanon/react`.
 
 The server binding derives one bounded SHA-256 cache tag per axis (hashed the
 same way as the Ably channel name, so `axisCacheTag` is async),
