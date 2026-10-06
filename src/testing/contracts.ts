@@ -12,10 +12,10 @@ export {
   type MutationAuthorityContractHarness,
   type MutationAuthorityContractRefusal,
   type MutationAuthorityContractState,
-} from "./authority-contract"
+} from "./suites/authority-contract"
 export {
   createInMemoryInvalidationContractHarness,
   verifyInvalidationContract,
   type InvalidationContractFixture,
   type InvalidationContractHarness,
-} from "./invalidation-contract"
+} from "./suites/invalidation-contract"

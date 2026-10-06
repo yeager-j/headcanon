@@ -2,7 +2,7 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { err, ok, type Result } from "serializable-result"
 import { describe, expect, it } from "vitest"
 
-import { hasExactKeys, isPlainRecord } from "../admission"
+import { hasExactKeys, isPlainRecord } from "../../admission"
 import {
   DEFAULT_MUTATION_MAX_ATTEMPTS,
   executePreparedMutation,
@@ -11,15 +11,15 @@ import {
   type MutationAuthorityAdapter,
   type MutationExecutorError,
   type MutationTerminalOutcome,
-} from "../authority"
-import { defineMutation, defineProtocol } from "../protocol"
-import { axisId, revisionAt, type AcceptedStamp } from "../revisions"
-import type { ContractCase } from "./contract-case"
+} from "../../authority"
+import { defineMutation, defineProtocol } from "../../protocol"
+import { axisId, revisionAt, type AcceptedStamp } from "../../revisions"
 import {
   createInMemoryMutationAuthority,
   type InMemoryReader,
   type InMemoryTransaction,
-} from "./in-memory-authority"
+} from "../in-memory-authority"
+import type { ContractCase } from "./contract-case"
 
 /** Axes the authority contract's fixture command writes, by name. */
 export const MUTATION_AUTHORITY_CONTRACT_AXES = Object.freeze({

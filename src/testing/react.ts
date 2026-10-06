@@ -4,4 +4,4 @@
 export {
   verifyRefreshContract,
   type RefreshContractHarness,
-} from "./refresh-contract"
+} from "./suites/refresh-contract"

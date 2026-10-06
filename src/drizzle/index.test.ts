@@ -11,13 +11,8 @@ import { Pool } from "pg"
 import { err, ok } from "serializable-result"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { executePreparedMutation, prepareMutationRequest } from "./authority"
-import {
-  createDrizzleMutationAuthority,
-  type DrizzleMutationTransaction,
-} from "./drizzle"
-import { defineMutation, defineProtocol } from "./protocol"
-import { headcanonMutationReceipts } from "./receipt-table"
+import { executePreparedMutation, prepareMutationRequest } from "../authority"
+import { defineMutation, defineProtocol } from "../protocol"
 import {
   MUTATION_AUTHORITY_CONTRACT_AXES,
   MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE,
@@ -26,12 +21,20 @@ import {
   type MutationAuthorityContractHarness,
   type MutationAuthorityContractRefusal,
   type MutationAuthorityContractState,
-} from "./testing/contracts"
+} from "../testing/contracts"
+import {
+  createDrizzleMutationAuthority,
+  type DrizzleMutationTransaction,
+} from "./index"
+import { headcanonMutationReceipts } from "./schema"
 
 const databaseUrl =
   process.env.HEADCANON_TEST_DATABASE_URL ?? process.env.DATABASE_URL
 const receiptMigration = readFileSync(
-  new URL("../drizzle/0000_headcanon_mutation_receipts.sql", import.meta.url),
+  new URL(
+    "../../drizzle/0000_headcanon_mutation_receipts.sql",
+    import.meta.url
+  ),
   "utf8"
 )
 

@@ -4,14 +4,6 @@ import { MutationContentionError } from "../authority"
 import type { InvalidationSubscription } from "../invalidation"
 import type { AxisId } from "../revisions"
 import {
-  createInMemoryMutationAuthorityContractHarness,
-  mutationAuthorityContractCases,
-  type MutationAuthorityContractFixture,
-  type MutationAuthorityContractRefusal,
-  type MutationAuthorityContractState,
-} from "./authority-contract"
-import type { ContractCase } from "./contract-case"
-import {
   createInMemoryInvalidationContractHarness,
   verifyInvalidationContract,
   verifyMutationAuthorityContract,
@@ -19,9 +11,17 @@ import {
 import type { InMemoryReader, InMemoryTransaction } from "./in-memory-authority"
 import { createInMemoryInvalidationAdapter } from "./in-memory-invalidation"
 import {
+  createInMemoryMutationAuthorityContractHarness,
+  mutationAuthorityContractCases,
+  type MutationAuthorityContractFixture,
+  type MutationAuthorityContractRefusal,
+  type MutationAuthorityContractState,
+} from "./suites/authority-contract"
+import type { ContractCase } from "./suites/contract-case"
+import {
   invalidationContractCases,
   type InvalidationContractFixture,
-} from "./invalidation-contract"
+} from "./suites/invalidation-contract"
 
 verifyMutationAuthorityContract(
   createInMemoryMutationAuthorityContractHarness()

@@ -7,8 +7,8 @@ export {
   type InMemoryMutationAuthority,
   type InMemoryReader,
   type InMemoryTransaction,
-} from "./testing/in-memory-authority"
+} from "./in-memory-authority"
 export {
   createInMemoryInvalidationAdapter,
   type InMemoryInvalidationAdapter,
-} from "./testing/in-memory-invalidation"
+} from "./in-memory-invalidation"

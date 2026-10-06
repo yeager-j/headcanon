@@ -6,14 +6,14 @@ import {
   useIncorporation,
   type AcceptanceSource,
   type RefreshAdapter,
-} from "../refresh"
+} from "../../refresh"
 import {
   acceptedStamp,
   axisId,
   revisionVector,
   type AcceptedStamp,
   type Canon,
-} from "../revisions"
+} from "../../revisions"
 import type { ContractCase } from "./contract-case"
 
 /** Refresh carrier fixture used by reusable stall-state assertions. */

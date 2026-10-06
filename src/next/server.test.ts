@@ -17,7 +17,7 @@ import { ablyAxisChannelName, ablyChannelNamespace } from "../ably/channels"
 import {
   createDrizzleMutationAuthority,
   type DrizzleMutationTx,
-} from "../drizzle"
+} from "../drizzle/index"
 import {
   acceptedStamp,
   axisId,
@@ -32,7 +32,7 @@ import {
   createInMemoryMutationAuthority,
   type InMemoryReader,
   type InMemoryTransaction,
-} from "../testing"
+} from "../testing/index"
 import {
   acceptMutation,
   allowMutation,

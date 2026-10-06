@@ -4,10 +4,10 @@ import type {
   AxisInvalidation,
   InvalidationAdapter,
   InvalidationPublisher,
-} from "../invalidation"
-import { acceptedStamp, axisId, type AcceptedStamp } from "../revisions"
+} from "../../invalidation"
+import { acceptedStamp, axisId, type AcceptedStamp } from "../../revisions"
+import { createInMemoryInvalidationAdapter } from "../in-memory-invalidation"
 import type { ContractCase } from "./contract-case"
-import { createInMemoryInvalidationAdapter } from "./in-memory-invalidation"
 
 /** Observable operations supplied to the invalidation contract. */
 export interface InvalidationContractFixture {

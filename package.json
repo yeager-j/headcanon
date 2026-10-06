@@ -32,12 +32,12 @@
       "default": "./dist/ably/server.js"
     },
     "./drizzle": {
-      "types": "./dist/drizzle.d.ts",
-      "default": "./dist/drizzle.js"
+      "types": "./dist/drizzle/index.d.ts",
+      "default": "./dist/drizzle/index.js"
     },
     "./drizzle-schema": {
-      "types": "./dist/receipt-table.d.ts",
-      "default": "./dist/receipt-table.js"
+      "types": "./dist/drizzle/schema.d.ts",
+      "default": "./dist/drizzle/schema.js"
     },
     "./next/client": {
       "types": "./dist/next/client.d.ts",
@@ -52,8 +52,8 @@
       "default": "./dist/react.js"
     },
     "./testing": {
-      "types": "./dist/testing.d.ts",
-      "default": "./dist/testing.js"
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
     },
     "./testing/contracts": {
       "types": "./dist/testing/contracts.d.ts",

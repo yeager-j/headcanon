@@ -3,10 +3,13 @@ import { is, SQL } from "drizzle-orm"
 import { getTableConfig, PgDialect, type PgColumn } from "drizzle-orm/pg-core"
 import { describe, expect, it } from "vitest"
 
-import { headcanonMutationReceipts } from "./receipt-table"
+import { headcanonMutationReceipts } from "./schema"
 
 const checkedInSql = readFileSync(
-  new URL("../drizzle/0000_headcanon_mutation_receipts.sql", import.meta.url),
+  new URL(
+    "../../drizzle/0000_headcanon_mutation_receipts.sql",
+    import.meta.url
+  ),
   "utf8"
 )
 

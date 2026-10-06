@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest"
 import {
   throwMutationContention,
   type MutationAuthorityRequest,
-} from "./authority"
-import { createInMemoryMutationAuthority } from "./testing"
+} from "../authority"
+import { createInMemoryMutationAuthority } from "./index"
 
 type Refusal = { readonly code: "refused" }
 
@@ -190,7 +190,7 @@ describe("headcanon/testing entry", () => {
     const script = `
       import { register } from "node:module"
       register("data:text/javascript," + encodeURIComponent(${JSON.stringify(hook)}))
-      const testing = await import(${JSON.stringify(new URL("./testing.ts", import.meta.url).href)})
+      const testing = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)})
       const authority = testing.createInMemoryMutationAuthority({
         initialState: 0,
         scope: (actor) => actor,

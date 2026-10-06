@@ -20,11 +20,14 @@ a new export is checked with no edit to them. Every export ships to browsers
 unless `scripts/check-bundle-safety.mjs` lists it as server-only.
 
 `headcanon/testing` holds only test doubles and must import no test framework:
-`src/testing.test.ts` imports it in plain Node with `vitest` and Testing
-Library blocked. Contract suites go in `headcanon/testing/contracts` (vitest)
-or `headcanon/testing/react` (vitest, Testing Library, DOM). Each suite's
-cases also run against deliberately broken harnesses in
-`src/testing/*.test.ts`, so a new case needs a broken harness that it catches.
+`src/testing/index.test.ts` imports it in plain Node with `vitest` and Testing
+Library blocked, and lint rejects a test-framework import anywhere in
+`src/testing/` outside `suites/` and the two entries that publish them.
+Contract suites go in `src/testing/suites/` and are published from
+`headcanon/testing/contracts` (vitest) or `headcanon/testing/react` (vitest,
+Testing Library, DOM). Each suite's cases also run against deliberately broken
+harnesses in `src/testing/*.test.ts`, so a new case needs a broken harness that
+it catches.
 
 ## Commands
 

@@ -55,7 +55,7 @@ describe("package entries", () => {
   it("reads the real manifest, renamed entries included", () => {
     expect(packageEntries()).toContainEqual({
       key: "./drizzle-schema",
-      source: join(ROOT, "src/receipt-table.ts"),
+      source: join(ROOT, "src/drizzle/schema.ts"),
     })
   })
 })

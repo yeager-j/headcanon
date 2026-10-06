@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ROUTER_ACCEPTANCE_GRACE_MS } from "../next/client"
-import { refreshContractCases } from "./refresh-contract"
+import { refreshContractCases } from "./suites/refresh-contract"
 
 describe("refresh contract negative controls", () => {
   beforeEach(() => vi.useFakeTimers())

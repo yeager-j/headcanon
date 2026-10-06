@@ -38,7 +38,7 @@ import {
   type IncorporationStatus,
 } from "./refresh"
 import { covers } from "./revisions"
-import { createInMemoryInvalidationAdapter } from "./testing"
+import { createInMemoryInvalidationAdapter } from "./testing/index"
 import { verifyRefreshContract } from "./testing/react"
 
 type TestError = { readonly code: "refused" }

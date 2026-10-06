@@ -16,7 +16,7 @@ import {
   type MutationEnvelope,
 } from "../index"
 import type { PredictedRootOptions } from "../react"
-import { createInMemoryInvalidationAdapter } from "../testing"
+import { createInMemoryInvalidationAdapter } from "../testing/index"
 import {
   createNextObservedRoot,
   createNextPredictedRoot,
