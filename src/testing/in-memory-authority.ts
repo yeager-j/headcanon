@@ -3,31 +3,40 @@ import { ok, type Result } from "serializable-result"
 import {
   contentionRetry,
   createStampAccumulator,
-  mutationReceipt,
+  prepareTerminalOutcome,
   receiptKey,
-  recordTerminalOutcome,
   replayReceipt,
+  storedReceipt,
   throwMutationContention,
   type MutationAttemptFailure,
   type MutationAuthorityAdapter,
   type MutationAuthorityAdapterError,
   type MutationAuthorityRequest,
-  type MutationReceipt,
   type MutationTerminalOutcome,
   type StampAccumulator,
+  type StoredReceipt,
 } from "../core/authority"
 
 /** Read access to the in-memory authority's state cell. */
 export interface InMemoryReader<State> {
+  /** Returns a copy of the state; changing the copy changes nothing. */
   read(): State
 }
 
 /** The state cell one in-memory authority attempt reads and writes. */
 export interface InMemoryTransaction<State> extends InMemoryReader<State> {
+  /**
+   * Replaces this attempt's state with a copy of `next`. It commits only if
+   * the attempt is accepted and no other commit landed since the attempt
+   * began.
+   */
   write(next: State): void
 }
 
-/** In-memory authority surface used by contract fixtures and package consumers. */
+/**
+ * The authority `createInMemoryMutationAuthority` returns: a mutation
+ * authority adapter plus controls for tests.
+ */
 export interface InMemoryMutationAuthority<
   State,
   Actor,
@@ -50,24 +59,20 @@ export interface InMemoryMutationAuthority<
    * attempt, whatever the attempt's outcome.
    */
   contendNext(update?: (current: State) => State): void
+  /** Number of recorded receipts. */
   receiptCount(): number
+  /** Whether a receipt is recorded for `mutationId` in `actor`'s scope. */
   hasReceipt(actor: Actor, mutationId: string): boolean
 }
 
 /**
- * Creates an effectively-once in-memory authority for tests and local
- * fixtures. It has no test-framework dependency, so it can run in any test
- * runner or in a Next server module.
- *
- * It follows the same authority rules as the Drizzle adapter: receipts are
- * keyed by actor scope and mutation ID, and executions for one key run one at
- * a time while different keys interleave; refusals need the request's
- * `parseRefusal` (without one they throw); and a command that throws
- * `MutationContentionError` reruns from fresh state up to `maxAttempts`.
- * Each attempt gets an isolated copy of the state and its own stamp
- * accumulator. An attempt that wrote state commits only if no other commit
- * landed since it began; otherwise it reruns, like a serialization failure.
- * @param options Initial state, actor scope, cloning, and retry policy.
+ * Creates an in-memory {@link MutationAuthorityAdapter} for tests and local
+ * fixtures. It has no test-framework dependency, so it runs in any test runner
+ * or in a Next server module. Each attempt gets an isolated copy of the state;
+ * an attempt that wrote state commits only if no other commit landed since it
+ * began, otherwise it reruns like a serialization failure.
+ * @param options The initial state, actor scope, and optional copy and retry
+ *   policy.
  * @returns An isolated in-memory mutation authority.
  * @throws Error when `maxAttempts` is not a positive integer.
  */
@@ -76,9 +81,16 @@ export function createInMemoryMutationAuthority<
   Actor,
   Refusal,
 >(options: {
+  /** State before any commit. */
   readonly initialState: State
+  /** Maps a trusted actor to its receipt scope. */
   readonly scope: (actor: Actor) => string
+  /**
+   * Copies state wherever it enters or leaves the authority, so no caller
+   * shares a reference. Defaults to `structuredClone`.
+   */
   readonly clone?: (value: State) => State
+  /** Attempts per mutation before it returns `contention`. Defaults to 2. */
   readonly maxAttempts?: number
 }): InMemoryMutationAuthority<State, Actor, Refusal> {
   const clone = options.clone ?? ((value: State) => structuredClone(value))
@@ -86,7 +98,7 @@ export function createInMemoryMutationAuthority<
 
   let state = clone(options.initialState)
   let version = 0
-  const receipts = new Map<string, MutationReceipt>()
+  const receipts = new Map<string, StoredReceipt>()
   const receiptLocks = new Map<string, Promise<void>>()
   const contention = new Array<(current: State) => State>()
 
@@ -143,7 +155,7 @@ export function createInMemoryMutationAuthority<
       if (concurrentUpdate) commit(clone(concurrentUpdate(clone(state))))
     }
 
-    const { stored, terminal } = recordTerminalOutcome(
+    const { stored, terminal } = prepareTerminalOutcome(
       attempted,
       stamp,
       request.parseRefusal
@@ -152,7 +164,7 @@ export function createInMemoryMutationAuthority<
       if (version !== startedAt) throwMutationContention()
       commit(draft)
     }
-    receipts.set(key, mutationReceipt(request, stored))
+    receipts.set(key, storedReceipt(request, stored))
     return ok(terminal)
   }
 

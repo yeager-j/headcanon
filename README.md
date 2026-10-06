@@ -456,12 +456,12 @@ accepted vectors into singleton per-axis entries and follows subscription
 lifetimes.
 
 Call a `verify*Contract` function at the top level of a vitest file. The
-authority contract owns its fixture command and drives it through
-`executePreparedMutation`; a harness supplies only the adapter and the storage
-its transactions reach (`load`, a compare-and-set `writeAxis`, `appendEffect`,
-`replace`, and receipt counts). The invalidation contract checks the adapter
-alone. Production Drizzle, Ably, router-shaped, and snapshot-shaped adapters
-run these same suites.
+authority contract owns its fixture command and runs it through the same
+admission and execution path as a generated action; a harness supplies only the
+adapter and the storage its transactions reach (`load`, a compare-and-set
+`writeAxis`, `appendEffect`, `replace`, and receipt counts). The invalidation
+contract checks the adapter alone. Production Drizzle, Ably, router-shaped, and
+snapshot-shaped adapters run these same suites.
 
 ## Drizzle/Postgres authority
 

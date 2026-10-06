@@ -9,22 +9,41 @@ import { acceptedStamp, axisId, type AcceptedStamp } from "../../core/revisions"
 import { createInMemoryInvalidationAdapter } from "../in-memory-invalidation"
 import type { ContractCase } from "./contract-case"
 
-/** Observable operations supplied to the invalidation contract. */
+/**
+ * What one invalidation contract case exercises: the adapter under test and
+ * the publisher that feeds it.
+ */
 export interface InvalidationContractFixture {
+  /** The subscription side under test. */
   readonly adapter: InvalidationAdapter
+  /** Publishes accepted stamps to `adapter`'s subscribers. */
   readonly publisher: InvalidationPublisher
+  /**
+   * Every per-axis entry `publisher` has sent, in publish order. Each entry
+   * has only `eventId`, `axis`, and `revision`.
+   */
   readonly published: () => readonly AxisInvalidation[]
+  /**
+   * Resolves once the subscriptions made so far are live, so a publication
+   * reaches them. The contract awaits it after subscribing.
+   */
   readonly settled: () => Promise<void>
 }
 
-/** Complete invalidation fixture passed to reusable contract assertions. */
+/**
+ * Names an invalidation adapter under test and creates a fresh fixture for
+ * each contract case.
+ */
 export interface InvalidationContractHarness {
+  /** Label that prefixes the contract's `describe` block. */
   readonly name: string
+  /** Creates an isolated fixture. Called once per case. */
   create(): InvalidationContractFixture | Promise<InvalidationContractFixture>
 }
 
-/** A ready-to-run in-memory harness for `verifyInvalidationContract`.
- * @returns An isolated in-memory invalidation contract fixture.
+/**
+ * A ready-to-run in-memory harness for `verifyInvalidationContract`.
+ * @returns A harness that creates an isolated in-memory bus per case.
  */
 export function createInMemoryInvalidationContractHarness(): InvalidationContractHarness {
   return {
@@ -54,9 +73,9 @@ function invalidationStamp(entries: Record<string, number>): AcceptedStamp {
 }
 
 /**
- * The invalidation contract's cases for one harness. Module-internal: tests
- * use it to run the cases against deliberately broken harnesses.
- * @param harness Adapter fixture to exercise.
+ * The invalidation contract's cases for one harness. Internal to the package:
+ * tests use it to run the cases against deliberately broken harnesses.
+ * @param harness The adapter's harness; `create` runs once per case.
  * @returns The contract cases, in order.
  */
 export function invalidationContractCases(
@@ -118,15 +137,13 @@ export function invalidationContractCases(
             revision: 2,
           },
         ])
-        expect(
-          fixture
-            .published()
-            .every((entry) =>
-              Object.keys(entry).every((key) =>
-                ["eventId", "axis", "revision"].includes(key)
-              )
-            )
-        ).toBe(true)
+        const publishedKeys = fixture
+          .published()
+          .map((entry) => Object.keys(entry).sort())
+        expect(publishedKeys).toEqual([
+          ["axis", "eventId", "revision"],
+          ["axis", "eventId", "revision"],
+        ])
 
         stopA()
         await fixture.publisher.publish(
@@ -140,12 +157,10 @@ export function invalidationContractCases(
 }
 
 /**
- * Runs the reusable black-box invalidation contract against one adapter. It
- * checks the adapter only; how `useIncorporation` reacts to invalidations is
- * the hook's own test. Registers one vitest `describe` block, so call it at a
- * test file's top level. Runs in the `node` environment unless the adapter
- * itself needs a DOM.
- * @param harness Adapter fixture to exercise.
+ * Runs the reusable black-box invalidation contract against one adapter.
+ * Registers one vitest `describe` block, so call it at a test file's top
+ * level. Runs in the `node` environment unless the adapter itself needs a DOM.
+ * @param harness The adapter's harness; `create` runs once per case.
  * @returns Nothing; registers the contract's tests.
  */
 export function verifyInvalidationContract(

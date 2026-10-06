@@ -28,11 +28,7 @@ export const MUTATION_AUTHORITY_CONTRACT_AXES = Object.freeze({
   rollback: axisId("headcanon/contract/rollback"),
 })
 
-/**
- * One axis of the contract fixture. The command writes `rollback` only while
- * `primary` is zero, so an attempt that lost a race to a `primary` write
- * stamps an axis its rerun does not.
- */
+/** One axis of the contract fixture's state. */
 export type MutationAuthorityContractAxis =
   keyof typeof MUTATION_AUTHORITY_CONTRACT_AXES
 
@@ -51,7 +47,7 @@ export interface MutationAuthorityContractState {
   readonly effects: readonly string[]
 }
 
-/** Fresh initial state for the authority contract fixture. */
+/** The state each fixture's storage must hold when `create` returns it. */
 export const MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE: MutationAuthorityContractState =
   Object.freeze({
     axes: Object.freeze({
@@ -100,13 +96,26 @@ export interface MutationAuthorityContractFixture<Transaction, Preflight> {
   appendEffect(tx: Transaction, effect: string): Promise<void>
   /** Commits `next` outside any attempt, as another writer would. */
   replace(next: MutationAuthorityContractState): Promise<void>
+  /** Counts every receipt in the adapter's storage. */
   receiptCount(): Promise<number>
+  /**
+   * Whether storage holds a receipt for `mutationId`. The contract executes
+   * every mutation as one actor.
+   */
   hasReceipt(mutationId: string): Promise<boolean>
 }
 
-/** Creates a fresh, isolated fixture for each contract case. */
+/**
+ * Names a mutation authority under test and creates a fresh fixture for each
+ * contract case.
+ */
 export interface MutationAuthorityContractHarness<Transaction, Preflight> {
+  /** Label that prefixes the contract's `describe` block. */
   readonly name: string
+  /**
+   * Creates an isolated fixture whose storage holds
+   * `MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE`. Called once per case.
+   */
   create():
     | MutationAuthorityContractFixture<Transaction, Preflight>
     | Promise<MutationAuthorityContractFixture<Transaction, Preflight>>
@@ -288,6 +297,8 @@ async function createDriver<Transaction, Preflight>(
           if (primaryDelta !== undefined) await commitConcurrently(primaryDelta)
 
           for (const axis of args.axes) {
+            // Write rollback only while primary is zero, so an attempt that
+            // lost a race to a primary write stamps an axis its rerun does not.
             if (axis === "rollback" && primary !== 0) continue
             const { value, revision } = current.axes[axis]
             const next = { value: value + args.amount, revision: revision + 1 }
@@ -340,15 +351,14 @@ function requireAccepted(result: ContractOutcome): AcceptedStamp {
 }
 
 /**
- * The authority contract's cases for one harness. Module-internal: tests use
- * it to run the cases against deliberately broken harnesses.
- * @param harness Adapter fixture to exercise.
+ * The authority contract's cases for one harness. Internal to the package:
+ * tests use it to run the cases against deliberately broken harnesses.
+ * @param harness The adapter's harness; `create` runs once per case.
  * @returns The contract cases, in order.
  */
 export function mutationAuthorityContractCases<Transaction, Preflight>(
   harness: MutationAuthorityContractHarness<Transaction, Preflight>
 ): readonly ContractCase[] {
-  const driver = () => createDriver(harness)
   const { primary, secondary } = MUTATION_AUTHORITY_CONTRACT_AXES
   const initial = MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE
 
@@ -356,7 +366,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "runs replayable and preconditioned commands against current authority",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         await contract.replace({
           ...initial,
           axes: { ...initial.axes, primary: { value: 5, revision: 4 } },
@@ -385,7 +395,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "reruns load and handler after one CAS loss without retaining attempt effects",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           4,
           contractArgs({ amount: 2, effect: "once-after-retry" })
@@ -405,7 +415,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "gives every contention attempt fresh canonical arguments",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           14,
           contractArgs({
@@ -427,7 +437,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "discards a rolled-back attempt's stamp entries",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           5,
           contractArgs({
@@ -452,7 +462,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "records every committed axis atomically in the accepted vector",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           6,
           contractArgs({ axes: ["primary", "secondary"], effect: "multi-axis" })
@@ -473,7 +483,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "rolls back partial handler work before recording a terminal refusal",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           7,
           contractArgs({ behavior: "refuse", effect: "rolled-back" })
@@ -495,7 +505,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "isolates a recorded refusal from caller mutation",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           13,
           contractArgs({ behavior: "refuse", effect: "immutable-receipt" })
@@ -517,7 +527,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "fails closed when a refusal crosses the receipt boundary without a parser",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           15,
           contractArgs({ behavior: "refuse", effect: "unparsed" })
@@ -540,7 +550,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "returns recorded duplicates without rerunning and rejects ID collisions",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           8,
           contractArgs({ effect: "deduplicated" })
@@ -566,7 +576,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "collapses concurrent delivery of one mutation ID to one effect",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           12,
           contractArgs({ effect: "concurrent-deduplication" })
@@ -587,7 +597,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "treats differently ordered object keys as the same canonical invocation",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           9,
           contractArgs({ effect: "canonical-order" })
@@ -614,7 +624,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "stores no receipt after exhausted contention and preserves the mutation ID",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           10,
           contractArgs({ effect: "retry-same-id" })
@@ -637,7 +647,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "rolls back unexpected exceptions without recording a receipt",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           11,
           contractArgs({ behavior: "throw", effect: "exception" })
@@ -653,7 +663,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
     {
       name: "screens through a preflight executor that sees only committed state",
       async run() {
-        const contract = await driver()
+        const contract = await createDriver(harness)
         const envelope = contractEnvelope(
           16,
           contractArgs({ effect: "preflight" })
@@ -681,11 +691,11 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
 
 /**
  * Runs the reusable black-box authority contract against one adapter. The
- * contract owns the fixture command and drives it through
- * `executePreparedMutation`; the harness supplies the adapter and the storage
- * its transactions reach. Registers one vitest `describe` block, so call it at
- * a test file's top level. Runs in the `node` environment.
- * @param harness Adapter fixture to exercise.
+ * contract owns the fixture command and runs it through the same admission and
+ * execution path as a generated action; the harness supplies the adapter and
+ * the storage its transactions reach. Registers one vitest `describe` block,
+ * so call it at a test file's top level. Runs in the `node` environment.
+ * @param harness The adapter's harness; `create` runs once per case.
  * @returns Nothing; registers the contract's tests.
  */
 export function verifyMutationAuthorityContract<Transaction, Preflight>(

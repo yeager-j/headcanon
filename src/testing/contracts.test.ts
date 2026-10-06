@@ -186,53 +186,65 @@ describe("authority contract negative controls", () => {
   )
 })
 
-function brokenInvalidationFixture(
-  flaw: "ignores-axes" | "keeps-subscriptions"
-): InvalidationContractFixture {
-  const bus = createInMemoryInvalidationAdapter()
-  const subscriptions = new Set<InvalidationSubscription>()
-  return {
-    adapter: {
-      initialStatus: "active",
-      subscribe(subscription) {
-        subscriptions.add(subscription)
-        if (flaw === "keeps-subscriptions") {
-          bus.subscribe(subscription)
-          return () => undefined
-        }
-        return () => subscriptions.delete(subscription)
-      },
+/** Each mutant breaks one bus rule; the contract must fail every case against it. */
+const invalidationMutants: ReadonlyArray<{
+  readonly flaw: string
+  readonly create: () => InvalidationContractFixture
+}> = [
+  {
+    flaw: "delivers every axis to every subscriber",
+    create() {
+      const bus = createInMemoryInvalidationAdapter()
+      const subscriptions = new Set<InvalidationSubscription>()
+      return {
+        adapter: {
+          initialStatus: "active",
+          subscribe(subscription) {
+            subscriptions.add(subscription)
+            return () => subscriptions.delete(subscription)
+          },
+        },
+        publisher: {
+          publish(eventId, stamp) {
+            bus.publish(eventId, stamp)
+            for (const invalidation of bus.published.filter(
+              (entry) => entry.eventId === eventId
+            )) {
+              for (const subscription of subscriptions) {
+                subscription.onInvalidation(invalidation)
+              }
+            }
+          },
+        },
+        published: () => bus.published,
+        settled: async () => undefined,
+      }
     },
-    publisher: {
-      publish(eventId, stamp) {
-        bus.publish(eventId, stamp)
-        if (flaw !== "ignores-axes") return
-        for (const invalidation of bus.published.filter(
-          (entry) => entry.eventId === eventId
-        )) {
-          for (const subscription of subscriptions) {
-            subscription.onInvalidation(invalidation)
-          }
-        }
-      },
+  },
+  {
+    flaw: "keeps delivering after unsubscribe",
+    create() {
+      const bus = createInMemoryInvalidationAdapter()
+      return {
+        adapter: {
+          initialStatus: "active",
+          subscribe(subscription) {
+            bus.subscribe(subscription)
+            return () => undefined
+          },
+        },
+        publisher: bus,
+        published: () => bus.published,
+        settled: async () => undefined,
+      }
     },
-    published: () => bus.published,
-    settled: async () => undefined,
-  }
-}
+  },
+]
 
 describe("invalidation contract negative controls", () => {
-  it.each(["ignores-axes", "keeps-subscriptions"] as const)(
-    "fails a bus that %s",
-    async (flaw) => {
-      const cases = invalidationContractCases({
-        name: "broken",
-        create: () => brokenInvalidationFixture(flaw),
-      })
+  it.each(invalidationMutants)("fails a bus that $flaw", async ({ create }) => {
+    const cases = invalidationContractCases({ name: "broken", create })
 
-      expect(await failingCaseNames(cases)).toEqual(
-        cases.map(({ name }) => name)
-      )
-    }
-  )
+    expect(await failingCaseNames(cases)).toEqual(cases.map(({ name }) => name))
+  })
 })

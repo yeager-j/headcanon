@@ -36,7 +36,7 @@ function request(sequence: number): MutationAuthorityRequest<string, Refusal> {
   }
 }
 
-function counter(options: { readonly maxAttempts?: number } = {}) {
+function counterAuthority(options: { readonly maxAttempts?: number } = {}) {
   return createInMemoryMutationAuthority<number, string, Refusal>({
     initialState: 0,
     scope: (actor) => actor,
@@ -46,7 +46,7 @@ function counter(options: { readonly maxAttempts?: number } = {}) {
 
 describe("in-memory mutation authority", () => {
   it("reruns a command that throws contention, as production adapters do", async () => {
-    const authority = counter()
+    const authority = counterAuthority()
     let attempts = 0
 
     const outcome = await authority.execute(request(1), async (tx) => {
@@ -62,7 +62,7 @@ describe("in-memory mutation authority", () => {
   })
 
   it("returns contention without a receipt when every attempt throws contention", async () => {
-    const authority = counter({ maxAttempts: 3 })
+    const authority = counterAuthority({ maxAttempts: 3 })
     let attempts = 0
 
     const outcome = await authority.execute(request(2), async (tx) => {
@@ -80,7 +80,7 @@ describe("in-memory mutation authority", () => {
   })
 
   it("consumes queued contention in the next attempt even when it refuses", async () => {
-    const authority = counter()
+    const authority = counterAuthority()
     authority.contendNext((current) => current + 10)
 
     const refused = await authority.execute(request(3), async () =>
@@ -100,7 +100,7 @@ describe("in-memory mutation authority", () => {
   })
 
   it("lets different mutation IDs interleave while one ID runs at a time", async () => {
-    const authority = counter()
+    const authority = counterAuthority()
     const events: string[] = []
     let releaseFirst: () => void = () => undefined
     const firstMayFinish = new Promise<void>((resolve) => {
@@ -130,7 +130,7 @@ describe("in-memory mutation authority", () => {
   })
 
   it("reruns an attempt that another mutation's commit overtook", async () => {
-    const authority = counter()
+    const authority = counterAuthority()
     let releaseSlow: () => void = () => undefined
     const slowMayWrite = new Promise<void>((resolve) => {
       releaseSlow = resolve
@@ -156,7 +156,7 @@ describe("in-memory mutation authority", () => {
   })
 
   it("passes its committed-state reader to screening as preflight", async () => {
-    const authority = counter()
+    const authority = counterAuthority()
     let screenedMidAttempt: number | undefined
 
     await authority.execute(request(9), async (tx) => {

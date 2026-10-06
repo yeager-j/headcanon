@@ -16,10 +16,23 @@ import {
 } from "../../react/refresh"
 import type { ContractCase } from "./contract-case"
 
-/** Refresh carrier fixture used by reusable stall-state assertions. */
+/** The refresh carrier that `verifyRefreshContract` exercises. */
 export interface RefreshContractHarness {
+  /** Label that prefixes the contract's `describe` block. */
   readonly name: string
+  /**
+   * What completes one refresh attempt for this carrier. Use `"request"` when
+   * the adapter's `request()` returns a promise that settles once the refresh
+   * is delivered. Use `"canon"` for a void carrier such as `router.refresh()`,
+   * whose attempt completes only when the root receives a new canon (the
+   * contract delivers one after each request).
+   */
   readonly completion: "canon" | "request"
+  /**
+   * Hook the contract calls on every render of its root. Wrap `request`,
+   * which the contract counts, in the carrier under test and return its
+   * adapter.
+   */
   readonly useRefresh: (request: () => void | Promise<void>) => RefreshAdapter
 }
 
@@ -122,10 +135,10 @@ async function completeAttempt(
 }
 
 /**
- * The refresh contract's cases for one harness. Module-internal: tests use it
- * to run the cases against deliberately broken harnesses. The cases need fake
- * timers and a DOM.
- * @param harness Refresh carrier fixture to exercise.
+ * The refresh contract's cases for one harness. Internal to the package: tests
+ * use it to run the cases against deliberately broken harnesses. The cases
+ * need fake timers and a DOM.
+ * @param harness The refresh carrier under test.
  * @returns The contract cases, in order.
  */
 export function refreshContractCases(
@@ -190,8 +203,17 @@ export function refreshContractCases(
  * level. Needs `@testing-library/react` and a DOM: run the file in the
  * `jsdom` environment (`// @vitest-environment jsdom`). The block installs
  * vitest fake timers for its own tests and unmounts every root it renders.
- * @param harness Refresh carrier fixture to exercise.
+ * @param harness The refresh carrier under test.
  * @returns Nothing; registers the contract's tests.
+ * @example
+ * verifyRefreshContract({
+ *   name: "router",
+ *   completion: "canon",
+ *   useRefresh: (request) => ({
+ *     acceptanceGraceMs: ROUTER_ACCEPTANCE_GRACE_MS,
+ *     request,
+ *   }),
+ * })
  */
 export function verifyRefreshContract(harness: RefreshContractHarness): void {
   describe(`${harness.name} refresh contract`, () => {

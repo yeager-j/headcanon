@@ -10,7 +10,15 @@ import { revisionEntries } from "../core/revisions"
 /** Synchronous in-memory invalidation bus for contract tests and fixtures. */
 export interface InMemoryInvalidationAdapter
   extends InvalidationAdapter, InvalidationPublisher {
+  /**
+   * A frozen snapshot of every per-axis entry published so far, in publish
+   * order.
+   */
   readonly published: readonly AxisInvalidation[]
+  /**
+   * Reports `status` to every current subscription; later subscriptions start
+   * in it.
+   */
   setStatus(status: InvalidationStatus): void
 }
 
