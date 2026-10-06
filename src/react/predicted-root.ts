@@ -1,7 +1,8 @@
 "use client"
 
-// The predicted-root hook. Not a package entry: `headcanon/react` and
-// `headcanon/next/client` build their public factories on it.
+// The predicted-root hook. Not a package entry: `headcanon/react` (through
+// `createPredictedRoot`) and `headcanon/next/client` build their public
+// factories on `createPredictedRootHook`.
 import {
   useCallback,
   useEffect,
@@ -517,4 +518,26 @@ export function createPredictedRootHook<
     useDegradedStateListeners(root, listeners)
     return root
   }
+}
+
+/** Plain React has no framework control flow to rethrow. */
+function rethrowNoControlFlow(): void {}
+
+/**
+ * Creates a framework-independent React hook that mounts one predicted root.
+ * The root renders canon with every pending prediction applied, delivers
+ * mutations through `send` one at a time in invocation order, and keeps canon
+ * fresh through `refresh` and optional `invalidations`. Each call of the
+ * returned hook mounts an independent root; share one root with a subtree
+ * through `createPredictedRootContext`. While a delivery attempt is
+ * unanswered, the root holds a React Action open for at most
+ * `DELIVERY_WAIT_MS`. Unmounting the root settles every pending receipt.
+ *
+ * @param options Protocol, delivery, refresh, invalidation, and listener configuration.
+ * @returns A hook exposing predicted state, mutation receipts, retry controls, and status.
+ */
+export function createPredictedRoot<
+  const Protocol extends AnyProtocolDefinition,
+>(options: PredictedRootOptions<Protocol>): PredictedRootHook<Protocol> {
+  return createPredictedRootHook(options, rethrowNoControlFlow)
 }

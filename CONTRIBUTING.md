@@ -22,7 +22,8 @@ unless `scripts/check-bundle-safety.mjs` lists it as server-only.
 Inside `src`, export `./a` builds from `src/a/index.ts` and `./a/b` from
 `src/a/b.ts` or `src/a/b/index.ts`. The one exception is
 `headcanon/drizzle-schema`, which builds from `src/drizzle/schema.ts`. Every
-other file is internal. Tests sit beside the file they test.
+other file is internal. An `index.ts` only re-exports; code lives in named
+files beside it. Tests sit beside the file they test.
 
 Relative imports name no extension and no `/index`: write `../react`, not
 `../react/index`. `tsconfig.build.json` (`moduleResolution: "Bundler"`) is the
@@ -33,7 +34,7 @@ with the same options instead of guessing.
 | Folder        | What it holds                                                                    |
 | ------------- | -------------------------------------------------------------------------------- |
 | `src/core`    | The protocol model and authority. No React or Next: it is the `headcanon` graph. |
-| `src/react`   | The predicted root: its hook, mutation ledger, and refresh incorporation.        |
+| `src/react`   | The predicted root (hook, context, ledger), the observed root, and refresh.      |
 | `src/next`    | The Next bindings. `server/` splits revalidation, the binder, and the action.    |
 | `src/ably`    | The Ably invalidation transport.                                                 |
 | `src/drizzle` | The Postgres authority and its receipt table.                                    |

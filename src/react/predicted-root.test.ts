@@ -14,7 +14,6 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   createPredictedRoot,
-  createPredictedRootContext,
   DELIVERY_WAIT_MS,
   RetryableDeliveryError,
   TerminalDeliveryError,
@@ -777,67 +776,6 @@ describe("createPredictedRoot", () => {
 
     await expect(receipt!.canonized).resolves.toEqual(
       err({ kind: "root-unmounted", outcome: "accepted" })
-    )
-  })
-})
-
-describe("createPredictedRootContext", () => {
-  it("mounts one root and its recovery listeners for every consumer", async () => {
-    const { deliveries, send } = createControlledSender()
-    const onDeliveryUncertain = vi.fn()
-    const useCounterPredictions = createPredictedRoot({
-      protocol: counterProtocol,
-      send,
-      refresh: useNoRefresh,
-    })
-    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
-      name: "CounterRoot",
-    })
-    const wrapper = ({ children }: { children: ReactNode }) =>
-      createElement(CounterRoot.Provider, {
-        canon: canon(0, 0),
-        recoveryListeners: { onDeliveryUncertain },
-        children,
-      })
-
-    const { result } = renderHook(
-      () => ({
-        first: CounterRoot.useRoot(),
-        second: CounterRoot.useRoot(),
-      }),
-      { wrapper }
-    )
-
-    expect(result.current.first).toBe(result.current.second)
-
-    act(() => {
-      acceptedLocally(result.current.first.mutate(add({ amount: 1 })))
-    })
-
-    expect(result.current.first.value).toBe(1)
-    expect(result.current.second.value).toBe(1)
-    expect(send).toHaveBeenCalledTimes(1)
-
-    act(() => deliveries[0]?.reject(new Error("response lost")))
-    await waitFor(() =>
-      expect(onDeliveryUncertain).toHaveBeenCalledWith({
-        retry: result.current.first.retryDelivery,
-      })
-    )
-  })
-
-  it("fails at the consumer when no generated provider owns the root", () => {
-    const useCounterPredictions = createPredictedRoot({
-      protocol: counterProtocol,
-      send: createControlledSender().send,
-      refresh: useNoRefresh,
-    })
-    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
-      name: "CounterRoot",
-    })
-
-    expect(() => renderHook(() => CounterRoot.useRoot())).toThrow(
-      "CounterRoot.useRoot must be used within CounterRoot.Provider"
     )
   })
 })
