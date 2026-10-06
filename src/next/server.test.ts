@@ -312,7 +312,7 @@ const stringSchema: StandardSchemaV1<unknown, { readonly value: string }> = {
   },
 }
 
-const _rename = defineMutation({
+const rename = defineMutation({
   name: "next.rename",
   args: stringSchema,
   refusal: rejectionSchema,
@@ -320,9 +320,13 @@ const _rename = defineMutation({
     return ok(state)
   },
 })
+const pairProtocol = defineProtocol({
+  id: "test.next-server.pair.v1",
+  mutations: [increment, rename],
+})
 
-const wrongArgsCommand: MutationCommand<
-  typeof _rename,
+const renameCommand: MutationCommand<
+  typeof rename,
   string,
   CounterPreflight,
   CounterTx,
@@ -345,9 +349,135 @@ const wrongArgsCommand: MutationCommand<
 
 function rejectMismatchedBindingsAtCompileTime() {
   // @ts-expect-error — the command accepts next.rename args, not increment args.
-  bindMutation(increment, wrongArgsCommand)
+  bindMutation(increment, renameCommand)
 }
 void rejectMismatchedBindingsAtCompileTime
+
+const plainIncrementCommand: MutationCommand<
+  typeof increment,
+  string,
+  CounterPreflight,
+  CounterTx,
+  null,
+  null
+> = {
+  screen: () => allowMutationScreening(null),
+  admit: () => allowMutation(null),
+  execute: () => acceptMutation(),
+}
+
+const numberActorIncrementCommand: MutationCommand<
+  typeof increment,
+  number,
+  CounterPreflight,
+  CounterTx,
+  null,
+  null
+> = {
+  screen: ({ actor }) => {
+    void actor.toFixed()
+    return allowMutationScreening(null)
+  },
+  admit: () => allowMutation(null),
+  execute: () => acceptMutation(),
+}
+
+const counterAuthority: CounterAuthority = createInMemoryMutationAuthority<
+  number,
+  string,
+  unknown
+>({ initialState: 0, scope: (actor) => actor })
+const incrementBinding = bindMutation(increment, plainIncrementCommand)
+const renameBinding = bindMutation(rename, renameCommand)
+const numberActorIncrementBinding = bindMutation(
+  increment,
+  numberActorIncrementCommand
+)
+const pairCommands = [incrementBinding, renameBinding] as const
+
+/** Gives a value a declared type that control flow will not narrow. */
+function typed<T>(value: T): T {
+  return value
+}
+
+// Each list below is wrong for `pairProtocol`, so each must fail to compile.
+// A list type that is a union, or an entry type that is a union, is checked as
+// one whole: a check that split it into branches could pass every branch on
+// its own and miss the one list that really runs.
+function rejectInvalidCommandListsAtCompileTime() {
+  const context = {
+    protocol: pairProtocol,
+    actor: () => "actor",
+    authority: counterAuthority,
+  }
+
+  createNextMutationAction({
+    ...context,
+    // @ts-expect-error — increment is bound twice.
+    commands: [incrementBinding, incrementBinding, renameBinding],
+  })
+  createNextMutationAction({
+    ...context,
+    // @ts-expect-error — a widened array hides its number-actor command.
+    commands: [numberActorIncrementBinding, renameBinding] as Array<
+      typeof numberActorIncrementBinding | typeof renameBinding
+    >,
+  })
+  createNextMutationAction({
+    ...context,
+    // @ts-expect-error — a widened array is not one fixed list, even when every entry is valid.
+    commands: [incrementBinding, renameBinding] as Array<
+      typeof incrementBinding | typeof renameBinding
+    >,
+  })
+  createNextMutationAction({
+    ...context,
+    // @ts-expect-error — the first entry may be either mutation.
+    commands: [
+      typed<typeof incrementBinding | typeof renameBinding>(incrementBinding),
+      renameBinding,
+    ],
+  })
+  createNextMutationAction({
+    ...context,
+    // @ts-expect-error — one branch of the increment entry takes a number actor.
+    commands: [
+      typed<typeof incrementBinding | typeof numberActorIncrementBinding>(
+        incrementBinding
+      ),
+      renameBinding,
+    ],
+  })
+  createNextMutationAction({
+    ...context,
+    // @ts-expect-error — one branch of the list binds increment twice.
+    commands: typed<
+      | readonly [typeof incrementBinding, typeof renameBinding]
+      | readonly [typeof incrementBinding, typeof incrementBinding]
+    >(pairCommands),
+  })
+  createNextMutationAction({
+    ...context,
+    // @ts-expect-error — one branch of the list takes a number actor.
+    commands: typed<
+      | readonly [typeof incrementBinding, typeof renameBinding]
+      | readonly [typeof numberActorIncrementBinding, typeof renameBinding]
+    >(pairCommands),
+  })
+  createNextMutationAction({
+    ...context,
+    // @ts-expect-error — together the branches cover the protocol; neither branch does.
+    commands: typed<
+      readonly [typeof incrementBinding] | readonly [typeof renameBinding]
+    >([incrementBinding]),
+  })
+  createNextMutationAction({
+    ...context,
+    // @ts-expect-error — rename is not bound.
+    commands: [incrementBinding],
+  })
+}
+void rejectInvalidCommandListsAtCompileTime
 
 describe("Next mutation action", () => {
   type IncrementCommand = MutationCommand<
@@ -730,6 +860,7 @@ describe("Next mutation action", () => {
         protocol,
         actor: () => "actor",
         authority,
+        // @ts-expect-error — the compiler rejects the duplicate too; this checks the runtime guard.
         commands: [
           bindMutation(increment, registered),
           bindMutation(increment, registered),
@@ -738,6 +869,24 @@ describe("Next mutation action", () => {
         reportInvalidationFailure: vi.fn(),
       })
     ).toThrow("Duplicate mutation binding: next.increment")
+  })
+
+  it("accepts an inline list and an `as const` list declared elsewhere", () => {
+    const context = {
+      protocol: pairProtocol,
+      actor: () => "actor",
+      authority: counterAuthority,
+    }
+
+    expect(() =>
+      createNextMutationAction({
+        ...context,
+        commands: [incrementBinding, renameBinding],
+      })
+    ).not.toThrow()
+    expect(() =>
+      createNextMutationAction({ ...context, commands: pairCommands })
+    ).not.toThrow()
   })
 
   it("rejects missing command registration at construction", () => {

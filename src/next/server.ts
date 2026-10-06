@@ -360,28 +360,81 @@ type CompleteBindings<
       : { readonly __unknownMutationBinding: never }
     : { readonly __missingMutationBinding: never }
 
-type CompatibleBindings<
+/** `true` when `T` is a union of more than one member. */
+type IsUnion<T, U = T> = T extends unknown
+  ? [U] extends [T]
+    ? false
+    : true
+  : never
+
+/** `true` when `Name` is exactly one string literal. */
+type OneLiteralName<Name> = [Name] extends [string]
+  ? string extends Name
+    ? false
+    : IsUnion<Name> extends true
+      ? false
+      : true
+  : false
+
+/**
+ * Walks a fixed list once, front to back: each entry must be one binding
+ * (not a union), name one mutation not seen before, and carry a command that
+ * accepts the action's context. Every check wraps its operands in `[]`, so a
+ * union is checked as a whole instead of branch by branch.
+ */
+type EachBinding<
+  Commands,
+  Actor,
+  Preflight,
+  Transaction,
+  Seen extends string = never,
+> = [Commands] extends [readonly []]
+  ? unknown
+  : [Commands] extends [readonly [infer First, ...infer Rest]]
+    ? IsUnion<First> extends true
+      ? { readonly __ambiguousMutationBinding: never }
+      : [First] extends [MutationBinding<infer Mutation, infer Command>]
+        ? OneLiteralName<Mutation["name"]> extends true
+          ? Mutation["name"] extends Seen
+            ? { readonly __duplicateMutationBinding: Mutation["name"] }
+            : [Command] extends [
+                  MutationCommand<
+                    Mutation,
+                    Actor,
+                    Preflight,
+                    Transaction,
+                    infer _Projection,
+                    infer _Evidence
+                  >,
+                ]
+              ? EachBinding<
+                  Rest,
+                  Actor,
+                  Preflight,
+                  Transaction,
+                  Seen | (Mutation["name"] & string)
+                >
+              : { readonly __incompatibleMutationCommand: Mutation["name"] }
+          : { readonly __ambiguousMutationBinding: never }
+        : { readonly __incompatibleMutationCommand: never }
+    : { readonly __commandsMustBeFixedList: never }
+
+/**
+ * Compile-time form of `assertCompleteBindings`: one fixed list that binds
+ * every protocol mutation exactly once, each to a command that accepts the
+ * action's context. A union of lists is rejected, not split.
+ */
+type ValidBindings<
+  Protocol,
   Commands extends readonly AnyMutationBinding[],
   Actor,
   Preflight,
   Transaction,
-> = Commands extends readonly [
-  infer First extends AnyMutationBinding,
-  ...infer Rest extends readonly AnyMutationBinding[],
-]
-  ? First extends MutationBinding<infer Mutation, infer Command>
-    ? Command extends MutationCommand<
-        Mutation,
-        Actor,
-        Preflight,
-        Transaction,
-        infer _Projection,
-        infer _Evidence
-      >
-      ? CompatibleBindings<Rest, Actor, Preflight, Transaction>
-      : { readonly __incompatibleMutationCommand: never }
-    : { readonly __incompatibleMutationCommand: never }
-  : unknown
+> =
+  IsUnion<Commands> extends true
+    ? { readonly __commandsMustBeOneFixedList: never }
+    : CompleteBindings<Protocol, Commands> &
+        EachBinding<Commands, Actor, Preflight, Transaction>
 
 /**
  * The erased form the action dispatches through once the binding list has
@@ -461,6 +514,13 @@ type ActionInvalidations =
 /**
  * Creates one Server Action from an exhaustive, definition-keyed command list.
  *
+ * `commands` must be one fixed list that binds every protocol mutation
+ * exactly once. The compiler checks this, and the action checks it again when
+ * it is created. Write the list inline, or declare it elsewhere with
+ * `as const`. Do not choose the list, or one of its entries, with a
+ * condition: the compiler rejects a union of lists or of bindings instead of
+ * guessing which one runs.
+ *
  * The returned action treats its argument as untrusted: it parses the envelope,
  * revalidates arguments, derives canonical identity, and resolves the matching
  * command by mutation-definition identity before it derives the actor from the
@@ -515,8 +575,7 @@ export function createNextMutationAction<
       Preflight
     >
     readonly commands: Commands &
-      CompleteBindings<Protocol, Commands> &
-      CompatibleBindings<Commands, Actor, Preflight, Transaction>
+      ValidBindings<Protocol, Commands, Actor, Preflight, Transaction>
   } & ActionInvalidations
 ) {
   type Refusal = MutationRefusalOf<BoundMutation<Commands>>
