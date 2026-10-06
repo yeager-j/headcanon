@@ -44,8 +44,8 @@
       "default": "./dist/next/client.js"
     },
     "./next/server": {
-      "types": "./dist/next/server.d.ts",
-      "default": "./dist/next/server.js"
+      "types": "./dist/next/server/index.d.ts",
+      "default": "./dist/next/server/index.js"
     },
     "./react": {
       "types": "./dist/react/index.d.ts",
