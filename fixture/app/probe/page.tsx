@@ -18,7 +18,6 @@ export default function Page() {
     <ProbeClient
       items={canon.value.items}
       revision={revisionAt(canon.revisions, ITEMS_AXIS) ?? 0}
-      axis={ITEMS_AXIS}
     />
   )
 }

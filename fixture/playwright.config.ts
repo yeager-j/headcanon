@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test"
 
 const isCI = !!process.env.CI
+const baseURL = "http://localhost:3900"
 
 export default defineConfig({
   testDir: "./e2e",
@@ -13,7 +14,7 @@ export default defineConfig({
   retries: 0,
   reporter: isCI ? [["github"], ["html", { open: "never" }]] : "list",
   use: {
-    baseURL: "http://localhost:3900",
+    baseURL,
     // Without retries, the first failure is the only one, so keep its trace.
     trace: "retain-on-failure",
   },
@@ -29,7 +30,7 @@ export default defineConfig({
   // already on the port is an error, not something to reuse silently.
   webServer: {
     command: "npm run start",
-    url: "http://localhost:3900",
+    url: baseURL,
     reuseExistingServer: false,
     timeout: 120_000,
   },

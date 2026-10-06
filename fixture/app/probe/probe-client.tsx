@@ -26,11 +26,9 @@ import { applyFixtureMutation } from "../actions"
 export function ProbeClient({
   items,
   revision,
-  axis,
 }: {
   items: readonly string[]
   revision: number
-  axis: string
 }) {
   const router = useRouter()
   const [frame, addOptimistic] = useOptimistic(
@@ -133,7 +131,7 @@ export function ProbeClient({
     <main>
       <h1>Probe</h1>
       <div>
-        axis <code>{axis}</code>
+        axis <code>{ITEMS_AXIS}</code>
       </div>
       <button type="button" onClick={mutateInside}>
         mutate inside

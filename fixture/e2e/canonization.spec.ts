@@ -5,7 +5,7 @@ import {
   expectSettled,
   expectStayedMounted,
   openFixture,
-  testId,
+  renderedItems,
 } from "./support/fixture-page"
 
 /**
@@ -29,15 +29,15 @@ test("a mutation predicts, then canonizes in place through the real router carri
   await addItem(page, "alpha")
 
   // Prediction is immediate.
-  await expect(testId(page, "items").getByText("alpha")).toBeVisible()
+  await expect(page.getByTestId("items").getByText("alpha")).toBeVisible()
 
   // The authoritative canon must arrive without any reload: the Server
   // Action's RSC payload (or a coverage refresh) delivers it.
-  await expect(testId(page, "canon-count")).toHaveText("1", {
+  await expect(page.getByTestId("canon-count")).toHaveText("1", {
     timeout: 15_000,
   })
   await expectSettled(page)
-  await expect(testId(page, "outcome")).toHaveText("accepted")
+  await expect(page.getByTestId("outcome")).toHaveText("accepted")
 
   await expectStayedMounted(page)
 })
@@ -52,23 +52,15 @@ test("a burst of mutations preserves order and fully canonizes", async ({
   await addItem(page, "third")
 
   // All three predictions render immediately, in dispatch order.
-  await expect(testId(page, "items").locator("li")).toHaveText([
-    "first",
-    "second",
-    "third",
-  ])
+  await expect(renderedItems(page)).toHaveText(["first", "second", "third"])
 
-  await expect(testId(page, "canon-count")).toHaveText("3", {
+  await expect(page.getByTestId("canon-count")).toHaveText("3", {
     timeout: 20_000,
   })
   await expectSettled(page)
 
   // Authority order matches dispatch order.
-  await expect(testId(page, "items").locator("li")).toHaveText([
-    "first",
-    "second",
-    "third",
-  ])
+  await expect(renderedItems(page)).toHaveText(["first", "second", "third"])
 
   await expectStayedMounted(page)
 })

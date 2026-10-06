@@ -1,6 +1,6 @@
-import { expect, type Page } from "@playwright/test"
+import { expect, type Locator, type Page } from "@playwright/test"
 
-import type { FixtureFaults } from "../../lib/authority"
+import type { FixtureFaults, FixtureInspection } from "../../lib/authority"
 
 /** Resets the authority and opens the fixture, marking the document. */
 export async function openFixture(page: Page): Promise<void> {
@@ -13,6 +13,7 @@ export async function openFixture(page: Page): Promise<void> {
   })
 }
 
+/** Asserts that the document {@link openFixture} marked was never reloaded. */
 export async function expectStayedMounted(page: Page): Promise<void> {
   expect(
     await page.evaluate(
@@ -21,6 +22,7 @@ export async function expectStayedMounted(page: Page): Promise<void> {
   ).toBe(true)
 }
 
+/** Types `text` into the New item field and clicks Add, as a user would. */
 export async function addItem(page: Page, text: string): Promise<void> {
   await page.getByLabel("New item").fill(text)
   await page.getByRole("button", { name: "Add" }).click()
@@ -47,19 +49,18 @@ export async function writeAsAnotherClient(
 }
 
 /** The authority's committed state and receipt count. */
-export async function readAuthority(page: Page): Promise<{
-  readonly items: readonly string[]
-  readonly revision: number
-  readonly receipts: number
-}> {
+export async function readAuthority(page: Page): Promise<FixtureInspection> {
   return (await page.request.get("/api/authority")).json()
 }
 
-export const testId = (page: Page, id: string) => page.getByTestId(id)
+/** The predicted items the page renders, in order. */
+export function renderedItems(page: Page): Locator {
+  return page.getByTestId("items").locator("li")
+}
 
 /** Waits until the root has nothing pending and canon is current. */
 export async function expectSettled(page: Page): Promise<void> {
-  await expect(testId(page, "pending")).toHaveText("0")
-  await expect(testId(page, "delivery")).toHaveText("idle")
-  await expect(testId(page, "freshness")).toHaveText("current")
+  await expect(page.getByTestId("pending")).toHaveText("0")
+  await expect(page.getByTestId("delivery")).toHaveText("idle")
+  await expect(page.getByTestId("freshness")).toHaveText("current")
 }

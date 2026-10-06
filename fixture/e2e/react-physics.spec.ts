@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test"
 
+import { setFaults } from "./support/fixture-page"
+
 /**
  * Platform-physics regression tests (UNN-682). The package's design rests on
  * these React 19 / Next 16 facts, established here against the real runtime
@@ -36,19 +38,26 @@ import { expect, test, type Page } from "@playwright/test"
  *    navigates at once.
  */
 
+/**
+ * One DOM mutation's view of the probe: the optimistic frame and the canon
+ * revision.
+ */
+interface Snapshot {
+  readonly frame: string
+  readonly revision: string
+}
+
 async function openProbe(page: Page): Promise<void> {
   await page.request.post("/api/reset")
   await page.goto("/probe")
 }
-
-const button = (page: Page, name: string) => page.getByRole("button", { name })
 
 test("a Server Action payload parks behind an open Action and flushes atomically", async ({
   page,
 }) => {
   await openProbe(page)
 
-  await button(page, "mutate inside").click()
+  await page.getByRole("button", { name: "mutate inside" }).click()
   // Deterministic observation point: the action's response has been processed
   // (acceptance logged) while its owning Action is still held open.
   await expect(page.getByTestId("log")).toContainText("accepted rev=1")
@@ -59,32 +68,32 @@ test("a Server Action payload parks behind an open Action and flushes atomically
   // Record every intermediate frame across the flush; the prediction must
   // never disappear while the old canon is still rendered.
   await page.evaluate(() => {
-    const frames: Array<{ frame: string; revision: string }> = []
+    const snapshots: Snapshot[] = []
     const read = (testId: string) =>
       document.querySelector(`[data-testid="${testId}"]`)?.textContent ?? ""
     const observer = new MutationObserver(() => {
-      frames.push({ frame: read("frame"), revision: read("revision") })
+      snapshots.push({ frame: read("frame"), revision: read("revision") })
     })
     observer.observe(document.querySelector("main")!, {
       subtree: true,
       childList: true,
       characterData: true,
     })
-    ;(window as unknown as { __frames: typeof frames }).__frames = frames
+    ;(window as unknown as { __snapshots: Snapshot[] }).__snapshots = snapshots
   })
 
-  await button(page, "release all").click()
+  await page.getByRole("button", { name: "release all" }).click()
   await expect(page.getByTestId("revision")).toHaveText("1")
   await expect(page.getByTestId("frame")).toHaveText("inside-1")
 
-  const frames = (await page.evaluate(
-    () => (window as unknown as { __frames: unknown }).__frames
-  )) as Array<{ frame: string; revision: string }>
+  const snapshots = await page.evaluate(
+    () => (window as unknown as { __snapshots: Snapshot[] }).__snapshots
+  )
   // Non-vacuity: the flush must have produced observable commits (at minimum
   // the revision text change), or the atomicity loop below proves nothing.
-  expect(frames.length).toBeGreaterThan(0)
-  for (const frame of frames) {
-    expect(frame.frame).toContain("inside-1")
+  expect(snapshots.length).toBeGreaterThan(0)
+  for (const snapshot of snapshots) {
+    expect(snapshot.frame).toContain("inside-1")
   }
 })
 
@@ -93,7 +102,7 @@ test("navigation is blocked while an Action is held open and proceeds on settlem
 }) => {
   await openProbe(page)
 
-  await button(page, "mutate inside").click()
+  await page.getByRole("button", { name: "mutate inside" }).click()
   await expect(page.getByTestId("log")).toContainText("accepted rev=1")
 
   await page.getByRole("link", { name: "go home" }).click()
@@ -103,7 +112,7 @@ test("navigation is blocked while an Action is held open and proceeds on settlem
   await page.waitForTimeout(1_000)
   expect(new URL(page.url()).pathname).toBe("/probe")
 
-  await button(page, "release all").click()
+  await page.getByRole("button", { name: "release all" }).click()
   await expect(page).toHaveURL("/")
 })
 
@@ -114,17 +123,17 @@ test("a pending Server Action call holds every transition until it responds, wit
 }) => {
   await openProbe(page)
   // Control: with nothing pending, a transition commits at once.
-  await button(page, "bump in a transition").click()
+  await page.getByRole("button", { name: "bump in a transition" }).click()
   await expect(page.getByTestId("bumps")).toHaveText("1")
 
-  await page.request.post("/api/faults", { data: { delivery: "hang" } })
-  await button(page, "send bare").click()
-  await button(page, "bump in a transition").click()
+  await setFaults(page, { delivery: "hang" })
+  await page.getByRole("button", { name: "send bare" }).click()
+  await page.getByRole("button", { name: "bump in a transition" }).click()
   // Bounded wait, as above: a transition commits in milliseconds.
   await page.waitForTimeout(1_000)
   expect(await page.getByTestId("bumps").textContent()).toBe("1")
 
-  await page.request.post("/api/faults", { data: {} })
+  await setFaults(page, {})
   await expect(page.getByTestId("log")).toContainText("bare:bare-1 accepted")
   await expect(page.getByTestId("bumps")).toHaveText("2")
 })
@@ -140,10 +149,10 @@ test("a pending Server Action call delays the next call but not a navigation", a
     }
   })
 
-  await page.request.post("/api/faults", { data: { delivery: "hang" } })
-  await button(page, "send bare").click()
+  await setFaults(page, { delivery: "hang" })
+  await page.getByRole("button", { name: "send bare" }).click()
   await expect.poll(() => sent.length).toBe(1)
-  await button(page, "send bare").click()
+  await page.getByRole("button", { name: "send bare" }).click()
   // Bounded wait, as above: an unqueued call leaves the page at once.
   await page.waitForTimeout(1_000)
   expect(sent).toHaveLength(1)
@@ -153,5 +162,5 @@ test("a pending Server Action call delays the next call but not a navigation", a
   // The navigation discarded the hung call's router update; the queued call
   // runs after it.
   await expect.poll(() => sent.length).toBe(2)
-  await page.request.post("/api/faults", { data: {} })
+  await setFaults(page, {})
 })

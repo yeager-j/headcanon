@@ -5,29 +5,36 @@ import { err, ok } from "serializable-result"
 /** The one axis the fixture's collection canon observes. */
 export const ITEMS_AXIS = axisId("fixture/items")
 
+/** The fixture's protocol state: the items, in the order they were added. */
 export interface FixtureState {
   readonly items: readonly string[]
 }
 
-export type FixtureRejection = "item-refused"
+/**
+ * Why the predictor or the authority refuses {@link addItem}: the item
+ * already exists.
+ */
+export type FixtureRefusal = "item-refused"
+
+function isAddItemArgs(value: unknown): value is { text: string } {
+  if (typeof value !== "object" || value === null) return false
+  if (!("text" in value)) return false
+  return typeof value.text === "string" && value.text.length > 0
+}
 
 const addItemArgsSchema: StandardSchemaV1<{ text: string }> = {
   "~standard": {
     version: 1,
     vendor: "headcanon-fixture",
     validate(value: unknown) {
-      return typeof value === "object" &&
-        value !== null &&
-        "text" in value &&
-        typeof (value as { text: unknown }).text === "string" &&
-        (value as { text: string }).text.length > 0
-        ? { value: value as { text: string } }
+      return isAddItemArgs(value)
+        ? { value }
         : { issues: [{ message: "text must be a non-empty string" }] }
     },
   },
 }
 
-const fixtureRejectionSchema: StandardSchemaV1<FixtureRejection> = {
+const fixtureRefusalSchema: StandardSchemaV1<FixtureRefusal> = {
   "~standard": {
     version: 1,
     vendor: "headcanon-fixture",
@@ -47,13 +54,17 @@ const fixtureRejectionSchema: StandardSchemaV1<FixtureRejection> = {
 export const addItem = defineMutation({
   name: "item.add",
   args: addItemArgsSchema,
-  refusal: fixtureRejectionSchema,
+  refusal: fixtureRefusalSchema,
   predict(state: FixtureState, args) {
     if (state.items.includes(args.text)) return err("item-refused" as const)
     return ok({ items: [...state.items, args.text] })
   },
 })
 
+/**
+ * The fixture's protocol, {@link addItem} only, shared by the Server Action
+ * and both clients.
+ */
 export const fixtureProtocol = defineProtocol({
   id: "fixture",
   mutations: [addItem],

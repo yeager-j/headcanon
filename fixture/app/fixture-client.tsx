@@ -70,10 +70,10 @@ export function FixtureClient({ canon }: { canon: Canon<FixtureState> }) {
 
   const submit = () => {
     if (draft.length === 0) return
-    const receipt = root.mutate(addItem({ text: draft }), {
+    const prediction = root.mutate(addItem({ text: draft }), {
       onAcceptance: (result) => setOutcome(describeAcceptance(result)),
     })
-    setRefusal(receipt.ok ? null : receipt.error)
+    setRefusal(prediction.ok ? null : prediction.error)
     setDraft("")
   }
 
