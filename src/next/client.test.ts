@@ -14,9 +14,9 @@ import {
   revisionVector,
   type Canon,
   type MutationEnvelope,
-} from "../index"
-import type { PredictedRootOptions } from "../react/index"
-import { createInMemoryInvalidationAdapter } from "../testing/index"
+} from ".."
+import type { PredictedRootOptions } from "../react"
+import { createInMemoryInvalidationAdapter } from "../testing"
 import {
   createNextObservedRoot,
   createNextPredictedRoot,

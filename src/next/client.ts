@@ -24,7 +24,7 @@ import {
   type ObservedRootOptions,
   type PredictedRootHook,
   type PredictedRootOptions,
-} from "../react/index"
+} from "../react"
 import { createPredictedRootHook } from "../react/predicted-root"
 import type { RefreshAdapter } from "../react/refresh"
 

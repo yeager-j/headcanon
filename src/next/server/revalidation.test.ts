@@ -1,20 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { ablyAxisChannelName, ablyChannelNamespace } from "../../ably/channels"
-import {
-  acceptedStamp,
-  axisId,
-  revisionEntries,
-  type AcceptedStamp,
-  type InvalidationPublisher,
-} from "../../index"
 import {
   announceExternalCommit,
   axisCacheTag,
   finalizeExternalActionCommit,
   MAX_VERSIONED_BASE_AXES,
   tagVersionedBase,
-} from "./index"
+} from "."
+import {
+  acceptedStamp,
+  axisId,
+  revisionEntries,
+  type AcceptedStamp,
+  type InvalidationPublisher,
+} from "../.."
+import { ablyAxisChannelName, ablyChannelNamespace } from "../../ably/channels"
 
 const nextCache = vi.hoisted(() => ({
   cacheTag: vi.fn(),

@@ -8,7 +8,7 @@ import {
   type MutationErrorOf,
   type MutationInvocation,
   type ProtocolInvocation,
-} from "../index"
+} from ".."
 import { prepareMutationRequest } from "./authority"
 import { findMutation } from "./protocol"
 

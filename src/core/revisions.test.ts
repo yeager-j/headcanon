@@ -12,7 +12,7 @@ import {
   revisionVector,
   type Revision,
   type RevisionVector,
-} from "../index"
+} from ".."
 import { revisionVectorFrom } from "./revisions"
 
 function vector(input: Record<string, unknown>): RevisionVector {

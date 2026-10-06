@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { matchesPostgresError } from "./index"
+import { matchesPostgresError } from "."
 
 describe("PostgreSQL error matching", () => {
   it("matches code and constraint through wrapped causes", () => {

@@ -12,18 +12,6 @@ import {
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { revisionAt } from "../core/revisions"
-import {
-  acceptedStamp,
-  axisId,
-  defineMutation,
-  defineProtocol,
-  revisionVector,
-  type AcceptedStamp,
-  type Canon,
-  type MutationContext,
-  type MutationEnvelope,
-} from "../index"
 import {
   createPredictedRoot,
   createPredictedRootContext,
@@ -34,7 +22,19 @@ import {
   type MutationReceipt,
   type PredictedRootOptions,
   type PredictedRootRecoveryListeners,
-} from "./index"
+} from "."
+import {
+  acceptedStamp,
+  axisId,
+  defineMutation,
+  defineProtocol,
+  revisionVector,
+  type AcceptedStamp,
+  type Canon,
+  type MutationContext,
+  type MutationEnvelope,
+} from ".."
+import { revisionAt } from "../core/revisions"
 import { createPredictedRootHook } from "./predicted-root"
 import { UNCOVERED_REFRESH_RETRY_MS } from "./refresh"
 

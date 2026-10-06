@@ -12,6 +12,10 @@ import { err, ok } from "serializable-result"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import {
+  createDrizzleMutationAuthority,
+  type DrizzleMutationTransaction,
+} from "."
+import {
   executePreparedMutation,
   prepareMutationRequest,
 } from "../core/authority"
@@ -25,10 +29,6 @@ import {
   type MutationAuthorityContractRefusal,
   type MutationAuthorityContractState,
 } from "../testing/contracts"
-import {
-  createDrizzleMutationAuthority,
-  type DrizzleMutationTransaction,
-} from "./index"
 import { headcanonMutationReceipts } from "./schema"
 
 const databaseUrl =

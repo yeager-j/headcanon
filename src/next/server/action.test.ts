@@ -6,22 +6,6 @@ import { err, ok, type Result } from "serializable-result"
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest"
 
 import {
-  createDrizzleMutationAuthority,
-  type DrizzleMutationTx,
-} from "../../drizzle/index"
-import {
-  axisId,
-  defineMutation,
-  defineProtocol,
-  type InvalidationPublisher,
-  type MutationAuthorityAdapter,
-} from "../../index"
-import {
-  createInMemoryMutationAuthority,
-  type InMemoryReader,
-  type InMemoryTransaction,
-} from "../../testing/index"
-import {
   acceptMutation,
   allowMutation,
   allowMutationScreening,
@@ -31,7 +15,23 @@ import {
   refuseMutation,
   type MutationBinder,
   type MutationCommand,
-} from "./index"
+} from "."
+import {
+  axisId,
+  defineMutation,
+  defineProtocol,
+  type InvalidationPublisher,
+  type MutationAuthorityAdapter,
+} from "../.."
+import {
+  createDrizzleMutationAuthority,
+  type DrizzleMutationTx,
+} from "../../drizzle"
+import {
+  createInMemoryMutationAuthority,
+  type InMemoryReader,
+  type InMemoryTransaction,
+} from "../../testing"
 
 const nextCache = vi.hoisted(() => ({
   cacheTag: vi.fn(),

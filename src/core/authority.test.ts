@@ -2,14 +2,14 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { err, ok } from "serializable-result"
 import { describe, expect, it } from "vitest"
 
-import { createDrizzleMutationAuthority } from "../drizzle/index"
 import {
   axisId,
   createStampAccumulator,
   defineMutation,
   defineProtocol,
-} from "../index"
-import { createInMemoryMutationAuthority } from "../testing/index"
+} from ".."
+import { createDrizzleMutationAuthority } from "../drizzle"
+import { createInMemoryMutationAuthority } from "../testing"
 import { prepareMutationRequest } from "./authority"
 
 const amountSchema: StandardSchemaV1<unknown, { readonly amount: number }> = {
