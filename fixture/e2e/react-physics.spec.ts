@@ -2,16 +2,23 @@ import { expect, test, type Page } from "@playwright/test"
 
 /**
  * Platform-physics regression tests (UNN-682). The package's design rests on
- * three React 19 / Next 16 facts, established here against the real runtime
- * via /probe (raw `useOptimistic` + `startTransition` + a Server Action — no
- * headcanon code). If a React or Next upgrade changes any of these, the
- * package's settlement model must be revisited before trusting green tests.
+ * these React 19 / Next 16 facts, established here against the real runtime
+ * via /probe (raw `useOptimistic` + `startTransition` + the generated Server
+ * Action — no headcanon client code). If a React or Next upgrade changes any
+ * of these, the package's settlement model must be revisited before trusting
+ * green tests.
  *
  * 1. A Server Action's revalidated RSC payload is PARKED while any optimistic
- *    Action is held open — regardless of where the send was invoked.
+ *    Action is held open — regardless of where the send was invoked. The
+ *    root relies on this: it holds an Action per delivery attempt so canon
+ *    cannot commit before the attempt's acceptance is recorded.
  * 2. The parked payload commits atomically with Action settlement: there is
  *    no intermediate frame showing canon without the prediction.
- * 3. A held-open Action blocks router navigation entirely.
+ * 3. A held-open Action blocks router navigation entirely. This is why the
+ *    root bounds each hold by `DELIVERY_WAIT_MS`.
+ * 4. A pending Server Action call holds every transition until it responds,
+ *    even with no Action open. So that bound frees the root's own hold but
+ *    not the app: a Server Action that never answers still freezes it.
  */
 
 async function openProbe(page: Page): Promise<void> {
@@ -83,4 +90,24 @@ test("navigation is blocked while an Action is held open and proceeds on settlem
 
   await button(page, "release all").click()
   await expect(page).toHaveURL("/")
+})
+
+test("a pending Server Action call holds every transition until it responds, with no Action open", async ({
+  page,
+}) => {
+  await openProbe(page)
+  // Control: with nothing pending, a transition commits at once.
+  await button(page, "bump in a transition").click()
+  await expect(page.getByTestId("bumps")).toHaveText("1")
+
+  await page.request.post("/api/faults", { data: { delivery: "hang" } })
+  await button(page, "send bare").click()
+  await button(page, "bump in a transition").click()
+  // Bounded wait, as above: a transition commits in milliseconds.
+  await page.waitForTimeout(1_000)
+  expect(await page.getByTestId("bumps").textContent()).toBe("1")
+
+  await page.request.post("/api/faults", { data: {} })
+  await expect(page.getByTestId("log")).toContainText("bare:bare-1 accepted")
+  await expect(page.getByTestId("bumps")).toHaveText("2")
 })

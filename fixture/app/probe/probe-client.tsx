@@ -1,7 +1,7 @@
 "use client"
 
-import type { addItem } from "@/lib/protocol"
-import type { MutationEnvelope } from "headcanon"
+import { addItem, fixtureProtocol, ITEMS_AXIS } from "@/lib/protocol"
+import { revisionAt, type MutationEnvelope } from "headcanon"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { startTransition, useOptimistic, useRef, useState } from "react"
@@ -10,10 +10,13 @@ import { applyFixtureMutation } from "../actions"
 
 /**
  * UNN-682 probes, one per delivery shape. Each "mutate" adds an optimistic
- * item inside an async Action that is HELD OPEN until "release all" — the
- * package's held-until-canonization lifetime, made manual so the probe can
- * observe whether the authoritative `revision` prop advances while Actions
- * are open. No headcanon code is involved.
+ * item inside an async Action that is HELD OPEN until "release all", so the
+ * probe can observe whether the authoritative `revision` prop advances while
+ * Actions are open. The package holds one such Action per delivery attempt,
+ * until the attempt is answered or `DELIVERY_WAIT_MS` passes; here the hold
+ * is manual. No headcanon client code is involved: the probe calls the
+ * generated Server Action directly, with an envelope built from the protocol
+ * definition.
  *
  * Shapes:
  * - inside:  send invoked synchronously in the owning Action's first tick.
@@ -37,6 +40,7 @@ export function ProbeClient({
   const holdersRef = useRef<Array<() => void>>([])
   const [log, setLog] = useState<readonly string[]>([])
   const counterRef = useRef(0)
+  const [bumps, setBumps] = useState(0)
 
   const append = (line: string) => setLog((current) => [...current, line])
 
@@ -48,16 +52,16 @@ export function ProbeClient({
   const envelopeFor = (
     text: string
   ): MutationEnvelope<ReturnType<typeof addItem>> => ({
-    protocol: "fixture",
+    protocol: fixtureProtocol.id,
     mutationId: globalThis.crypto.randomUUID(),
-    invocation: { name: "item.add", args: { text } },
+    invocation: addItem({ text }),
   })
 
   const send = async (text: string, shape: string) => {
     const outcome = await applyFixtureMutation(envelopeFor(text))
     append(
-      outcome.ok
-        ? `${shape}:${text} accepted rev=${String(Object.values(outcome.value.revisions)[0])}`
+      outcome.ok && outcome.value.kind === "accepted"
+        ? `${shape}:${text} accepted rev=${String(revisionAt(outcome.value.stamp.revisions, ITEMS_AXIS))}`
         : `${shape}:${text} rejected`
     )
   }
@@ -95,6 +99,16 @@ export function ProbeClient({
     }, 50)
   }
 
+  // No Action and no optimistic state: only the Server Action call itself.
+  const sendBare = () => {
+    const text = `bare-${++counterRef.current}`
+    void send(text, "bare")
+  }
+
+  const bump = () => {
+    startTransition(() => setBumps((count) => count + 1))
+  }
+
   const releaseOne = () => {
     const release = holdersRef.current.shift()
     release?.()
@@ -130,6 +144,12 @@ export function ProbeClient({
       <button type="button" onClick={mutateFresh}>
         mutate fresh
       </button>
+      <button type="button" onClick={sendBare}>
+        send bare
+      </button>
+      <button type="button" onClick={bump}>
+        bump in a transition
+      </button>
       <button type="button" onClick={releaseOne}>
         release one
       </button>
@@ -147,6 +167,8 @@ export function ProbeClient({
         <dd data-testid="frame">{frame.join(",")}</dd>
         <dt>log</dt>
         <dd data-testid="log">{log.join(" | ")}</dd>
+        <dt>bumps</dt>
+        <dd data-testid="bumps">{bumps}</dd>
       </dl>
     </main>
   )
