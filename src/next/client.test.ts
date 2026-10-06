@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react"
+import { act, renderHook, waitFor } from "@testing-library/react"
 import { forbidden, notFound, redirect, unauthorized } from "next/navigation"
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -136,7 +136,6 @@ function mountAction(
 }
 
 afterEach(() => {
-  cleanup()
   vi.restoreAllMocks()
   vi.unstubAllEnvs()
   routerRefresh.mockReset()

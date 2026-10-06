@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react"
+import { act, renderHook, waitFor } from "@testing-library/react"
 import {
   createElement,
   startTransition,
@@ -36,6 +36,7 @@ import {
   type PredictedRootRecoveryListeners,
 } from "./react"
 import { UNCOVERED_REFRESH_RETRY_MS } from "./refresh"
+import { revisionAt } from "./revisions"
 
 type CounterError = { readonly code: "prediction-refused" }
 type CounterArgs = {
@@ -149,11 +150,7 @@ function mutate(
   return outcome.value
 }
 
-// Unmount every root after each test: a root left mounted with a delivery in
-// flight holds a React Action open, and React entangles every later
-// transition with it, in any root.
 afterEach(() => {
-  cleanup()
   vi.restoreAllMocks()
 })
 
@@ -1159,6 +1156,56 @@ describe("createPredictedRoot — prediction lifetime", () => {
     await act(async () => {})
     expect(result.current.value).toBe(3)
     expect(result.current.status.pending).toBe(0)
+  })
+
+  it("requires an accepted stamp in every render that holds the acceptance", async () => {
+    const controlled = createControlledSender()
+    const usePredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send: controlled.send,
+      refresh: useNoRefresh,
+    })
+    const renders: {
+      readonly status: ReturnType<typeof usePredictions>["status"]
+      readonly revision: number | undefined
+    }[] = []
+    const { result, rerender } = renderHook(
+      ({ currentCanon }: { currentCanon: Canon<number> }) => {
+        const root = usePredictions({ canon: currentCanon })
+        renders.push({
+          status: root.status,
+          revision: revisionAt(currentCanon.revisions, counterAxis),
+        })
+        return root
+      },
+      { initialProps: { currentCanon: canon(0, 0) } }
+    )
+
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+    await act(async () => controlled.deliveries[0]?.resolve(ok(stamp(1))))
+    await act(async () => {})
+    rerender({ currentCanon: canon(1, 1) })
+    await act(async () => {})
+
+    // With one mutation, `idle` and pending means it is accepted. Its stamp
+    // is uncovered while canon is behind revision 1.
+    const uncovered = renders.filter(
+      ({ status, revision }) =>
+        status.delivery === "idle" && status.pending > 0 && (revision ?? 0) < 1
+    )
+    expect(uncovered.length).toBeGreaterThan(0)
+    for (const { status } of uncovered) {
+      expect(status.freshness).not.toBe("current")
+    }
+    for (const { status } of renders.filter(({ status }) => !status.pending)) {
+      expect(status.freshness).toBe("current")
+    }
+    expect(result.current.status).toMatchObject({
+      pending: 0,
+      freshness: "current",
+    })
   })
 
   it("keeps an accepted prediction rendered while the refresh carrier stalls", async () => {

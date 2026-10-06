@@ -10,7 +10,6 @@ import {
   useEffect,
   useEffectEvent,
   useMemo,
-  useRef,
   useState,
   useSyncExternalStore,
 } from "react"
@@ -495,6 +494,17 @@ function createLedgerStore<Invocation, Error>(
   return {
     getSnapshot: (): Ledger<Invocation, Error> => ledger,
 
+    /** Stamps of the accepted entries, by mutation ID: the refresh requirements. */
+    getAccepted(): ReadonlyMap<string, AcceptedStamp> {
+      const accepted = new Map<string, AcceptedStamp>()
+      for (const entry of ledger.entries) {
+        if (entry.delivery.kind === "accepted") {
+          accepted.set(entry.envelope.mutationId, entry.delivery.stamp)
+        }
+      }
+      return accepted
+    },
+
     subscribe(listener: () => void): () => void {
       listeners.add(listener)
       return () => listeners.delete(listener)
@@ -806,10 +816,13 @@ export function createPredictedRootHook<
     )
     const useRefresh = options.refresh
     const refresh = useRefresh()
+    // The ledger is the one authority for accepted stamps; incorporation
+    // follows it rather than keeping its own.
     const incorporation = useIncorporation(
       canon,
       refresh,
-      options.invalidations
+      options.invalidations,
+      store
     )
     const projection = useMemo(
       () => project(canon, ledger.entries),
@@ -821,30 +834,6 @@ export function createPredictedRootHook<
       store.activate()
       return store.deactivate
     }, [store])
-
-    // The refresh coordinator learns accepted-but-uncovered stamps from the
-    // ledger, the one place that knows them.
-    const { recordAcceptance, removeAcceptance } = incorporation
-    const recordedAcceptances = useRef(new Set<string>())
-    useEffect(() => {
-      const recorded = recordedAcceptances.current
-      const accepted = new Map<string, AcceptedStamp>()
-      for (const entry of ledger.entries) {
-        if (entry.delivery.kind === "accepted") {
-          accepted.set(entry.envelope.mutationId, entry.delivery.stamp)
-        }
-      }
-      for (const [mutationId, stamp] of accepted) {
-        if (recorded.has(mutationId)) continue
-        recorded.add(mutationId)
-        recordAcceptance(mutationId, stamp)
-      }
-      for (const mutationId of recorded) {
-        if (accepted.has(mutationId)) continue
-        recorded.delete(mutationId)
-        removeAcceptance(mutationId)
-      }
-    }, [ledger.entries, recordAcceptance, removeAcceptance])
 
     // Reconcile this render's projection, then deliver. Refusals first, so a
     // jossed envelope that never left is retracted before it could be sent.

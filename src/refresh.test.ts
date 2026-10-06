@@ -2,6 +2,7 @@
 
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { act, renderHook } from "@testing-library/react"
+import { useSyncExternalStore } from "react"
 import { ok, type Result } from "serializable-result"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -33,7 +34,10 @@ import {
   SNAPSHOT_ACCEPTANCE_GRACE_MS,
   UNCOVERED_REFRESH_RETRY_MS,
   useIncorporation,
+  type AcceptanceSource,
+  type IncorporationStatus,
 } from "./refresh"
+import { covers } from "./revisions"
 import { createInMemoryInvalidationAdapter } from "./testing"
 import { verifyRefreshContract } from "./testing/react"
 
@@ -80,6 +84,36 @@ function stamp(entries: Record<string, number>): AcceptedStamp {
   const parsed = acceptedStamp({ revisions: entries })
   if (!parsed.ok) throw new Error("Invalid refresh test stamp")
   return parsed.value
+}
+
+/** Stands in for a predicted root's ledger: the one store of acceptances. */
+function testAcceptances() {
+  let accepted: ReadonlyMap<string, AcceptedStamp> = new Map()
+  const listeners = new Set<() => void>()
+  const source: AcceptanceSource = {
+    getAccepted: () => accepted,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+  }
+  const publish = (next: Map<string, AcceptedStamp>) => {
+    accepted = next
+    for (const listener of listeners) listener()
+  }
+  return {
+    source,
+    accept(mutationId: string, stamp: AcceptedStamp) {
+      publish(new Map(accepted).set(mutationId, stamp))
+    },
+    remove(mutationId: string) {
+      const next = new Map(accepted)
+      next.delete(mutationId)
+      publish(next)
+    },
+  }
 }
 
 function flushMicrotasks() {
@@ -238,12 +272,13 @@ describe("refresh incorporation", () => {
     }
     const request = vi.fn(() => undefined)
     const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+    const acceptances = testAcceptances()
     const { result, rerender } = renderHook(
       ({ currentCanon }: { readonly currentCanon: Canon<typeof state> }) =>
-        useIncorporation(currentCanon, refresh),
+        useIncorporation(currentCanon, refresh, undefined, acceptances.source),
       { initialProps: { currentCanon: mounted } }
     )
-    act(() => result.current.recordAcceptance("m1", stamp({ [valueAxis]: 1 })))
+    act(() => acceptances.accept("m1", stamp({ [valueAxis]: 1 })))
     await flushMicrotasks()
     expect(request).toHaveBeenCalledOnce()
 
@@ -376,6 +411,63 @@ describe("refresh incorporation", () => {
 
     expect(result.current.status.freshness).toBe("current")
     expect(result.current.status.pending).toBe(0)
+  })
+})
+
+describe("acceptance requirements", () => {
+  it("requires exactly the source's uncovered stamps in every render", () => {
+    const acceptances = testAcceptances()
+    const refresh: RefreshAdapter = {
+      acceptanceGraceMs: ROUTER_ACCEPTANCE_GRACE_MS,
+      request: vi.fn(async () => undefined),
+    }
+    const mounted = canon(0, 0)
+    const renders: {
+      readonly accepted: ReadonlyMap<string, AcceptedStamp>
+      readonly status: IncorporationStatus
+    }[] = []
+    renderHook(() => {
+      // Reads the source in render, as a predicted root reads its ledger.
+      const accepted = useSyncExternalStore(
+        acceptances.source.subscribe,
+        acceptances.source.getAccepted
+      )
+      const { status } = useIncorporation(
+        mounted,
+        refresh,
+        undefined,
+        acceptances.source
+      )
+      renders.push({ accepted, status })
+    })
+
+    act(() => acceptances.accept("behind", stamp({ [valueAxis]: 1 })))
+    act(() => acceptances.accept("missing", stamp({ [missingAxis]: 1 })))
+    act(() => acceptances.remove("missing"))
+    // Pruned before any canon covered it.
+    act(() => acceptances.remove("behind"))
+    act(() => acceptances.accept("covered", stamp({ [valueAxis]: 0 })))
+
+    const steps = renders
+      .map(({ accepted }) => [...accepted.keys()].join())
+      .filter((step, index, all) => index === 0 || step !== all[index - 1])
+    expect(steps).toEqual([
+      "",
+      "behind",
+      "behind,missing",
+      "behind",
+      "",
+      "covered",
+    ])
+    for (const { accepted, status } of renders) {
+      const uncovered = [...accepted.values()].some(
+        (pending) => !covers(mounted.revisions, pending.revisions)
+      )
+      expect(status.freshness === "current").toBe(!uncovered)
+      expect(status.missingAxes).toEqual(
+        accepted.has("missing") ? [missingAxis] : []
+      )
+    }
   })
 })
 

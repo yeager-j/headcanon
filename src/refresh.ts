@@ -115,7 +115,10 @@ interface Attempt {
 
 interface IncorporationState {
   readonly canon: Canon<unknown>
-  /** Stamps of accepted mutations canon has not yet covered, by mutation ID. */
+  /**
+   * The acceptance source's stamps, by mutation ID, as of its latest change.
+   * Replaced whole on every change; never edited here.
+   */
   readonly accepted: ReadonlyMap<string, AcceptedStamp>
   /** Fresher invalidation revisions canon has not yet covered. */
   readonly observed: RevisionVector
@@ -136,12 +139,10 @@ interface IncorporationState {
 
 type IncorporationEvent =
   | {
-      readonly type: "acceptance-recorded"
-      readonly mutationId: string
-      readonly stamp: AcceptedStamp
+      readonly type: "acceptances-changed"
+      readonly accepted: ReadonlyMap<string, AcceptedStamp>
       readonly graceMs: number
     }
-  | { readonly type: "acceptance-removed"; readonly mutationId: string }
   | { readonly type: "invalidated"; readonly invalidation: AxisInvalidation }
   | { readonly type: "gap-signalled" }
   | { readonly type: "canon-received"; readonly canon: Canon<unknown> }
@@ -314,15 +315,21 @@ function transition(
   event: IncorporationEvent
 ): IncorporationState {
   switch (event.type) {
-    case "acceptance-recorded": {
-      const accepted = new Map(state.accepted).set(
-        event.mutationId,
-        event.stamp
+    case "acceptances-changed": {
+      const added = [...event.accepted.keys()].some(
+        (mutationId) => !state.accepted.has(mutationId)
       )
-      const recorded = withRequirements(state, accepted, state.observed)
-      if (isMet(recorded)) return recorded
+      const removed = [...state.accepted.keys()].some(
+        (mutationId) => !event.accepted.has(mutationId)
+      )
+      if (!added && !removed) return state
 
-      const budgeted = freshBudget(recorded)
+      const changed = withRequirements(state, event.accepted, state.observed)
+      if (isMet(changed)) return becomeCurrent(changed)
+      if (!added) return changed
+
+      // A new acceptance is a new requirement.
+      const budgeted = freshBudget(changed)
       if (budgeted.attempt !== null) {
         return { ...budgeted, freshness: REFRESHING }
       }
@@ -335,14 +342,6 @@ function transition(
         }
       }
       return refreshSoon(budgeted)
-    }
-
-    case "acceptance-removed": {
-      if (!state.accepted.has(event.mutationId)) return state
-      const accepted = new Map(state.accepted)
-      accepted.delete(event.mutationId)
-      const removed = withRequirements(state, accepted, state.observed)
-      return isMet(removed) ? becomeCurrent(removed) : removed
     }
 
     case "invalidated": {
@@ -446,6 +445,18 @@ function snapshotOf(state: IncorporationState): IncorporationSnapshot {
     invalidations: state.invalidations,
     required: state.required,
   }
+}
+
+/**
+ * The store that owns a root's accepted mutations: for a predicted root, its
+ * ledger. Incorporation requires canon to cover every stamp it lists and keeps
+ * no acceptance of its own.
+ */
+export interface AcceptanceSource {
+  /** Stamps of the accepted mutations the root still renders, by mutation ID. */
+  readonly getAccepted: () => ReadonlyMap<string, AcceptedStamp>
+  /** Calls `listener` synchronously after every change. */
+  readonly subscribe: (listener: () => void) => () => void
 }
 
 function createIncorporation(
@@ -555,16 +566,21 @@ function createIncorporation(
     receiveCanon(next: Canon<unknown>) {
       dispatch({ type: "canon-received", canon: next })
     },
-    recordAcceptance(mutationId: string, stamp: AcceptedStamp) {
-      dispatch({
-        type: "acceptance-recorded",
-        mutationId,
-        stamp,
-        graceMs: currentCarrier.acceptanceGraceMs,
-      })
-    },
-    removeAcceptance(mutationId: string) {
-      dispatch({ type: "acceptance-removed", mutationId })
+    /**
+     * Follows `source` until the returned cleanup runs. Each change reaches
+     * the machine inside the source's own notification, before React can
+     * render it, so a render never reads acceptances and requirements that
+     * disagree.
+     */
+    followAcceptances(source: AcceptanceSource) {
+      const sync = () =>
+        dispatch({
+          type: "acceptances-changed",
+          accepted: source.getAccepted(),
+          graceMs: currentCarrier.acceptanceGraceMs,
+        })
+      sync()
+      return source.subscribe(sync)
     },
     retryRefresh() {
       dispatch({ type: "retry-requested" })
@@ -593,25 +609,23 @@ function createIncorporation(
 // ---------------------------------------------------------------------------
 // Hook.
 
-/** Imperative incorporation controls shared by predicted and observed roots. */
+/** Incorporation status and control shared by predicted and observed roots. */
 export interface IncorporationCoordinator {
   readonly status: IncorporationStatus
   /** Gives unmet requirements a fresh attempt budget and refreshes now. */
   readonly retryRefresh: () => void
-  /** Requires canon to cover an accepted mutation's stamp. */
-  readonly recordAcceptance: (mutationId: string, stamp: AcceptedStamp) => void
-  /** Drops an acceptance's requirement, normally once canon covers it. */
-  readonly removeAcceptance: (mutationId: string) => void
 }
 
 /**
  * Keeps one mounted canon fresh: tracks what canon must reach, requests
  * refreshes through the carrier, and reports freshness.
  *
- * Requirements: canon must cover every recorded acceptance's stamp and every
+ * Requirements: canon must cover every stamp `acceptances` lists and every
  * invalidation fresher than both canon and those stamps, and every
  * subscription gap must be closed by a successful refresh that started after
  * it. Freshness is `current` exactly when those requirements are met.
+ * `acceptances` is the one authority for accepted stamps: the requirements
+ * follow each change to it before any render can read that change.
  *
  * Guarantees:
  * - At most one carrier request runs at a time; requests that arrive in the
@@ -631,12 +645,14 @@ export interface IncorporationCoordinator {
  * @param canon Latest authoritative canon the root renders.
  * @param refresh Refresh carrier; the latest one is used for each request.
  * @param invalidations Optional push-invalidation adapter for canon's axes.
- * @returns Incorporation status and the controls the root calls.
+ * @param acceptances Optional store of the root's accepted mutations.
+ * @returns Incorporation status and the retry control.
  */
 export function useIncorporation<State>(
   canon: Canon<State>,
   refresh: RefreshAdapter,
-  invalidations?: InvalidationAdapter
+  invalidations?: InvalidationAdapter,
+  acceptances?: AcceptanceSource
 ): IncorporationCoordinator {
   const [incorporation] = useState(() =>
     createIncorporation(
@@ -649,6 +665,9 @@ export function useIncorporation<State>(
   useEffect(() => incorporation.connect(), [incorporation])
   useEffect(() => incorporation.setCarrier(refresh), [incorporation, refresh])
   useEffect(() => incorporation.receiveCanon(canon), [incorporation, canon])
+  useEffect(() => {
+    if (acceptances) return incorporation.followAcceptances(acceptances)
+  }, [acceptances, incorporation])
 
   const axesKey = JSON.stringify(
     revisionEntries(canon.revisions)
@@ -688,12 +707,7 @@ export function useIncorporation<State>(
   )
 
   return useMemo(
-    () => ({
-      status,
-      retryRefresh: incorporation.retryRefresh,
-      recordAcceptance: incorporation.recordAcceptance,
-      removeAcceptance: incorporation.removeAcceptance,
-    }),
+    () => ({ status, retryRefresh: incorporation.retryRefresh }),
     [incorporation, status]
   )
 }

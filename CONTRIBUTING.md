@@ -7,7 +7,7 @@ The package documentation is in [`README.md`](README.md).
 | Path      | What it is                                                                                                 |
 | --------- | ---------------------------------------------------------------------------------------------------------- |
 | `src`     | The source of the published `headcanon` package.                                                           |
-| `scripts` | The repo gates (`check-*.mjs`) and their tests.                                                            |
+| `scripts` | The repo gates (`check-*.mjs`), their tests, and the vitest setup that unmounts DOM tests' React roots.    |
 | `fixture` | A private Next.js App Router app. Its Playwright suite tests the client lifecycle through the real router. |
 
 The repo root is the package and an npm workspace root. The fixture is its only
