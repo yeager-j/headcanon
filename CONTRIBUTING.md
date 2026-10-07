@@ -1,6 +1,6 @@
 # Contributing to Headcanon
 
-The package documentation is in [`README.md`](README.md).
+The package documentation is in [`README-old.md`](README-old.md).
 
 ## Layout
 
