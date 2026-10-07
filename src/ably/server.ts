@@ -4,7 +4,11 @@ import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
   ablyChannelNamespace,
+  ablySubscribeCapability,
 } from "./channels"
+import type { AblyTokenRequest } from "./token-request"
+
+export type { AblyTokenRequest } from "./token-request"
 
 /** One REST batch-publish request entry: these messages to these channels. */
 export interface AblyBatchPublishSpec {
@@ -173,4 +177,54 @@ export function createAblyInvalidationPublisher(options: {
       }
     },
   }
+}
+
+/** Minimal Ably REST client contract used to sign subscribe tokens. */
+export interface AblyTokenRestClient {
+  readonly auth: {
+    /** Signs a token request locally from the API key; no Ably round-trip. */
+    createTokenRequest(tokenParams: {
+      readonly capability: Record<string, ["subscribe"]>
+      readonly clientId?: string
+      readonly ttl?: number
+    }): Promise<AblyTokenRequest>
+  }
+}
+
+/**
+ * Signs a subscribe-only Ably token request for exactly these axes.
+ *
+ * The axes are the application's decision: derive them from trusted server
+ * state after checking the viewer may observe each one, never by passing the
+ * browser's list through. This helper owns only the Ably side: it derives each
+ * axis's channel under the namespace, as the adapter and publisher do, and
+ * grants `subscribe` on exactly those channels.
+ *
+ * @param options REST client, deployment namespace, approved axes, and optional token identity and lifetime.
+ * @returns A promise for the signed token request to return to the browser's `requestToken`.
+ * @throws Error when `namespace` is invalid or `axes` is empty, both configuration errors.
+ */
+export async function createAblyAxisTokenRequest(options: {
+  readonly rest: AblyTokenRestClient
+  readonly namespace: string
+  /** Axes the application has approved for this viewer. */
+  readonly axes: readonly AxisId[]
+  /** Trusted identity from the session, never from the request. */
+  readonly clientId?: string
+  /** Token lifetime in milliseconds; Ably's default applies when omitted. */
+  readonly ttlMs?: number
+}): Promise<AblyTokenRequest> {
+  const namespace = ablyChannelNamespace(options.namespace)
+  if (options.axes.length === 0) {
+    throw new Error("An Ably axis token request needs at least one axis")
+  }
+
+  const channels = await Promise.all(
+    options.axes.map((axis) => ablyAxisChannelName(namespace, axis))
+  )
+  return options.rest.auth.createTokenRequest({
+    capability: ablySubscribeCapability(channels),
+    ...(options.clientId !== undefined && { clientId: options.clientId }),
+    ...(options.ttlMs !== undefined && { ttl: options.ttlMs }),
+  })
 }

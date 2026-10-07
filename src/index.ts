@@ -66,4 +66,5 @@ export {
   type InvalidationSubscription,
   type LazyInvalidationAdapterOptions,
   type PollingFallbackOptions,
+  type RetryableInvalidationAdapter,
 } from "./core/invalidation"

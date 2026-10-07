@@ -1,13 +1,16 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, expectTypeOf, it, vi } from "vitest"
 
 import {
   axisInvalidation,
   createLazyInvalidationAdapter,
   createNoRealtimeInvalidationAdapter,
+  createRestartableLazyAdapter,
   isDegradedInvalidationStatus,
+  withPollingFallback,
   type InvalidationAdapter,
   type InvalidationStatus,
   type InvalidationSubscription,
+  type RetryableInvalidationAdapter,
 } from "./invalidation"
 import { axisId } from "./revisions"
 
@@ -297,4 +300,268 @@ describe("createLazyInvalidationAdapter", () => {
       expect(errors).toEqual(reported)
     }
   )
+})
+
+describe("createRestartableLazyAdapter", () => {
+  function innerAdapter(subscribed: InvalidationSubscription[]) {
+    return {
+      initialStatus: "active",
+      subscribe(value) {
+        subscribed.push(value)
+        return () => undefined
+      },
+    } satisfies InvalidationAdapter
+  }
+
+  it("restarts a failed initialization and forwards every waiting subscription once", async () => {
+    const subscribed: InvalidationSubscription[] = []
+    const initialize = vi
+      .fn<() => Promise<InvalidationAdapter | null>>()
+      .mockRejectedValueOnce(new Error("transport failed"))
+      .mockResolvedValueOnce(innerAdapter(subscribed))
+    const adapter = createRestartableLazyAdapter({ initialize })
+    const early: InvalidationStatus[] = []
+    const late: InvalidationStatus[] = []
+
+    adapter.subscribe(subscription(early))
+    await flushMicrotasks()
+    adapter.subscribe(subscription(late))
+    expect(adapter.initialStatus).toBe("unavailable")
+
+    expect(adapter.restart()).toBe(true)
+    await flushMicrotasks()
+
+    expect(initialize).toHaveBeenCalledTimes(2)
+    expect(subscribed).toHaveLength(2)
+    expect(early).toEqual(["unavailable", "reauthorizing", "active"])
+    expect(late).toEqual(["unavailable", "reauthorizing", "active"])
+  })
+
+  it("does not forward a subscription cancelled while unavailable", async () => {
+    const subscribed: InvalidationSubscription[] = []
+    const initialize = vi
+      .fn<() => Promise<InvalidationAdapter | null>>()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(innerAdapter(subscribed))
+    const adapter = createRestartableLazyAdapter({ initialize })
+
+    const unsubscribe = adapter.subscribe(subscription([]))
+    await flushMicrotasks()
+    unsubscribe()
+    adapter.restart()
+    await flushMicrotasks()
+
+    expect(subscribed).toHaveLength(0)
+  })
+
+  it("restarts only when unavailable", async () => {
+    const readiness = deferred<InvalidationAdapter | null>()
+    const initialize = vi.fn(() => readiness.promise)
+    const adapter = createRestartableLazyAdapter({ initialize })
+
+    expect(adapter.restart()).toBe(false)
+    adapter.subscribe(subscription([]))
+    expect(adapter.restart()).toBe(false)
+    readiness.resolve(innerAdapter([]))
+    await flushMicrotasks()
+
+    expect(adapter.restart()).toBe(false)
+    expect(initialize).toHaveBeenCalledOnce()
+  })
+
+  it("moves every subscription to the next transport when a forward fails part-way", async () => {
+    const released: string[] = []
+    let forwards = 0
+    const failing: InvalidationAdapter = {
+      initialStatus: "active",
+      subscribe() {
+        forwards += 1
+        if (forwards === 2) throw new Error("forward failed")
+        return () => released.push("first transport")
+      },
+    }
+    const next: InvalidationSubscription[] = []
+    const initialize = vi
+      .fn<() => Promise<InvalidationAdapter | null>>()
+      .mockResolvedValueOnce(failing)
+      .mockResolvedValueOnce(innerAdapter(next))
+    const adapter = createRestartableLazyAdapter({
+      initialize,
+      onInitializationError: () => undefined,
+    })
+    const first: InvalidationStatus[] = []
+    const second: InvalidationStatus[] = []
+
+    adapter.subscribe(subscription(first))
+    adapter.subscribe(subscription(second))
+    await flushMicrotasks()
+
+    expect(released).toEqual(["first transport"])
+    expect(first).toEqual(["active", "unavailable"])
+    expect(second).toEqual(["active", "unavailable"])
+
+    adapter.restart()
+    await flushMicrotasks()
+
+    expect(next).toHaveLength(2)
+  })
+
+  /** A transport that tracks live subscriptions and refuses one of them. */
+  function trackingTransport(refuse?: InvalidationSubscription) {
+    const live = new Set<InvalidationSubscription>()
+    const adapter: InvalidationAdapter = {
+      initialStatus: "active",
+      subscribe(value) {
+        if (value === refuse) throw new Error("forward failed")
+        live.add(value)
+        return () => live.delete(value)
+      },
+    }
+    return { adapter, live }
+  }
+
+  it("rolls back a subscription made by a status callback during forwarding", async () => {
+    const lateStatuses: InvalidationStatus[] = []
+    const late = subscription(lateStatuses)
+    const failing = subscription([])
+    const first = trackingTransport(failing)
+    const next = trackingTransport()
+    const initialize = vi
+      .fn<() => Promise<InvalidationAdapter | null>>()
+      .mockResolvedValueOnce(first.adapter)
+      .mockResolvedValueOnce(next.adapter)
+    const adapter = createRestartableLazyAdapter({
+      initialize,
+      onInitializationError: () => undefined,
+    })
+    let subscribedLate = false
+    const early: InvalidationSubscription = {
+      ...subscription([]),
+      onStatusChange: () => {
+        if (subscribedLate) return
+        subscribedLate = true
+        adapter.subscribe(late)
+      },
+    }
+
+    adapter.subscribe(early)
+    adapter.subscribe(failing)
+    await flushMicrotasks()
+    expect(first.live.size).toBe(0)
+
+    adapter.restart()
+    await flushMicrotasks()
+
+    expect(first.live.size).toBe(0)
+    expect(next.live).toEqual(new Set([early, failing, late]))
+  })
+
+  it("releases a subscription cancelled during forwarding exactly once", async () => {
+    const releases = vi.fn()
+    let cancelEarly: () => void = () => undefined
+    const failing: InvalidationSubscription = {
+      ...subscription([]),
+      onStatusChange: () => cancelEarly(),
+    }
+    const adapter = createRestartableLazyAdapter({
+      initialize: () =>
+        Promise.resolve({
+          initialStatus: "active",
+          subscribe(value) {
+            if (value === failing) throw new Error("forward failed")
+            return releases
+          },
+        }),
+      onInitializationError: () => undefined,
+    })
+
+    cancelEarly = adapter.subscribe(subscription([]))
+    adapter.subscribe(failing)
+    await flushMicrotasks()
+
+    expect(releases).toHaveBeenCalledOnce()
+    expect(adapter.initialStatus).toBe("unavailable")
+  })
+
+  it("finishes a rollback when a release throws", async () => {
+    const failing = subscription([])
+    const errors: unknown[] = []
+    const releaseError = new Error("release failed")
+    const adapter = createRestartableLazyAdapter({
+      initialize: () =>
+        Promise.resolve({
+          initialStatus: "active",
+          subscribe(value) {
+            if (value === failing) throw new Error("forward failed")
+            return () => {
+              throw releaseError
+            }
+          },
+        }),
+      onInitializationError: (error) => errors.push(error),
+    })
+    const statuses: InvalidationStatus[] = []
+
+    adapter.subscribe(subscription(statuses))
+    adapter.subscribe(failing)
+    await flushMicrotasks()
+
+    expect(errors).toContain(releaseError)
+    expect(statuses).toEqual(["active", "unavailable"])
+    expect(adapter.restart()).toBe(true)
+  })
+
+  it("sends no stale unavailable after a status callback restarts", async () => {
+    const initialize = vi
+      .fn<() => Promise<InvalidationAdapter | null>>()
+      .mockResolvedValueOnce(null)
+      .mockReturnValueOnce(new Promise(() => undefined))
+    const adapter = createRestartableLazyAdapter({ initialize })
+    const second: InvalidationStatus[] = []
+
+    adapter.subscribe({
+      ...subscription([]),
+      onStatusChange: (status) => {
+        if (status === "unavailable") adapter.restart()
+      },
+    })
+    adapter.subscribe(subscription(second))
+    await flushMicrotasks()
+
+    expect(second).toEqual(["reauthorizing"])
+    expect(adapter.initialStatus).toBe("reauthorizing")
+  })
+
+  it("leaves the public lazy adapter without a restart", () => {
+    const adapter = createLazyInvalidationAdapter({
+      initialize: () => Promise.resolve(null),
+    })
+
+    expect("restart" in adapter).toBe(false)
+  })
+})
+
+describe("withPollingFallback retry", () => {
+  it("forwards retry() from a retryable primary", () => {
+    const retry = vi.fn()
+    const primary: RetryableInvalidationAdapter = {
+      ...createNoRealtimeInvalidationAdapter(),
+      retry,
+    }
+
+    const wrapped = withPollingFallback(primary, { intervalMs: 100 })
+    wrapped.retry()
+
+    expectTypeOf(wrapped).toEqualTypeOf<RetryableInvalidationAdapter>()
+    expect(retry).toHaveBeenCalledOnce()
+  })
+
+  it("adds no retry() to a primary without one", () => {
+    const wrapped = withPollingFallback(createNoRealtimeInvalidationAdapter(), {
+      intervalMs: 100,
+    })
+
+    expectTypeOf(wrapped).toEqualTypeOf<InvalidationAdapter>()
+    expect("retry" in wrapped).toBe(false)
+  })
 })

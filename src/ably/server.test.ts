@@ -6,12 +6,16 @@ import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
   ablyChannelNamespace,
+  ablySubscribeCapability,
 } from "./channels"
 import {
   AblyInvalidationPublicationError,
+  createAblyAxisTokenRequest,
   createAblyInvalidationPublisher,
   type AblyBatchPublishSpec,
   type AblyRestClient,
+  type AblyTokenRequest,
+  type AblyTokenRestClient,
 } from "./server"
 
 const axisA = axisId("entity/a")
@@ -154,4 +158,85 @@ describe("Ably invalidation publisher", () => {
     )
     expect(accepted.batchPublish).toHaveBeenCalledOnce()
   })
+})
+
+describe("createAblyAxisTokenRequest", () => {
+  function tokenClient() {
+    const createTokenRequest = vi.fn(
+      async (tokenParams: {
+        readonly capability: Record<string, ["subscribe"]>
+      }): Promise<AblyTokenRequest> => ({
+        keyName: "app.key",
+        timestamp: 0,
+        nonce: "nonce",
+        mac: "mac",
+        capability: JSON.stringify(tokenParams.capability),
+      })
+    )
+    return { auth: { createTokenRequest } } satisfies AblyTokenRestClient
+  }
+
+  it("accepts the official Ably v2 REST client", () => {
+    expectTypeOf<Rest>().toExtend<AblyTokenRestClient>()
+  })
+
+  it("grants subscribe on exactly the axes' channels with the given identity and lifetime", async () => {
+    const rest = tokenClient()
+
+    const tokenRequest = await createAblyAxisTokenRequest({
+      rest,
+      namespace,
+      axes: [axisB, axisA, axisA],
+      clientId: "user-1",
+      ttlMs: 600_000,
+    })
+
+    const capability = ablySubscribeCapability([
+      await ablyAxisChannelName(namespace, axisA),
+      await ablyAxisChannelName(namespace, axisB),
+    ])
+    expect(rest.auth.createTokenRequest).toHaveBeenCalledExactlyOnceWith({
+      capability,
+      clientId: "user-1",
+      ttl: 600_000,
+    })
+    expect(JSON.parse(tokenRequest.capability)).toEqual(capability)
+  })
+
+  it("leaves identity and lifetime to Ably when omitted", async () => {
+    const rest = tokenClient()
+
+    await createAblyAxisTokenRequest({ rest, namespace, axes: [axisA] })
+
+    expect(rest.auth.createTokenRequest).toHaveBeenCalledExactlyOnceWith({
+      capability: ablySubscribeCapability([
+        await ablyAxisChannelName(namespace, axisA),
+      ]),
+    })
+  })
+
+  it.each([
+    {
+      problem: "no axes",
+      namespace: "preview",
+      axes: [],
+      message: "at least one axis",
+    },
+    {
+      problem: "an invalid namespace",
+      namespace: "preview:",
+      axes: [axisA],
+      message: "Invalid Ably axis-channel namespace",
+    },
+  ])(
+    "rejects $problem without signing",
+    async ({ namespace: value, axes, message }) => {
+      const rest = tokenClient()
+
+      await expect(
+        createAblyAxisTokenRequest({ rest, namespace: value, axes })
+      ).rejects.toThrow(message)
+      expect(rest.auth.createTokenRequest).not.toHaveBeenCalled()
+    }
+  )
 })

@@ -96,6 +96,12 @@ export interface InvalidationAdapter {
   subscribe(subscription: InvalidationSubscription): () => void
 }
 
+/** An invalidation adapter whose transport the application can ask to recover. */
+export interface RetryableInvalidationAdapter extends InvalidationAdapter {
+  /** Asks the transport to recover after `unavailable`; does nothing while it is healthy. */
+  retry(): void
+}
+
 /** Initialization and diagnostics supplied to the lazy transport adapter. */
 export interface LazyInvalidationAdapterOptions {
   /**
@@ -128,6 +134,37 @@ export interface LazyInvalidationAdapterOptions {
 export function createLazyInvalidationAdapter(
   options: LazyInvalidationAdapterOptions
 ): InvalidationAdapter {
+  const lazy = createRestartableLazyAdapter(options)
+  return {
+    get initialStatus() {
+      return lazy.initialStatus
+    },
+    subscribe: lazy.subscribe,
+  }
+}
+
+/** A lazy adapter that can run its initialization again after it failed. */
+export interface RestartableLazyAdapter extends InvalidationAdapter {
+  /**
+   * Runs initialization again when the last attempt failed or found no
+   * transport, and forwards every live subscription once it succeeds.
+   * @returns Whether a new attempt started; false while initializing or ready.
+   */
+  restart(): boolean
+}
+
+/**
+ * The lazy adapter behind {@link createLazyInvalidationAdapter}, plus
+ * `restart()`. Not a package export: the public lazy adapter initializes at
+ * most once, and only `createAblyAxisInvalidations` offers a restart, through
+ * its `retry()`. Until the transport is ready, live subscriptions wait here,
+ * including while unavailable, so a restart can forward them.
+ * @param options Initialization callback and optional diagnostics handler.
+ * @returns A lazy adapter with a `restart()` control.
+ */
+export function createRestartableLazyAdapter(
+  options: LazyInvalidationAdapterOptions
+): RestartableLazyAdapter {
   type BufferedSubscription = {
     readonly subscription: InvalidationSubscription
     cancelled: boolean
@@ -140,13 +177,23 @@ export function createLazyInvalidationAdapter(
 
   const becomeUnavailable = (): void => {
     state = "unavailable"
-    for (const entry of buffered) {
+    for (const entry of [...buffered]) {
+      // A status callback may restart; the rest then learn the new attempt's
+      // status from `restart()`, not this stale one.
+      if (state !== "unavailable") return
       if (!entry.cancelled) entry.subscription.onStatusChange("unavailable")
     }
-    buffered.clear()
+  }
+
+  /** Releases an entry's transport subscription at most once. */
+  const release = (entry: BufferedSubscription): void => {
+    const unsubscribe = entry.unsubscribe
+    entry.unsubscribe = null
+    unsubscribe?.()
   }
 
   const initialize = async (): Promise<void> => {
+    const forwarded: BufferedSubscription[] = []
     try {
       inner = await options.initialize()
       if (!inner) {
@@ -154,7 +201,9 @@ export function createLazyInvalidationAdapter(
         return
       }
 
-      state = "ready"
+      // Still `initializing` while forwarding: a subscription a status
+      // callback makes now waits in the buffer, and this live iteration
+      // forwards it in the same pass, so a rollback covers it too.
       for (const entry of buffered) {
         const status = inner.initialStatus
         if (!entry.cancelled && status !== "reauthorizing") {
@@ -163,13 +212,30 @@ export function createLazyInvalidationAdapter(
         // The status callback may have cancelled this subscription.
         if (!entry.cancelled) {
           entry.unsubscribe = inner.subscribe(entry.subscription)
+          forwarded.push(entry)
         }
+        buffered.delete(entry)
       }
-      buffered.clear()
+      state = "ready"
     } catch (error) {
+      // A failed attempt keeps no subscriptions on its transport: every live
+      // one waits here again, so a restart forwards all of them to the next.
+      for (const entry of forwarded) {
+        try {
+          release(entry)
+        } catch (cleanupError) {
+          options.onInitializationError?.(cleanupError)
+        }
+        if (!entry.cancelled) buffered.add(entry)
+      }
       if (error !== undefined) options.onInitializationError?.(error)
       becomeUnavailable()
     }
+  }
+
+  const start = (): void => {
+    state = "initializing"
+    void initialize()
   }
 
   return {
@@ -179,10 +245,6 @@ export function createLazyInvalidationAdapter(
     },
     subscribe(subscription) {
       if (state === "ready" && inner) return inner.subscribe(subscription)
-      if (state === "unavailable") {
-        subscription.onStatusChange("unavailable")
-        return () => undefined
-      }
 
       const entry: BufferedSubscription = {
         subscription,
@@ -190,16 +252,24 @@ export function createLazyInvalidationAdapter(
         unsubscribe: null,
       }
       buffered.add(entry)
-      if (state === "idle") {
-        state = "initializing"
-        void initialize()
-      }
+      if (state === "unavailable") subscription.onStatusChange("unavailable")
+      if (state === "idle") start()
 
       return () => {
         entry.cancelled = true
-        entry.unsubscribe?.()
         buffered.delete(entry)
+        release(entry)
       }
+    },
+    restart() {
+      if (state !== "unavailable") return false
+      inner = null
+      state = "initializing"
+      for (const entry of [...buffered]) {
+        if (!entry.cancelled) entry.subscription.onStatusChange("reauthorizing")
+      }
+      start()
+      return true
     },
   }
 }
@@ -242,15 +312,24 @@ function pollingStatus(status: InvalidationStatus): InvalidationStatus {
  * wrapper reports `polling` and calls `onSubscriptionGap` every `intervalMs`,
  * so the root refreshes through its usual carrier. When the primary reports
  * `active`, polling stops and the primary's status is forwarded. Unsubscribing
- * stops the timer.
+ * stops the timer. A primary with `retry()` keeps it: the wrapper forwards
+ * it, so wrapping does not hide the transport's recovery control.
  *
  * @param primary Push invalidation adapter to wrap.
  * @param options Polling interval and visibility policy.
- * @returns An invalidation adapter with polling fallback.
+ * @returns An invalidation adapter with polling fallback, retryable when `primary` is.
  * @throws Error when `intervalMs` is not a finite positive number.
  */
 export function withPollingFallback(
+  primary: RetryableInvalidationAdapter,
+  options: PollingFallbackOptions
+): RetryableInvalidationAdapter
+export function withPollingFallback(
   primary: InvalidationAdapter,
+  options: PollingFallbackOptions
+): InvalidationAdapter
+export function withPollingFallback(
+  primary: InvalidationAdapter | RetryableInvalidationAdapter,
   options: PollingFallbackOptions
 ): InvalidationAdapter {
   if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
@@ -260,6 +339,7 @@ export function withPollingFallback(
   const pauseWhenHidden = options.pauseWhenHidden ?? true
 
   return {
+    ...("retry" in primary && { retry: () => primary.retry() }),
     get initialStatus() {
       return pollingStatus(primary.initialStatus)
     },

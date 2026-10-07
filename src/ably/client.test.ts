@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import type { Realtime } from "ably"
+import type { BaseRealtime } from "ably/modular"
 import { describe, expect, expectTypeOf, it, vi } from "vitest"
 
 import {
@@ -19,9 +20,12 @@ import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
   ablyChannelNamespace,
+  ablySubscribeCapability,
 } from "./channels"
 import {
+  createAblyAxisInvalidations,
   createAblyInvalidationAdapter,
+  type AblyAxisInvalidationsOptions,
   type AblyChannelState,
   type AblyChannelStateChange,
   type AblyConnectionState,
@@ -29,6 +33,8 @@ import {
   type AblyErrorInfo,
   type AblyRealtimeChannel,
   type AblyRealtimeClient,
+  type AblyRealtimeOptions,
+  type AblyTokenRequest,
 } from "./client"
 import { createAblyInvalidationPublisher, type AblyRestClient } from "./server"
 
@@ -597,5 +603,277 @@ describe("Ably invalidation capability lifecycle", () => {
         },
       ],
     ])
+  })
+})
+
+/** A signed-looking token request granting `subscribe` on `channels`. */
+function tokenRequestFor(channels: readonly string[]): AblyTokenRequest {
+  return {
+    keyName: "app.key",
+    timestamp: 0,
+    nonce: "nonce",
+    mac: "mac",
+    capability: JSON.stringify(ablySubscribeCapability(channels)),
+  }
+}
+
+/**
+ * A `createRealtime` over the fake service whose `authorize()` goes through
+ * the given `authCallback`, as the Ably SDK's does, and grants the returned
+ * token's capability.
+ */
+function realtimeFactory(service: FakeAblyService) {
+  const created: AblyRealtimeOptions[] = []
+  const createRealtime = vi.fn(
+    (options: AblyRealtimeOptions): AblyRealtimeClient => {
+      created.push(options)
+      return {
+        ...service.realtime,
+        auth: {
+          authorize: (tokenParams) =>
+            new Promise((resolve, reject) => {
+              options.authCallback(tokenParams, (error, tokenRequest) => {
+                if (error !== null || tokenRequest === null) {
+                  reject(new Error(error ?? "no token request"))
+                  return
+                }
+                resolve(
+                  service.realtime.auth.authorize({
+                    capability: JSON.parse(tokenRequest.capability),
+                  })
+                )
+              })
+            }),
+        },
+      }
+    }
+  )
+  return { createRealtime, created }
+}
+
+/** A token endpoint that approves every requested axis. */
+function approvingTokenEndpoint() {
+  return vi.fn(async (axes: readonly AxisId[]) =>
+    tokenRequestFor(await Promise.all(axes.map(channelFor)))
+  )
+}
+
+describe("createAblyAxisInvalidations", () => {
+  it("accepts the official Ably v2 clients through createRealtime", () => {
+    expectTypeOf<BaseRealtime>().toExtend<AblyRealtimeClient>()
+
+    // Compiles only while Headcanon's options fit both SDK constructors.
+    const fromRealtime =
+      (SDK: typeof Realtime): AblyAxisInvalidationsOptions["createRealtime"] =>
+      (options) =>
+        new SDK(options)
+    const fromModular =
+      (
+        SDK: typeof BaseRealtime
+      ): AblyAxisInvalidationsOptions["createRealtime"] =>
+      (options) =>
+        new SDK({ ...options, plugins: {} })
+    expect([fromRealtime, fromModular]).toHaveLength(2)
+  })
+
+  it("authorizes axes, not channel names, with a client that waits for that authorization", async () => {
+    const service = new FakeAblyService()
+    const { createRealtime, created } = realtimeFactory(service)
+    const requestToken = approvingTokenEndpoint()
+    const adapter = createAblyAxisInvalidations({
+      namespace,
+      createRealtime,
+      requestToken,
+    })
+    const observer = subscription([axisB, axisA])
+
+    expect(createRealtime).not.toHaveBeenCalled()
+    adapter.subscribe(observer)
+    await settle()
+
+    expect(created).toEqual([
+      { autoConnect: false, authCallback: expect.any(Function) },
+    ])
+    expect(requestToken).toHaveBeenCalledExactlyOnceWith([axisA, axisB])
+    expect(service.authorizations()).toEqual([
+      `authorize:${(await Promise.all([axisA, axisB].map(channelFor))).sort().join(",")}`,
+    ])
+    expect(observer.onStatusChange).toHaveBeenLastCalledWith("active")
+    expect(observer.onSubscriptionGap).toHaveBeenCalledOnce()
+  })
+
+  it("renews from a serialized capability and drops channels it does not observe", async () => {
+    const service = new FakeAblyService()
+    const { createRealtime, created } = realtimeFactory(service)
+    const requestToken = approvingTokenEndpoint()
+    const adapter = createAblyAxisInvalidations({
+      namespace,
+      createRealtime,
+      requestToken,
+    })
+    adapter.subscribe(subscription([axisA]))
+    await settle()
+    const authCallback = created[0]?.authCallback
+    if (!authCallback) throw new Error("createRealtime was not called")
+    const unobserved = await channelFor(axisB)
+    const renewal = vi.fn()
+
+    authCallback(
+      {
+        capability: JSON.stringify(
+          ablySubscribeCapability([await channelFor(axisA), unobserved])
+        ),
+      },
+      renewal
+    )
+    await settle()
+    authCallback({ capability: { [unobserved]: ["subscribe"] } }, renewal)
+
+    expect(requestToken).toHaveBeenLastCalledWith([axisA])
+    expect(requestToken).toHaveBeenCalledTimes(2)
+    expect(renewal).toHaveBeenNthCalledWith(
+      1,
+      null,
+      tokenRequestFor([await channelFor(axisA)])
+    )
+    expect(renewal).toHaveBeenNthCalledWith(
+      2,
+      "No observed axes to authorize",
+      null
+    )
+  })
+
+  it("stays unavailable without a client while the namespace is missing, then starts on retry", async () => {
+    const service = new FakeAblyService()
+    const { createRealtime } = realtimeFactory(service)
+    const loadNamespace = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce("preview")
+    const adapter = createAblyAxisInvalidations({
+      namespace: loadNamespace,
+      createRealtime,
+      requestToken: approvingTokenEndpoint(),
+    })
+    const observer = subscription([axisA])
+
+    adapter.subscribe(observer)
+    await settle()
+    expect(observer.onStatusChange).toHaveBeenLastCalledWith("unavailable")
+    expect(createRealtime).not.toHaveBeenCalled()
+
+    adapter.retry()
+    await settle()
+
+    expect(loadNamespace).toHaveBeenCalledTimes(2)
+    expect(createRealtime).toHaveBeenCalledOnce()
+    expect(
+      observer.onStatusChange.mock.calls.map(([status]) => status)
+    ).toEqual(["unavailable", "reauthorizing", "active"])
+  })
+
+  it("reports an invalid loaded namespace before creating a client", async () => {
+    const service = new FakeAblyService()
+    const { createRealtime } = realtimeFactory(service)
+    const onInitializationError = vi.fn()
+    const adapter = createAblyAxisInvalidations({
+      namespace: async () => "preview:",
+      createRealtime,
+      requestToken: approvingTokenEndpoint(),
+      onInitializationError,
+    })
+    const observer = subscription([axisA])
+
+    adapter.subscribe(observer)
+    await settle()
+
+    expect(onInitializationError).toHaveBeenCalledOnce()
+    expect(createRealtime).not.toHaveBeenCalled()
+    expect(observer.onStatusChange).toHaveBeenLastCalledWith("unavailable")
+  })
+
+  it("rejects an invalid string namespace at construction", () => {
+    const service = new FakeAblyService()
+
+    expect(() =>
+      createAblyAxisInvalidations({
+        namespace: "preview:",
+        createRealtime: realtimeFactory(service).createRealtime,
+        requestToken: approvingTokenEndpoint(),
+      })
+    ).toThrow("Invalid Ably axis-channel namespace")
+  })
+
+  it("gives a client abandoned by a failed start no axes to authorize", async () => {
+    const service = new FakeAblyService()
+    service.setConnection("disconnected")
+    const { createRealtime, created } = realtimeFactory(service)
+    const requestToken = approvingTokenEndpoint()
+    const adapter = createAblyAxisInvalidations({
+      namespace,
+      createRealtime,
+      requestToken,
+      onInitializationError: () => undefined,
+    })
+    const steady = subscription([axisA])
+    const fragile = subscription([axisA])
+    fragile.onStatusChange.mockImplementationOnce(() => {
+      throw new Error("status callback failed")
+    })
+
+    adapter.subscribe(steady)
+    adapter.subscribe(fragile)
+    await settle()
+    service.setConnection("connected")
+    adapter.retry()
+    await settle()
+
+    expect(createRealtime).toHaveBeenCalledTimes(2)
+    expect(steady.onStatusChange).toHaveBeenLastCalledWith("active")
+    expect(fragile.onStatusChange).toHaveBeenLastCalledWith("active")
+
+    const abandoned = created[0]?.authCallback
+    if (!abandoned) throw new Error("createRealtime was not called")
+    const renewal = vi.fn()
+    abandoned(
+      { capability: ablySubscribeCapability([await channelFor(axisA)]) },
+      renewal
+    )
+
+    expect(renewal).toHaveBeenCalledExactlyOnceWith(
+      "No observed axes to authorize",
+      null
+    )
+    expect(requestToken).toHaveBeenCalledOnce()
+  })
+
+  it("reports a refused token as unavailable and reauthorizes on retry", async () => {
+    const service = new FakeAblyService()
+    const { createRealtime } = realtimeFactory(service)
+    const approve = approvingTokenEndpoint()
+    const requestToken = vi
+      .fn<(axes: readonly AxisId[]) => Promise<AblyTokenRequest>>()
+      .mockRejectedValueOnce(new Error("Forbidden"))
+      .mockImplementation(approve)
+    const onLifecycleError = vi.fn()
+    const adapter = createAblyAxisInvalidations({
+      namespace,
+      createRealtime,
+      requestToken,
+      onLifecycleError,
+    })
+    const observer = subscription([axisA])
+
+    adapter.subscribe(observer)
+    await settle()
+    expect(observer.onStatusChange).toHaveBeenLastCalledWith("unavailable")
+    expect(onLifecycleError).toHaveBeenCalledWith(new Error("Forbidden"))
+
+    adapter.retry()
+    await settle()
+
+    expect(requestToken).toHaveBeenCalledTimes(2)
+    expect(observer.onStatusChange).toHaveBeenLastCalledWith("active")
+    expect(createRealtime).toHaveBeenCalledOnce()
   })
 })
