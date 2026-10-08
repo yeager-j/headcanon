@@ -22,6 +22,13 @@ import type { AnyProtocolDefinition } from "../core/protocol"
  */
 export interface QueuePersistence {
   /**
+   * Names the stored queue. Roots of one factory whose stores have the same
+   * key share one delivery queue: a root that mounts while an earlier root's
+   * queue is still being delivered continues that queue instead of reading
+   * the store again.
+   */
+  readonly key: string
+  /**
    * Returns the stored queue, or `undefined` when nothing is stored. Throw
    * only when the store cannot be read: that root then never writes to the
    * store, so a later mount can still restore what it holds. Return a value
@@ -59,6 +66,7 @@ export interface QueuePersistence {
  */
 export function sessionStoragePersistence(key: string): QueuePersistence {
   return {
+    key,
     load() {
       const stored = globalThis.sessionStorage.getItem(key)
       if (stored === null) return undefined
@@ -82,6 +90,8 @@ export function sessionStoragePersistence(key: string): QueuePersistence {
 
 /** The ledger's view of persistence: it never throws. */
 export interface QueueStorage<Invocation> {
+  /** The persistence key; `undefined` for a queue that lives only in memory. */
+  readonly key: string | undefined
   /** The stored envelopes the root can deliver, in mutation order. */
   load(): readonly MutationEnvelope<Invocation>[]
   save(envelopes: readonly MutationEnvelope<Invocation>[]): void
@@ -97,6 +107,7 @@ const NO_IDS: ReadonlySet<string> = new Set()
 
 /** Storage for a root without `persistence`: the queue lives in memory. */
 const MEMORY_QUEUE_STORAGE: QueueStorage<never> = {
+  key: undefined,
   load: () => [],
   save: () => undefined,
   restorableIds: () => NO_IDS,
@@ -118,6 +129,7 @@ export function createQueueStorage<Invocation>(
   let restorable = NO_IDS
 
   return {
+    key: persistence.key,
     load() {
       let stored: unknown
       try {

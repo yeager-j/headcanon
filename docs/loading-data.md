@@ -87,7 +87,7 @@ With Cache Components enabled, request-time reads belong beneath a Suspense boun
 
 Inside the editor, pass the latest prop to `useNote({ canon })`. Do not preserve the initial canon in `useState`: that would prevent later server renders from reaching the root. Render the root's `value` to include pending predictions.
 
-Key the editor or shared provider by the note's identity, not its revision. A new revision should update the existing root; remounting it discards its pending queue and settles unfinished receipts as unmounted.
+Key the editor or shared provider by the note's identity, not its revision. A new revision should update the existing root; remounting it settles unfinished receipts as unmounted (see [Choose the root's lifetime](react.md#choose-the-roots-lifetime)).
 
 ## Keep values and revisions consistent
 
