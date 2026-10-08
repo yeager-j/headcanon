@@ -15,6 +15,11 @@ export {
   type RevisionVector,
 } from "./core/revisions"
 export {
+  defineAxis,
+  type AxisFamily,
+  type AxisKeyError,
+} from "./core/axis-family"
+export {
   defineMutation,
   defineProtocol,
   type AnyMutationDefinition,
