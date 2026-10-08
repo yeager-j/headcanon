@@ -147,6 +147,42 @@ describe("prepareCanonicalInvocation", () => {
     expect(digest).not.toHaveBeenCalled()
   })
 
+  it.each(["object", "array"] as const)(
+    "bounds expanded shared %s graphs before hashing",
+    async (kind) => {
+      let graph: unknown = { value: true }
+      for (let depth = 0; depth < 14; depth += 1) {
+        graph =
+          kind === "object" ? { left: graph, right: graph } : [graph, graph]
+      }
+      const digest = vi.spyOn(globalThis.crypto.subtle, "digest")
+      const entries = vi.spyOn(Object, "entries")
+
+      const result = await prepareCanonicalInvocation(
+        "test.protocol.v1",
+        invocation(graph)
+      )
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "invalid-json-value", reason: "resource-limit" },
+      })
+      expect(entries.mock.calls.length).toBeLessThanOrEqual(10_000)
+      expect(digest).not.toHaveBeenCalled()
+    }
+  )
+
+  it("preserves small aliases and their receipt identity", async () => {
+    const shared = { values: ["safe", 1] }
+    const aliased = await canonical({ left: shared, right: shared })
+    const duplicated = await canonical({
+      left: { values: ["safe", 1] },
+      right: { values: ["safe", 1] },
+    })
+
+    expect(aliased).toEqual(duplicated)
+  })
+
   it("rejects array subclasses as class instances before hashing", async () => {
     class SpecialArray extends Array<string> {}
 
@@ -261,6 +297,54 @@ describe("canonicalJson", () => {
     expect(canonicalJson(JSON.parse(first.value))).toEqual({
       ok: true,
       value: first.value,
+    })
+  })
+
+  it("counts every expanded string occurrence toward output size", () => {
+    let graph: unknown = "x".repeat(1024)
+    for (let depth = 0; depth < 10; depth += 1) graph = [graph, graph]
+
+    expect(canonicalJson(graph)).toMatchObject({
+      ok: false,
+      error: { reason: "resource-limit" },
+    })
+  })
+
+  it("counts escaped strings and keys toward output size", () => {
+    const escaped = "\n".repeat(524_288)
+    expect(canonicalJson(escaped)).toMatchObject({
+      ok: false,
+      error: { reason: "resource-limit" },
+    })
+    expect(canonicalJson({ [escaped]: null })).toMatchObject({
+      ok: false,
+      error: { reason: "resource-limit" },
+    })
+  })
+
+  it("accepts the output size limit and rejects one extra character", () => {
+    expect(canonicalJson("x".repeat(1_048_574)).ok).toBe(true)
+    expect(canonicalJson("x".repeat(1_048_575))).toMatchObject({
+      ok: false,
+      error: { reason: "resource-limit", path: [] },
+    })
+  })
+
+  it("accepts the value count limit and rejects one extra value", () => {
+    expect(canonicalJson(new Array(9_999).fill(null)).ok).toBe(true)
+    expect(canonicalJson(new Array(10_000).fill(null))).toMatchObject({
+      ok: false,
+      error: { reason: "resource-limit", path: [9_999] },
+    })
+  })
+
+  it("bounds nesting before recursive copying or serialization", () => {
+    let graph: unknown = null
+    for (let depth = 0; depth < 100; depth += 1) graph = { child: graph }
+    expect(canonicalJson(graph).ok).toBe(true)
+    expect(canonicalJson({ child: graph })).toMatchObject({
+      ok: false,
+      error: { reason: "resource-limit", path: new Array(101).fill("child") },
     })
   })
 

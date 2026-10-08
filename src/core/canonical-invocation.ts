@@ -42,6 +42,7 @@ export type CanonicalInvocationError = {
     | "bigint"
     | "non-finite-number"
     | "cyclic"
+    | "resource-limit"
     | "class-instance"
     | "invalid-unicode"
     | "symbol-key"
@@ -73,19 +74,63 @@ function invalid(
   return { code: "invalid-json-value", reason, path }
 }
 
+// Bound the expanded tree, not distinct identities: aliases are valid JSON
+// data, but every occurrence contributes to copying and canonical output.
+const MAX_CANONICAL_VALUES = 10_000
+const MAX_CANONICAL_DEPTH = 100
+const MAX_CANONICAL_CHARACTERS = 1_048_576
+
+interface CanonicalBudget {
+  remainingValues: number
+  remainingCharacters: number
+}
+
+function accountCharacters(
+  budget: CanonicalBudget,
+  count: number,
+  path: readonly (string | number)[]
+): CanonicalInvocationError | undefined {
+  budget.remainingCharacters -= count
+  return budget.remainingCharacters < 0
+    ? invalid("resource-limit", path)
+    : undefined
+}
+
+function accountString(
+  budget: CanonicalBudget,
+  value: string,
+  path: readonly (string | number)[]
+): CanonicalInvocationError | undefined {
+  // Check before JSON.stringify allocates the escaped representation.
+  if (value.length > budget.remainingCharacters) {
+    return invalid("resource-limit", path)
+  }
+  return accountCharacters(budget, JSON.stringify(value).length, path)
+}
+
 function validateJsonValue(
   value: unknown,
   path: readonly (string | number)[],
-  ancestors: WeakSet<object>
+  ancestors: WeakSet<object>,
+  budget: CanonicalBudget
 ): CanonicalInvocationError | undefined {
-  if (value === null || typeof value === "boolean") return undefined
+  budget.remainingValues -= 1
+  if (budget.remainingValues < 0 || path.length > MAX_CANONICAL_DEPTH) {
+    return invalid("resource-limit", path)
+  }
+
+  if (value === null || typeof value === "boolean") {
+    return accountCharacters(budget, String(value).length, path)
+  }
 
   if (typeof value === "string") {
+    const sizeError = accountString(budget, value, path)
+    if (sizeError) return sizeError
     return hasValidUnicode(value) ? undefined : invalid("invalid-unicode", path)
   }
   if (typeof value === "number") {
     return Number.isFinite(value)
-      ? undefined
+      ? accountCharacters(budget, JSON.stringify(value).length, path)
       : invalid("non-finite-number", path)
   }
   if (typeof value === "undefined") return invalid("undefined", path)
@@ -99,6 +144,9 @@ function validateJsonValue(
   if (isArray && Object.getPrototypeOf(value) !== Array.prototype) {
     return invalid("class-instance", path)
   }
+
+  const containerError = accountCharacters(budget, 2, path)
+  if (containerError) return containerError
 
   ancestors.add(value)
   try {
@@ -118,6 +166,13 @@ function validateJsonValue(
         }
       }
 
+      const separatorError = accountCharacters(
+        budget,
+        Math.max(0, value.length - 1),
+        path
+      )
+      if (separatorError) return separatorError
+
       for (let index = 0; index < value.length; index += 1) {
         const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
         if (!descriptor) return invalid("undefined", [...path, index])
@@ -128,7 +183,8 @@ function validateJsonValue(
         const elementError = validateJsonValue(
           descriptor.value,
           [...path, index],
-          ancestors
+          ancestors,
+          budget
         )
         if (elementError) return elementError
       }
@@ -146,7 +202,17 @@ function validateJsonValue(
       )
     }
 
-    for (const [key, propertyValue] of Object.entries(value)) {
+    const entries = Object.entries(value)
+    const separatorError = accountCharacters(
+      budget,
+      entries.length + Math.max(0, entries.length - 1),
+      path
+    )
+    if (separatorError) return separatorError
+
+    for (const [key, propertyValue] of entries) {
+      const keySizeError = accountString(budget, key, [...path, key])
+      if (keySizeError) return keySizeError
       if (!hasValidUnicode(key)) {
         return invalid("invalid-unicode", [...path, key])
       }
@@ -154,7 +220,8 @@ function validateJsonValue(
       const propertyError = validateJsonValue(
         propertyValue,
         [...path, key],
-        ancestors
+        ancestors,
+        budget
       )
       if (propertyError) return propertyError
     }
@@ -205,7 +272,10 @@ function serializeCanonically(
   { readonly json: string; readonly isolated: unknown },
   CanonicalInvocationError
 > {
-  const validationError = validateJsonValue(value, [], new WeakSet())
+  const validationError = validateJsonValue(value, [], new WeakSet(), {
+    remainingValues: MAX_CANONICAL_VALUES,
+    remainingCharacters: MAX_CANONICAL_CHARACTERS,
+  })
   if (validationError) return err(validationError)
 
   const isolated = isolateFromInheritedToJson(value)
@@ -220,6 +290,8 @@ function serializeCanonically(
  * Serializes one value as RFC 8785 canonical JSON after the same validation
  * receipt identity uses, so two values compare equal exactly when their JSON
  * data is equal.
+ * Values may share references. Their expanded JSON is limited to 10,000 values,
+ * 100 nested property/index steps, and 1,048,576 UTF-16 code units.
  * @param value Candidate JSON value.
  * @returns Canonical JSON, or the first unsupported value.
  */
@@ -237,6 +309,9 @@ export function canonicalJson(
  * Compare `canonical.bytes`, not `canonical.sha256`, to prove two deliveries
  * are one request (see {@link CanonicalInvocation}). It has no side effects, so
  * it is safe to call before claiming a receipt.
+ *
+ * The complete identity envelope uses the same expanded-tree limits as
+ * {@link canonicalJson}; exceeding a limit returns `resource-limit`.
  *
  * @param protocolId Stable protocol identifier included in the identity material.
  * @param invocation Parsed invocation whose name and arguments form the request intent.

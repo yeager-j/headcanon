@@ -542,6 +542,77 @@ describe("Next mutation action", () => {
     expect(authority.receiptCount()).toBe(0)
   })
 
+  it.each(["passthrough", "stripping"] as const)(
+    "rejects a shared graph before actor or command work with a %s schema",
+    async (mode) => {
+      const authority = createAuthority()
+      const lifecycle: string[] = []
+      const actor = vi.fn(() => "actor")
+      const graphSchema: StandardSchemaV1<unknown, IncrementArgs> = {
+        "~standard": {
+          version: 1,
+          vendor: "headcanon-shared-graph-test",
+          validate(value) {
+            const args = value as IncrementArgs
+            return {
+              value: mode === "passthrough" ? args : { amount: args.amount },
+            }
+          },
+        },
+      }
+      const graphMutation = defineMutation({
+        name: "next.increment",
+        args: graphSchema,
+        refusal: rejectionSchema,
+        predict: increment.predict,
+      })
+      const graphProtocol = defineProtocol({
+        id: protocol.id,
+        mutations: [graphMutation],
+      })
+      const binder = createMutationBinder({ actor, authority })
+      const execute = createNextMutationAction({
+        protocol: graphProtocol,
+        binder,
+        commands: [binder.bind(graphMutation, command({ lifecycle }))],
+        invalidations: { publish: vi.fn(), onFailure: vi.fn() },
+      })
+      let graph: unknown = { value: true }
+      for (let depth = 0; depth < 14; depth += 1) {
+        graph = { left: graph, right: graph }
+      }
+      const entries = vi.spyOn(Object, "entries")
+      const result = await execute({
+        ...envelope,
+        invocation: { name: graphMutation.name, args: { amount: 1, graph } },
+      })
+      const entryCount = entries.mock.calls.length
+      entries.mockRestore()
+
+      expect(entryCount).toBeLessThanOrEqual(10_000)
+      expect(result).toMatchObject(
+        mode === "passthrough"
+          ? {
+              ok: false,
+              error: {
+                code: "canonical-invocation",
+                error: { reason: "resource-limit" },
+              },
+            }
+          : { ok: false, error: { code: "invalid-arguments" } }
+      )
+      expect(actor).not.toHaveBeenCalled()
+      expect(lifecycle).toEqual([])
+      expect(authority.receiptCount()).toBe(0)
+      expect(authority.read()).toBe(0)
+
+      const control = await execute(envelope)
+      expect(control).toMatchObject({ ok: true, value: { kind: "accepted" } })
+      expect(actor).toHaveBeenCalledTimes(1)
+      expect(authority.read()).toBe(1)
+    }
+  )
+
   it("records transaction-time denial privately and recovers it on redelivery", async () => {
     const authority = createAuthority()
     let transactionAdmissions = 0

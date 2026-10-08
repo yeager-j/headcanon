@@ -172,7 +172,7 @@ The generated action returns denials as `ok({ kind: "denied" })`, without a reas
 
 Give a mutation a `refusal` schema when its command can return `refuseMutation(error)`. If the command has no public refusal cases, omit `refusal`: the mutation's refusal type is then `never`, and a stored refusal for it throws instead of replaying. Refusal schemas must validate synchronously, and their values must be JSON serializable. Keep secrets and internal error details out of public refusals.
 
-The action validates arguments before deriving the actor or running commands. It does not run the client predictor on the server, so repeat all business rules needed for a valid write. Arguments must already be in their schema's parsed form; the action rejects parsing that changes them. Normalize inputs before creating the invocation.
+The action validates arguments before deriving the actor or running commands. It does not run the client predictor on the server, so repeat all business rules needed for a valid write. Arguments must already be in their schema's parsed form; the action rejects parsing that changes them. Normalize inputs before creating the invocation. Canonicalization accepts shared object references only while their expanded JSON stays within its limits: 10,000 values (including containers), 100 nested property/index steps, and 1,048,576 UTF-16 code units of JSON. These limits also include the protocol and invocation wrapper when deriving receipt identity. Exceeding a limit returns an `invalid-json-value` error with reason `resource-limit`, wrapped as `canonical-invocation` for parsed arguments; raw arguments that fail the parsed-form comparison return `invalid-arguments`.
 
 ## Export the Server Action
 
