@@ -71,11 +71,12 @@ interface KeyCodec<Key> {
  * `parse` throw otherwise. Pass one schema for a single key, or an object of
  * schemas for named segments, such as a tenant and a record. Give each family
  * a unique name: two families with one name share their axes.
- * @param family A non-empty name that does not contain `/`.
+ * @param family A non-empty name that contains no `/` and no lone surrogate.
  * @param key The key schema, or an object of segment schemas in axis order.
  * @returns The family, which builds axes with `of` and reads them with `parse`.
- * @throws Error when the family name is empty or contains `/`, or the object
- * of segment schemas is empty or has a symbol-named segment.
+ * @throws Error when the family name is empty or contains `/` or a lone
+ * surrogate, or the object of segment schemas is empty or has a symbol-named
+ * segment.
  * @example
  * const noteAxis = defineAxis("notes", z.uuid())
  * noteAxis.of(noteId) // "notes/<noteId>"
@@ -99,9 +100,9 @@ export function defineAxis(
   family: string,
   key: KeySegmentSchema | KeyShape
 ): AxisFamily<unknown> {
-  if (family.length === 0 || family.includes(AXIS_SEPARATOR)) {
+  if (!isAxisAddress(family) || family.includes(AXIS_SEPARATOR)) {
     throw new Error(
-      `An axis family name must be non-empty and must not contain "${AXIS_SEPARATOR}"`
+      `An axis family name must be non-empty and must not contain "${AXIS_SEPARATOR}" or a lone surrogate`
     )
   }
 

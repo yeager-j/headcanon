@@ -116,11 +116,14 @@ describe("defineAxis", () => {
     }
   )
 
-  it.each(["", "a/b", "/"])("rejects the family name %j", (family) => {
-    expect(() => defineAxis(family, uuid)).toThrow(
-      "An axis family name must be non-empty"
-    )
-  })
+  it.each(["", "a/b", "/", "\uD800", "a\uDC00"])(
+    "rejects the family name %j",
+    (family) => {
+      expect(() => defineAxis(family, uuid)).toThrow(
+        "An axis family name must be non-empty"
+      )
+    }
+  )
 
   it("rejects a schema that changes the key", () => {
     const paddedAxis = defineAxis("padded", trimming)
