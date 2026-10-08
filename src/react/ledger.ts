@@ -240,8 +240,8 @@ interface EntryLifetime<Error> {
   /** Automatic redeliveries consumed after {@link RetryableDeliveryError}s. */
   retryAttempts: number
   /**
-   * An attempt became uncertain, so a commit may exist. Retry re-queues the
-   * envelope but never clears this.
+   * An attempt threw or outlived its wait, so a commit may exist. Retry
+   * re-queues the envelope but never clears this.
    */
   mayHaveCommitted: boolean
   /**
@@ -432,8 +432,13 @@ export function createLedgerStore<Invocation, Error>(
           : undefined
       if (retryDelay === undefined) {
         // An ordinary throw (the commit may exist) or a spent redelivery
-        // budget: keep the envelope as honestly uncertain.
-        markUncertain(mutationId, lifetime)
+        // budget: keep the envelope as honestly uncertain. Only the ordinary
+        // throw leaves the outcome unknown; every retryable answer confirmed
+        // that no receipt exists.
+        advance(mutationId, { kind: "uncertain" })
+        if (!(error instanceof RetryableDeliveryError)) {
+          lifetime.mayHaveCommitted = true
+        }
       } else {
         // A known-clean miss: redeliver the same envelope after a bounded
         // backoff. The entry stays at the queue head, so order holds.
@@ -448,20 +453,14 @@ export function createLedgerStore<Invocation, Error>(
     hold.resolve()
   }
 
-  function markUncertain(
-    mutationId: string,
-    lifetime: EntryLifetime<Error>
-  ): boolean {
-    if (!advance(mutationId, { kind: "uncertain" })) return false
-    lifetime.mayHaveCommitted = true
-    return true
-  }
-
   function expireAttempt(mutationId: string, attempt: number): void {
     const lifetime = lifetimes.get(mutationId)
     if (!lifetime || lifetime.attempt !== attempt) return
     lifetime.waitTimer = null
-    if (markUncertain(mutationId, lifetime)) lifetime.hold?.resolve()
+    if (advance(mutationId, { kind: "uncertain" })) {
+      lifetime.mayHaveCommitted = true
+      lifetime.hold?.resolve()
+    }
   }
 
   /**

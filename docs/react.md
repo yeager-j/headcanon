@@ -315,11 +315,11 @@ When canon changes, Headcanon reapplies pending predictions in invocation order.
 
 The refused prediction is removed from the displayed value and recorded in `conflicts`. What happens next depends on delivery:
 
-| Mutation state                                                          | What a replay refusal does                                                                                          |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Never sent, or waiting for a retry after a confirmed no-receipt outcome | Withdraws the mutation and settles its receipt with `"replay-refused"`.                                             |
-| Sending, uncertain, or redelivering after `retryDelivery()`             | Removes the predicted effect but keeps waiting for the server outcome, since the write may already exist.           |
-| Accepted but not yet covered                                            | Removes the predicted effect but keeps waiting for canon to cover the accepted stamp. The acceptance is not undone. |
+| Mutation state                                                               | What a replay refusal does                                                                                          |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Queued or awaiting automatic retry, and no attempt may have written          | Withdraws the mutation and settles its receipt with `"replay-refused"`.                                             |
+| Sending, uncertain, or queued again after an attempt with an unknown outcome | Removes the predicted effect but keeps waiting for the server outcome, since the write may already exist.           |
+| Accepted but not yet covered                                                 | Removes the predicted effect but keeps waiting for canon to cover the accepted stamp. The acceptance is not undone. |
 
 Use `onConflict` for one-time feedback. `conflicts` retains the latest 50 entries, oldest first, for display or diagnostics; it is not a complete history of replay conflicts. Server refusals (`kind: "domain"`) do not enter this list.
 
