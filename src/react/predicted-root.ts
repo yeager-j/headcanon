@@ -593,15 +593,16 @@ export function createPredictedRootHook<
       }
     }, [observerToken, store])
 
-    // A `mutate` held past the root's unmount, such as a debounced save, no
-    // longer restores: it must not make an unmounted root observe again.
-    const unmounted = useRef(false)
+    // Set from the effect's cleanup until its next setup: unmount, or React
+    // Activity hiding the root. A `mutate` held past it, such as a debounced
+    // save, no longer restores: it must not make the root observe again.
+    const observationDeactivated = useRef(false)
     useEffect(() => {
-      unmounted.current = false
+      observationDeactivated.current = false
       restoreQueue()
       store.activate(observerToken)
       return () => {
-        unmounted.current = true
+        observationDeactivated.current = true
         store.deactivate(observerToken)
       }
     }, [observerToken, restoreQueue, store])
@@ -626,7 +627,7 @@ export function createPredictedRootHook<
         invocation: Invocation,
         stageOverrides?: MutationStageListeners<Error>
       ): Result<MutationReceipt<Error>, Error> => {
-        if (!unmounted.current) restoreQueue()
+        if (!observationDeactivated.current) restoreQueue()
         // Until a render includes the restored entries, every call predicts
         // over them and this render's entries, so calls in one event still
         // check against one value.
@@ -652,7 +653,9 @@ export function createPredictedRootHook<
           return result
         }
 
-        const queue = unmounted.current ? continuedLedger(store) : store
+        const queue = observationDeactivated.current
+          ? continuedLedger(store)
+          : store
         const receipt = queue.enqueue(envelope)
         observeStages(receipt, stages, false)
         const result = ok(receipt)

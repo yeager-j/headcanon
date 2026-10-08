@@ -909,11 +909,13 @@ export function createLedgerStore<Invocation, Error>(
      * Makes the root with `token` the observer, the first time it calls.
      * The first observer puts the stored queue of an earlier page at the
      * front of the queue; storage is not written before then. A root that
-     * takes over a persisted queue from an unmounted one receives a receipt
-     * for every mutation already in it. A replay refusal never withdraws a
-     * restored mutation: an earlier page may have sent it.
-     * @returns The receipts of mutations no `mutate` call of this root
-     *   made, in mutation order; empty after the first call.
+     * takes over a persisted queue from an unmounted one receives the
+     * receipts no one holds; a receipt from a `mutate` that ran after the
+     * earlier root unmounted stays with its caller. A replay refusal never
+     * withdraws a restored mutation: an earlier page may have sent it.
+     * @returns The receipts this root now holds for mutations no `mutate`
+     *   call of this root made, in mutation order; empty after the first
+     *   call.
      */
     restore(token: object): MutationReceipt<Error>[] {
       if (!observe(token)) return []
