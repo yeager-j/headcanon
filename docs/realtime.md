@@ -190,7 +190,7 @@ export async function POST(request: Request) {
 
 The axes passed to `createAblyAxisTokenRequest` come from `noteAxis()` and rows the server read, never from the browser's strings. The helper derives each axis's channel and grants `subscribe` on exactly those channels. The axis count limit is an application choice in this example, not a Headcanon adapter limit.
 
-Extend the policy when roots observe collection or workspace axes. Apply your tenant and viewer rules to every axis, and use trusted server identity for `clientId`. Never pass the browser's axes through unchecked or grant a wildcard merely to make attachment succeed. Issued capabilities must also be permitted by your Ably API key. See [Ably capabilities](https://ably.com/docs/auth/capabilities).
+Extend the policy when roots observe collection or workspace axes. Apply your tenant and viewer rules to every axis. When you set `clientId`, take it from trusted server identity; a viewer without an account gets none (see [Serve viewers without an account](#serve-viewers-without-an-account)). Never pass the browser's axes through unchecked or grant a wildcard merely to make attachment succeed. Issued capabilities must also be permitted by your Ably API key. See [Ably capabilities](https://ably.com/docs/auth/capabilities).
 
 The helper returns a signed native Ably `TokenRequest`, which the browser's SDK exchanges for a token. Ably recommends its own tokens over JWTs when capability lists are large, because a JWT must fit in an HTTP header (about 8 KB); see [Ably token authentication](https://ably.com/docs/auth/token).
 
@@ -244,7 +244,7 @@ Share this module across roots. The adapter combines their axes, requests one de
 
 While the adapter is starting, status is `"reauthorizing"`; a failed start becomes `"unavailable"`. `axisInvalidations.retry()` runs a failed start again, for example after the namespace loader resolved `null` or the client could not be created. Otherwise it retries authorization and attachment.
 
-This module assumes one signed-in identity for the page's lifetime. Use a full page navigation when changing accounts, or implement a session-scoped adapter that closes the old Ably client and creates a new one. Unsubscribing the last root releases its channels and listeners; it does not close the SDK connection for you.
+This module assumes one viewer identity for the page's lifetime: one signed-in user, or one viewer without an account. Use a full page navigation when the viewer signs in, signs out, or changes accounts, or implement a session-scoped adapter that closes the old Ably client and creates a new one. Unsubscribing the last root releases its channels and listeners; it does not close the SDK connection for you.
 
 ## 5. Connect predicted and observed roots
 
@@ -283,11 +283,130 @@ Each root subscribes to the axes in its current `canon.revisions`. Changes to th
 
 Keep axis names, revisions, and namespace consistent across writers, token policy, and loaders. Realtime cannot correct a loader that returns an old value with a newer revision.
 
+## Serve viewers without an account
+
+Some resources can be read by anyone with the link, such as a shared note. A reader with no account can still get live invalidations. The browser adapter and the roots stay the same. Only the token endpoint changes.
+
+This example extends the endpoint above. It assumes the notes table has a boolean `readableByLink` column, and a `getActor()` helper that returns `{ userId }` for a signed-in user and `null` for anyone else, without a redirect:
+
+```ts
+// app/api/realtime/token/route.ts — with notes readable by link
+import { getActor } from "@/lib/auth"
+import { and, eq, inArray, or } from "drizzle-orm"
+
+// requestSchema and noteIdOf as above.
+
+export async function POST(request: Request) {
+  const actor = await getActor()
+  const body = await request.json().catch(() => null)
+  const parsed = requestSchema.safeParse(body)
+  if (!parsed.success) {
+    return new Response("Invalid axis request", { status: 400 })
+  }
+
+  const noteIds = parsed.data.axes.map(noteIdOf)
+  if (noteIds.some((id) => id === null)) {
+    return new Response("Forbidden", { status: 403 })
+  }
+
+  const readableByViewer = actor
+    ? or(eq(notes.readableByLink, true), eq(notes.ownerId, actor.userId))
+    : eq(notes.readableByLink, true)
+  const requestedIds = [...new Set(noteIds as string[])]
+  const readableNotes = await db
+    .select({ id: notes.id })
+    .from(notes)
+    .where(and(inArray(notes.id, requestedIds), readableByViewer))
+  if (readableNotes.length !== requestedIds.length) {
+    return new Response("Forbidden", { status: 403 })
+  }
+
+  const tokenRequest = await createAblyAxisTokenRequest({
+    rest: ablyRest,
+    namespace: realtimeNamespace,
+    axes: readableNotes.map(({ id }) => noteAxis(id)),
+    clientId: actor?.userId,
+    ttlMs: 5 * 60 * 1000,
+  })
+
+  return Response.json(tokenRequest, {
+    headers: { "Cache-Control": "no-store" },
+  })
+}
+```
+
+Follow these rules for a viewer without an account:
+
+- **Check the read policy, not membership.** There is no user to check, so the endpoint checks each axis against the resource's own rule, here `readableByLink`. It still refuses the whole request if one axis fails.
+- **Omit `clientId`, or keep one ID for the whole connection.** Ably fixes a connection's client ID when it connects; see [Ably identified clients](https://ably.com/docs/auth/identified-clients). The adapter requests a new token on its first authorization, each time the observed axes change, and each time Ably renews a token. A token with a different client ID fails. So do not make a random ID for each request. If you need an ID for an anonymous viewer, make it once, store it (for example, in a cookie), and send the same one every time.
+- **Replace the connection on sign-in and sign-out.** The viewer's client ID changes, so the old connection cannot renew. Use a full page navigation, or a session-scoped adapter that closes the old Ably client, as in [Create a shared browser adapter](#4-create-a-shared-browser-adapter).
+- **Revoke by refusing the next token.** When a note stops being readable by link, the endpoint refuses its next token request. A token already issued stays valid until it expires, so keep `ttlMs` short. The loader must also check access on every read: an invalidation carries no data, and the refresh it causes returns only what the loader allows.
+
+A viewer without an account cannot mutate, so pair the endpoint with an observed root:
+
+```tsx
+// app/shared/[id]/shared-note.tsx
+"use client"
+
+import type { NoteState } from "@/lib/notes/protocol"
+import { axisInvalidations } from "@/lib/realtime/client"
+import type { Canon } from "headcanon"
+import { createNextObservedRoot } from "headcanon/next/client"
+
+const useSharedNote = createNextObservedRoot({
+  invalidations: axisInvalidations,
+})
+
+export function SharedNote({ canon }: { canon: Canon<NoteState> }) {
+  const { value, status, retryRefresh } = useSharedNote({ canon })
+
+  return (
+    <article>
+      <h1>{value.title}</h1>
+      {status.freshness === "stalled" && (
+        <button type="button" onClick={retryRefresh}>
+          Refresh note
+        </button>
+      )}
+    </article>
+  )
+}
+```
+
+The page's server component loads the note only while it is readable by link or owned by the viewer, and passes its canon to `SharedNote`. When the note stops being readable, the next refresh reaches the loader, which can return `notFound()`.
+
 ## Recover after missed messages
 
 The adapter requests a gap refresh when a subscription first becomes active, even if another root already uses its channels. It also reports gaps after connection recovery or channel events that indicate lost message continuity. Connection and channel recovery can each request a refresh during the same outage.
 
-A gap means messages may have been missed without a known revision target. The root needs a successful refresh that started after the gap was reported; a failed refresh does not close it. Receiving an invalidation alone does not close the gap either.
+A gap means messages may have been missed without a known revision target. The root needs a successful refresh that started after the gap was reported; a failed refresh does not close it. Receiving an invalidation alone does not close the gap either. With the router carrier, a failed refresh does not stay open in the browser: Next.js reloads the page. See [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page).
+
+### Refresh when the viewer returns
+
+While the transport is `"active"`, nothing refreshes a root when the user comes back to the tab. The root can still be behind: a server publication can fail while the client stays connected, and a root with no push transport hears nothing at all. To refresh on each return, wrap the adapter. In `lib/realtime/client.ts`, import `withVisibilityRefresh` from `headcanon`, rename the `createAblyAxisInvalidations` result to `pushInvalidations`, then export:
+
+```ts
+export const axisInvalidations = withVisibilityRefresh(pushInvalidations)
+```
+
+Each time the document becomes visible, the wrapper reports a gap to every subscription, whatever the transport's status. Each root then runs one refresh through its carrier. Statuses pass through unchanged, and `retry()` still reaches the Ably adapter.
+
+While the browser reports it is offline (`navigator.onLine === false`), the wrapper does not report the return. It reports it when the browser's `online` event fires, if the page is still visible. This avoids a refresh that is likely to fail; see [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page).
+
+For a root with no push transport, wrap the no-realtime adapter and pass it as the root's `invalidations`:
+
+```ts
+import {
+  createNoRealtimeInvalidationAdapter,
+  withVisibilityRefresh,
+} from "headcanon"
+
+export const soloInvalidations = withVisibilityRefresh(
+  createNoRealtimeInvalidationAdapter()
+)
+```
+
+The wrapper composes with `withPollingFallback` in either order. When both report the same return, the gaps arrive together and the root runs one refresh.
 
 The adapter reauthorizes when the observed channel set changes or authorization needs recovery. A recovered connection can reuse its existing token. The SDK separately handles token expiry through the authentication callback. Removing subscriptions releases unused channels without waiting for authorization to finish; removing all subscriptions does not request an empty capability token.
 
@@ -303,11 +422,13 @@ export const axisInvalidations = withPollingFallback(pushInvalidations, {
 })
 ```
 
-The wrapper keeps `retry()`, so `axisInvalidations.retry()` still reaches the Ably adapter. To let some roots poll and others stay push-only, export both adapters and choose one per root.
+The wrapper keeps `retry()`, so `axisInvalidations.retry()` still reaches the Ably adapter. To let some roots poll and others stay push-only, export both adapters and choose one per root. To also refresh when the viewer returns while push is active, wrap the result with `withVisibilityRefresh` (see [Refresh when the viewer returns](#refresh-when-the-viewer-returns)).
 
 While the underlying adapter reports `"disabled"`, `"reauthorizing"`, or `"unavailable"`, the wrapper reports `"polling"` and signals a subscription gap on each interval. The root refreshes through its existing router or snapshot adapter. Polling stops when the transport reports `"active"`. Because Ably reports `"reauthorizing"` while it starts, status also shows `"polling"` on every page load until the channels attach; this is expected.
 
 Polling pauses while the document is hidden by default. When it becomes visible again during fallback, the wrapper reports a gap and restarts the interval. Set `pauseWhenHidden: false` to keep polling in hidden documents. The interval must be a finite positive number, and each subscription owns its polling timer.
+
+Polling also stops requesting refreshes while the browser reports it is offline (`navigator.onLine === false`). With the router carrier, a refresh that fails reloads the page and loses the root's queue and any unsaved drafts; see [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page). The interval keeps running, but it skips each tick while offline. When the browser's `online` event fires during fallback, the wrapper reports a gap at once. `navigator.onLine` is only a hint: a browser can report online without a working connection.
 
 Fallback does not retry Ably authorization, attachment, or a failed start by itself. It supplies another route to fresh data while transport recovery happens separately, through `retry()`.
 
@@ -356,7 +477,7 @@ An accepted database write stays accepted if publication fails. Generated action
 
 The publisher has no durable retry queue. Connect the failure reporter to your application's diagnostics, and use a durable publication mechanism if missing a notification is unacceptable.
 
-Polling fallback only runs while the client transport is degraded. It does not repair a server publication failure while the client remains `"active"`. That client may stay unaware until another invalidation, a later gap refresh, or an independent refresh occurs.
+Polling fallback only runs while the client transport is degraded. It does not repair a server publication failure while the client remains `"active"`. That client may stay unaware until another invalidation, a later gap refresh, or an independent refresh occurs. `withVisibilityRefresh` limits the delay: the client refreshes the next time the viewer returns to the tab. See [Refresh when the viewer returns](#refresh-when-the-viewer-returns).
 
 Background writes must also advance revisions and expire the relevant caches before notifying readers. See [Loading data](loading-data.md#refresh-after-writes) for the external-commit helpers and their Next.js server context requirements.
 

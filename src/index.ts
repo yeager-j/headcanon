@@ -56,6 +56,7 @@ export {
   createNoRealtimeInvalidationAdapter,
   isDegradedInvalidationStatus,
   withPollingFallback,
+  withVisibilityRefresh,
   type AxisInvalidationValidationError,
   type AxisInvalidation,
   type InvalidationAdapter,

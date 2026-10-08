@@ -28,7 +28,7 @@ export const NoteRoot = createPredictedRootContext(useNote, {
 })
 ```
 
-The Next binding supplies Server Action delivery and router refresh. It also passes Next.js navigation signals, such as redirects, back to the framework instead of treating them as uncertain delivery.
+The Next binding supplies Server Action delivery and router refresh. A router refresh that fails reloads the whole page, which drops the root's queue and any unsaved drafts; see [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page). The binding also passes Next.js navigation signals, such as redirects, back to the framework instead of treating them as uncertain delivery.
 
 The factory does not create a shared store. Each call to `useNote({ canon })` mounts an independent root. Use the hook directly when one component owns the feature, as in Getting started. Use `NoteRoot.Provider` when several components need the same state and queue.
 
@@ -222,7 +222,9 @@ If `onPrediction` throws, the exception comes out of `mutate` in your event hand
 
 Delivery can be `"idle"` while `pending` is greater than zero: the server has answered, but the view is still catching up. `"sending"` includes queued work and automatic retry delays. Freshness can be `"current"` while a mutation is still awaiting acceptance because its accepted revisions are not known yet.
 
-`"current"` means the root has met the requirements it knows about, not that no newer write exists anywhere. Without an invalidation adapter, `status.invalidations` is `"disabled"`; this is configuration, not a connection failure. It does not enable automatic polling.
+`"current"` means the root has met the requirements it knows about, not that no newer write exists anywhere. Without an invalidation adapter, `status.invalidations` is `"disabled"`; this is configuration, not a connection failure. It does not enable automatic polling, and nothing refreshes the root when the viewer returns to the tab. To add that, pass `withVisibilityRefresh(createNoRealtimeInvalidationAdapter())` as `invalidations`; see [Realtime updates](realtime.md#refresh-when-the-viewer-returns).
+
+With the router carrier, `"refreshing"` reports what Headcanon knows. The router gives no failure signal, so a refresh that fails in the browser does not become `"stalled"`: Next.js reloads the page instead.
 
 ## Offer the right retry control
 

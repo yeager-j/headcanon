@@ -204,6 +204,10 @@ export function createNextMutationSender<
  * {@link ROUTER_ACCEPTANCE_GRACE_MS} of acceptance grace. The Next roots use
  * it when `refresh` is omitted; pass it as `refresh` to a `headcanon/react`
  * root.
+ *
+ * The router reports no failure to the root. In the browser, a refresh that
+ * fails makes Next.js load the whole page again, which drops the root's queue
+ * and unsaved drafts.
  * @returns A refresh adapter backed by `router.refresh()`.
  */
 export function useRouterRefresh(): RefreshAdapter {

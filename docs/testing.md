@@ -306,7 +306,7 @@ it("loads canon after an invalidation", async () => {
 })
 ```
 
-Use `invalidations.setStatus("unavailable")` to test transport status UI. To exercise polling, wrap the bus with `withPollingFallback`, set a degraded status such as `"unavailable"`, and advance fake timers; the wrapper does not poll while the bus is active. The bus starts active and does not simulate connection gaps, token renewal, or Ably channel attachment. Changing its status alone does not emit a gap.
+Use `invalidations.setStatus("unavailable")` to test transport status UI. To exercise polling, wrap the bus with `withPollingFallback`, set a degraded status such as `"unavailable"`, and advance fake timers; the wrapper does not poll while the bus is active. The bus starts active and does not simulate connection gaps, token renewal, or Ably channel attachment. Changing its status alone does not emit a gap. To exercise `withVisibilityRefresh`, replace `document.visibilityState` and dispatch a `visibilitychange` event on `document`.
 
 For the integration in [Realtime updates](realtime.md), test your token endpoint's permission decisions: allow owned note axes, reject other users' axes, and reject a mixed request containing even one unauthorized axis. The application passes approved axes to `createAblyAxisTokenRequest`; `createAblyAxisInvalidations` handles the browser's token handshake. Application tests do not need to recreate channel hashing or capability parsing.
 
@@ -337,7 +337,7 @@ For your own adapter, replace the reference harness with one that creates fresh,
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `verifyMutationAuthorityContract` | An authority with its default attempt limit; storage initialized to `MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE`; `load`, conditional `writeAxis`, `appendEffect`, `replace`, and receipt inspection methods. | Receipt replay and ID collisions, committed-state screening, atomic stamps, rollback, refusal parsing, and contention recovery. The suite owns the fixture command. |
 | `verifyInvalidationContract`      | `adapter`, `publisher`, `published()` entries, and `settled()` to wait until subscriptions are live.                                                                                                         | Axis filtering, one payload per axis, payload fields, and unsubscribe cleanup.                                                                                      |
-| `verifyRefreshContract`           | A `useRefresh(request)` hook and a completion mode.                                                                                                                                                          | Acceptance grace, stalling after two uncovered refreshes, and a fresh attempt budget on manual retry.                                                               |
+| `verifyRefreshContract`           | A `useRefresh(request)` hook and a completion mode.                                                                                                                                                          | Acceptance grace, stalling after two uncovered refreshes, a fresh attempt budget on manual retry, and one refresh of a current root when the page becomes visible.  |
 
 The exported harness types describe each method. The authority suite uses `MutationAuthorityContractState` and `MUTATION_AUTHORITY_CONTRACT_AXES`; keep fixture writes transactional and make `writeAxis` compare the expected revision. For external resources, arrange test cleanup through your runner's hooks.
 
@@ -360,7 +360,7 @@ verifyRefreshContract({
 
 `useCallback` keeps the refetch function stable across renders, as `useSnapshotRefresh` expects.
 
-Use `completion: "request"` when the refresh promise settles after data delivery. Use `"canon"` for a void request such as `router.refresh()`, where a new canon completes the attempt. The refresh suite installs its own fake timers and unmounts its roots. A custom harness should wrap the supplied request in the actual adapter you want to verify.
+Use `completion: "request"` when the refresh promise settles after data delivery. Use `"canon"` for a void request such as `router.refresh()`, where a new canon completes the attempt. The suite always delivers that canon; a real `router.refresh()` that fails reloads the page instead (see [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page)). The refresh suite installs its own fake timers and unmounts its roots. Its return-to-page case replaces `document.visibilityState` and restores it when the case ends. A custom harness should wrap the supplied request in the actual adapter you want to verify.
 
 ## Keep a small browser suite
 

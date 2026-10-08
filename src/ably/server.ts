@@ -209,7 +209,11 @@ export async function createAblyAxisTokenRequest(options: {
   readonly namespace: string
   /** Axes the application has approved for this viewer. */
   readonly axes: readonly AxisId[]
-  /** Trusted identity from the session, never from the request. */
+  /**
+   * Trusted identity from the session, never from the request. Omit it for a
+   * viewer without an account. Ably fixes a connection's client ID, so every
+   * token for one browser connection, renewals included, needs the same value.
+   */
   readonly clientId?: string
   /** Token lifetime in milliseconds; Ably's default applies when omitted. */
   readonly ttlMs?: number

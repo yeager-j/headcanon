@@ -7,6 +7,7 @@ import {
   createRestartableLazyAdapter,
   isDegradedInvalidationStatus,
   withPollingFallback,
+  withVisibilityRefresh,
   type InvalidationAdapter,
   type InvalidationStatus,
   type InvalidationSubscription,
@@ -563,5 +564,50 @@ describe("withPollingFallback retry", () => {
 
     expectTypeOf(wrapped).toEqualTypeOf<InvalidationAdapter>()
     expect("retry" in wrapped).toBe(false)
+  })
+})
+
+describe("withVisibilityRefresh", () => {
+  it("forwards retry() from a retryable primary", () => {
+    const retry = vi.fn()
+    const primary: RetryableInvalidationAdapter = {
+      ...createNoRealtimeInvalidationAdapter(),
+      retry,
+    }
+
+    const wrapped = withVisibilityRefresh(primary)
+    wrapped.retry()
+
+    expectTypeOf(wrapped).toEqualTypeOf<RetryableInvalidationAdapter>()
+    expect(retry).toHaveBeenCalledOnce()
+  })
+
+  it("adds no retry() to a primary without one", () => {
+    const wrapped = withVisibilityRefresh(createNoRealtimeInvalidationAdapter())
+
+    expectTypeOf(wrapped).toEqualTypeOf<InvalidationAdapter>()
+    expect("retry" in wrapped).toBe(false)
+  })
+
+  it("passes subscriptions through where there is no document", () => {
+    const stop = vi.fn()
+    let status: InvalidationStatus = "reauthorizing"
+    const subscribe = vi.fn(() => stop)
+    const wrapped = withVisibilityRefresh({
+      get initialStatus() {
+        return status
+      },
+      subscribe,
+    })
+    const subscription: InvalidationSubscription = {
+      axes: [axisId("entity/one")],
+      onInvalidation: vi.fn(),
+      onStatusChange: vi.fn(),
+    }
+
+    expect(wrapped.subscribe(subscription)).toBe(stop)
+    expect(subscribe).toHaveBeenCalledExactlyOnceWith(subscription)
+    status = "active"
+    expect(wrapped.initialStatus).toBe("active")
   })
 })
