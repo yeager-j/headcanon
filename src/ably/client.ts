@@ -613,7 +613,9 @@ function namespaceResolver(
  * `retry()` reruns a failed start (namespace, client, or a `null` namespace
  * that may now resolve) and otherwise retries authorization and attachment.
  * Share one instance per tab. Wrap it with `withPollingFallback` for roots
- * that should poll while push is degraded; the wrapper keeps `retry()`.
+ * that should poll while push is degraded, and with `withVisibilityRefresh`
+ * for roots that should refresh when the viewer returns to the page; both
+ * wrappers keep `retry()`.
  *
  * @param options Namespace, client factory, token request, and diagnostics.
  * @returns A retryable invalidation adapter that starts on first subscription.

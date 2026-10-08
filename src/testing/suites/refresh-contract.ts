@@ -2,6 +2,10 @@ import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  withVisibilityRefresh,
+  type InvalidationAdapter,
+} from "../../core/invalidation"
+import {
   acceptedStamp,
   axisId,
   revisionVector,
@@ -14,6 +18,7 @@ import {
   type AcceptanceSource,
   type RefreshAdapter,
 } from "../../react/refresh"
+import { createInMemoryInvalidationAdapter } from "../in-memory-invalidation"
 import type { ContractCase } from "./contract-case"
 
 /** The refresh carrier that `verifyRefreshContract` exercises. */
@@ -83,7 +88,10 @@ async function advance(ms: number) {
   await act(async () => vi.advanceTimersByTimeAsync(ms))
 }
 
-function setupRefreshContract(harness: RefreshContractHarness) {
+function setupRefreshContract(
+  harness: RefreshContractHarness,
+  invalidations: InvalidationAdapter | undefined
+) {
   const request = vi.fn()
   const useRefresh = harness.useRefresh
   const acceptances = contractAcceptances()
@@ -99,28 +107,65 @@ function setupRefreshContract(harness: RefreshContractHarness) {
       return useIncorporation(
         currentCanon,
         refresh,
-        undefined,
+        invalidations,
         acceptances.source
       )
     },
     { initialProps: { currentCanon: contractCanon(0) } }
   )
 
-  act(() => acceptances.accept("refresh-contract-mutation", contractStamp(1)))
+  const acceptMutation = () =>
+    act(() => acceptances.accept("refresh-contract-mutation", contractStamp(1)))
 
-  return { ...rendered, acceptanceGraceMs, request }
+  return { ...rendered, acceptanceGraceMs, acceptMutation, request }
 }
 
-/** Runs one case on a fresh root and unmounts it however the case ends. */
+/**
+ * Runs one case on a fresh root and unmounts it however the case ends. The
+ * root has no invalidation adapter unless the case passes one.
+ */
 async function withRefreshContract(
   harness: RefreshContractHarness,
-  run: (rendered: ReturnType<typeof setupRefreshContract>) => Promise<void>
+  run: (rendered: ReturnType<typeof setupRefreshContract>) => Promise<void>,
+  invalidations?: InvalidationAdapter
 ) {
-  const rendered = setupRefreshContract(harness)
+  const rendered = setupRefreshContract(harness, invalidations)
   try {
     await run(rendered)
   } finally {
     rendered.unmount()
+  }
+}
+
+/**
+ * Gives a case control of `document.visibilityState` and restores the real
+ * property however the case ends.
+ */
+async function withDocumentVisibility(
+  run: (setVisibility: (next: DocumentVisibilityState) => void) => Promise<void>
+) {
+  let visibility: DocumentVisibilityState = "visible"
+  const original = Object.getOwnPropertyDescriptor(document, "visibilityState")
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => visibility,
+  })
+
+  const setVisibility = (next: DocumentVisibilityState) => {
+    visibility = next
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"))
+    })
+  }
+
+  try {
+    await run(setVisibility)
+  } finally {
+    if (original) {
+      Object.defineProperty(document, "visibilityState", original)
+    } else {
+      Reflect.deleteProperty(document, "visibilityState")
+    }
   }
 }
 
@@ -139,10 +184,15 @@ async function completeAttempt(
  * use it to run the cases against deliberately broken harnesses. The cases
  * need fake timers and a DOM.
  * @param harness The refresh carrier under test.
+ * @param refreshOnVisible Wraps the active transport of the return-to-page
+ *   case. Tests pass a broken wrapper to prove the case catches it.
  * @returns The contract cases, in order.
  */
 export function refreshContractCases(
-  harness: RefreshContractHarness
+  harness: RefreshContractHarness,
+  refreshOnVisible: (
+    adapter: InvalidationAdapter
+  ) => InvalidationAdapter = withVisibilityRefresh
 ): readonly ContractCase[] {
   return [
     {
@@ -151,6 +201,7 @@ export function refreshContractCases(
         withRefreshContract(harness, async (rendered) => {
           const { acceptanceGraceMs, result, request } = rendered
 
+          rendered.acceptMutation()
           await flushMicrotasks()
           if (acceptanceGraceMs > 0) {
             expect(result.current.status.freshness).toBe("grace")
@@ -176,6 +227,7 @@ export function refreshContractCases(
         withRefreshContract(harness, async (rendered) => {
           const { acceptanceGraceMs, result, request } = rendered
 
+          rendered.acceptMutation()
           await flushMicrotasks()
           if (acceptanceGraceMs > 0) await advance(acceptanceGraceMs)
           await completeAttempt(harness, rendered)
@@ -194,6 +246,38 @@ export function refreshContractCases(
           expect(result.current.status.freshness).toBe("stalled")
         }),
     },
+    {
+      name: "refreshes a current root once when the document becomes visible",
+      run: () =>
+        withDocumentVisibility((setVisibility) =>
+          withRefreshContract(
+            harness,
+            async (rendered) => {
+              const { result, request } = rendered
+
+              await flushMicrotasks()
+              expect(result.current.status).toMatchObject({
+                freshness: "current",
+                invalidations: "active",
+              })
+
+              setVisibility("hidden")
+              await flushMicrotasks()
+              expect(request).not.toHaveBeenCalled()
+
+              setVisibility("visible")
+              await flushMicrotasks()
+              expect(request).toHaveBeenCalledTimes(1)
+              await completeAttempt(harness, rendered)
+              expect(result.current.status.freshness).toBe("current")
+
+              await advance(UNCOVERED_REFRESH_RETRY_MS)
+              expect(request).toHaveBeenCalledTimes(1)
+            },
+            refreshOnVisible(createInMemoryInvalidationAdapter())
+          )
+        ),
+    },
   ]
 }
 
@@ -203,6 +287,8 @@ export function refreshContractCases(
  * level. Needs `@testing-library/react` and a DOM: run the file in the
  * `jsdom` environment (`// @vitest-environment jsdom`). The block installs
  * vitest fake timers for its own tests and unmounts every root it renders.
+ * One case wraps an active transport in `withVisibilityRefresh` and replaces
+ * `document.visibilityState` until it ends.
  * @param harness The refresh carrier under test.
  * @returns Nothing; registers the contract's tests.
  * @example

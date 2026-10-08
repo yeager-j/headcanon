@@ -305,6 +305,17 @@ function pollingStatus(status: InvalidationStatus): InvalidationStatus {
 }
 
 /**
+ * Whether the browser reports that it has no network. False where `navigator`
+ * or `navigator.onLine` is undefined, such as on the server.
+ *
+ * A refresh requested while offline can cost the page: Next's router answers
+ * a failed refresh with a full-page load, which drops in-memory state.
+ */
+function browserIsOffline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false
+}
+
+/**
  * Wraps an invalidation adapter so a root keeps refreshing while push delivery
  * is degraded.
  *
@@ -314,6 +325,10 @@ function pollingStatus(status: InvalidationStatus): InvalidationStatus {
  * `active`, polling stops and the primary's status is forwarded. Unsubscribing
  * stops the timer. A primary with `retry()` keeps it: the wrapper forwards
  * it, so wrapping does not hide the transport's recovery control.
+ *
+ * While the browser reports it is offline (`navigator.onLine === false`), the
+ * wrapper skips its gap reports. When the browser's `online` event fires
+ * while polling, it reports one gap at once.
  *
  * @param primary Push invalidation adapter to wrap.
  * @param options Polling interval and visibility policy.
@@ -346,6 +361,7 @@ export function withPollingFallback(
     subscribe(subscription) {
       const watchesVisibility =
         pauseWhenHidden && typeof document !== "undefined"
+      const watchesConnectivity = typeof window !== "undefined"
       let polling = isDegradedInvalidationStatus(primary.initialStatus)
       let stopped = false
       let interval: ReturnType<typeof setInterval> | null = null
@@ -361,7 +377,7 @@ export function withPollingFallback(
       }
 
       const requestRefresh = () => {
-        if (mayPoll()) subscription.onSubscriptionGap?.()
+        if (mayPoll() && !browserIsOffline()) subscription.onSubscriptionGap?.()
       }
 
       const startInterval = () => {
@@ -404,6 +420,10 @@ export function withPollingFallback(
         document.addEventListener("visibilitychange", onVisibilityChange)
       }
 
+      if (watchesConnectivity) {
+        window.addEventListener("online", requestRefresh)
+      }
+
       return () => {
         if (stopped) return
         stopped = true
@@ -411,6 +431,94 @@ export function withPollingFallback(
         if (watchesVisibility) {
           document.removeEventListener("visibilitychange", onVisibilityChange)
         }
+
+        if (watchesConnectivity) {
+          window.removeEventListener("online", requestRefresh)
+        }
+
+        stopPrimary()
+      }
+    },
+  }
+}
+
+/**
+ * Wraps an invalidation adapter so a root refreshes when the user returns to
+ * the page.
+ *
+ * Each time the document becomes visible, the wrapper calls every
+ * subscription's `onSubscriptionGap`, whatever the transport's status, so the
+ * root runs one refresh through its usual carrier even while push delivery is
+ * `active`. While the browser reports it is offline
+ * (`navigator.onLine === false`), the wrapper holds that report and sends it
+ * when the browser's `online` event fires, if the document is still visible.
+ *
+ * Statuses and invalidations pass through unchanged, and a primary's
+ * `retry()` is forwarded. The wrapper composes with
+ * {@link withPollingFallback} in either order: gap reports that arrive
+ * together become one refresh. Where `document` is undefined, it returns the
+ * primary's subscriptions unchanged.
+ *
+ * @param primary Invalidation adapter to wrap. For a root with no push
+ *   transport, wrap `createNoRealtimeInvalidationAdapter()`.
+ * @returns An invalidation adapter that reports a gap on each return to the
+ *   page, retryable when `primary` is.
+ * @example
+ * ```ts
+ * export const axisInvalidations = withVisibilityRefresh(
+ *   withPollingFallback(pushInvalidations, { intervalMs: 15_000 })
+ * )
+ * ```
+ */
+export function withVisibilityRefresh(
+  primary: RetryableInvalidationAdapter
+): RetryableInvalidationAdapter
+export function withVisibilityRefresh(
+  primary: InvalidationAdapter
+): InvalidationAdapter
+export function withVisibilityRefresh(
+  primary: InvalidationAdapter | RetryableInvalidationAdapter
+): InvalidationAdapter {
+  return {
+    ...("retry" in primary && { retry: () => primary.retry() }),
+    get initialStatus() {
+      return primary.initialStatus
+    },
+    subscribe(subscription) {
+      const stopPrimary = primary.subscribe(subscription)
+      if (typeof document === "undefined") return stopPrimary
+
+      let stopped = false
+      let heldWhileOffline = false
+
+      const isVisible = () => document.visibilityState === "visible"
+
+      const onVisibilityChange = () => {
+        if (!isVisible()) return
+
+        if (browserIsOffline()) {
+          heldWhileOffline = true
+          return
+        }
+
+        subscription.onSubscriptionGap?.()
+      }
+
+      const onOnline = () => {
+        if (!heldWhileOffline) return
+
+        heldWhileOffline = false
+        if (isVisible()) subscription.onSubscriptionGap?.()
+      }
+
+      document.addEventListener("visibilitychange", onVisibilityChange)
+      window.addEventListener("online", onOnline)
+
+      return () => {
+        if (stopped) return
+        stopped = true
+        document.removeEventListener("visibilitychange", onVisibilityChange)
+        window.removeEventListener("online", onOnline)
         stopPrimary()
       }
     },

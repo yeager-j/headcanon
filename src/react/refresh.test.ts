@@ -22,6 +22,7 @@ import {
   revision,
   revisionVector,
   withPollingFallback,
+  withVisibilityRefresh,
   type AcceptedStamp,
   type AxisId,
   type AxisInvalidation,
@@ -846,34 +847,60 @@ describe("incorporation of published invalidations", () => {
   })
 })
 
-describe("polling fallback", () => {
-  let visibility: DocumentVisibilityState
-  let originalVisibility: PropertyDescriptor | undefined
+/** Replaces a getter on `target` until the returned function restores it. */
+function stubGetter<Target extends object>(
+  target: Target,
+  key: keyof Target & string,
+  get: () => unknown
+): () => void {
+  const original = Object.getOwnPropertyDescriptor(target, key)
+  Object.defineProperty(target, key, { configurable: true, get })
 
-  const setVisibility = (next: DocumentVisibilityState) => {
-    visibility = next
-    document.dispatchEvent(new Event("visibilitychange"))
+  return () => {
+    if (original) {
+      Object.defineProperty(target, key, original)
+    } else {
+      Reflect.deleteProperty(target, key)
+    }
   }
+}
+
+/**
+ * Controls the page's visibility and the browser's online flag for one test,
+ * dispatching the event a real browser sends for each change.
+ */
+function useDocumentLifecycle() {
+  let visibility: DocumentVisibilityState = "visible"
+  let online = true
+  let restores: Array<() => void> = []
 
   beforeEach(() => {
     visibility = "visible"
-    originalVisibility = Object.getOwnPropertyDescriptor(
-      document,
-      "visibilityState"
-    )
-    Object.defineProperty(document, "visibilityState", {
-      configurable: true,
-      get: () => visibility,
-    })
+    online = true
+    restores = [
+      stubGetter(document, "visibilityState", () => visibility),
+      stubGetter(navigator, "onLine", () => online),
+    ]
   })
 
   afterEach(() => {
-    if (originalVisibility) {
-      Object.defineProperty(document, "visibilityState", originalVisibility)
-    } else {
-      Reflect.deleteProperty(document, "visibilityState")
-    }
+    for (const restore of restores) restore()
   })
+
+  return {
+    setVisibility(next: DocumentVisibilityState) {
+      visibility = next
+      document.dispatchEvent(new Event("visibilitychange"))
+    },
+    setOnline(next: boolean) {
+      online = next
+      window.dispatchEvent(new Event(next ? "online" : "offline"))
+    },
+  }
+}
+
+describe("polling fallback", () => {
+  const { setVisibility, setOnline } = useDocumentLifecycle()
 
   it("reports polling and serializes refreshes while the primary is unavailable", async () => {
     const primary = createInMemoryInvalidationAdapter()
@@ -984,7 +1011,209 @@ describe("polling fallback", () => {
     await advance(500)
     act(() => setVisibility("hidden"))
     act(() => setVisibility("visible"))
+    act(() => setOnline(false))
+    act(() => setOnline(true))
     await flushMicrotasks()
     expect(request).not.toHaveBeenCalled()
+  })
+
+  it("skips refreshes while offline and refreshes once when the browser is back online", async () => {
+    const request = vi.fn(async () => undefined)
+    const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+    act(() => setOnline(false))
+    const rendered = renderHook(() =>
+      useIncorporation(
+        canon(0, 0),
+        refresh,
+        withPollingFallback(createNoRealtimeInvalidationAdapter(), {
+          intervalMs: 100,
+        })
+      )
+    )
+
+    await advance(500)
+    act(() => setVisibility("hidden"))
+    act(() => setVisibility("visible"))
+    await flushMicrotasks()
+    expect(request).not.toHaveBeenCalled()
+
+    act(() => setOnline(true))
+    await flushMicrotasks()
+    expect(request).toHaveBeenCalledTimes(1)
+
+    await advance(100)
+    expect(request).toHaveBeenCalledTimes(2)
+    rendered.unmount()
+  })
+
+  it("does not refresh on reconnection while the primary is active", async () => {
+    const request = vi.fn(async () => undefined)
+    const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+    const rendered = renderHook(() =>
+      useIncorporation(
+        canon(0, 0),
+        refresh,
+        withPollingFallback(createInMemoryInvalidationAdapter(), {
+          intervalMs: 100,
+        })
+      )
+    )
+
+    act(() => setOnline(false))
+    act(() => setOnline(true))
+    await flushMicrotasks()
+    expect(request).not.toHaveBeenCalled()
+    rendered.unmount()
+  })
+})
+
+describe("visibility refresh", () => {
+  const { setVisibility, setOnline } = useDocumentLifecycle()
+
+  function renderVisibilityRoot(invalidations: InvalidationAdapter) {
+    const request = vi.fn(async () => undefined)
+    const refresh: RefreshAdapter = { acceptanceGraceMs: 0, request }
+    const rendered = renderHook(() =>
+      useIncorporation(canon(0, 0), refresh, invalidations)
+    )
+    const returnToPage = () => {
+      act(() => setVisibility("hidden"))
+      act(() => setVisibility("visible"))
+    }
+
+    return { ...rendered, request, returnToPage }
+  }
+
+  it("refreshes on each return to the page while the transport is active", async () => {
+    const root = renderVisibilityRoot(
+      withVisibilityRefresh(createInMemoryInvalidationAdapter())
+    )
+
+    await flushMicrotasks()
+    expect(root.result.current.status).toMatchObject({
+      freshness: "current",
+      invalidations: "active",
+    })
+    expect(root.request).not.toHaveBeenCalled()
+
+    act(() => setVisibility("hidden"))
+    await flushMicrotasks()
+    expect(root.request).not.toHaveBeenCalled()
+
+    act(() => setVisibility("visible"))
+    await flushMicrotasks()
+    expect(root.request).toHaveBeenCalledTimes(1)
+    expect(root.result.current.status.freshness).toBe("current")
+
+    root.returnToPage()
+    await flushMicrotasks()
+    expect(root.request).toHaveBeenCalledTimes(2)
+    root.unmount()
+  })
+
+  it("refreshes a root with no push transport and keeps its status", async () => {
+    const root = renderVisibilityRoot(
+      withVisibilityRefresh(createNoRealtimeInvalidationAdapter())
+    )
+
+    expect(root.result.current.status.invalidations).toBe("disabled")
+    root.returnToPage()
+    await flushMicrotasks()
+    expect(root.request).toHaveBeenCalledTimes(1)
+    root.unmount()
+  })
+
+  it("holds a return while offline until the browser is back online", async () => {
+    const root = renderVisibilityRoot(
+      withVisibilityRefresh(createInMemoryInvalidationAdapter())
+    )
+
+    act(() => setOnline(false))
+    root.returnToPage()
+    await flushMicrotasks()
+    expect(root.request).not.toHaveBeenCalled()
+
+    act(() => setOnline(true))
+    await flushMicrotasks()
+    expect(root.request).toHaveBeenCalledTimes(1)
+
+    // Only a held return refreshes on reconnection.
+    act(() => setOnline(false))
+    act(() => setOnline(true))
+    await flushMicrotasks()
+    expect(root.request).toHaveBeenCalledTimes(1)
+    root.unmount()
+  })
+
+  it("does not refresh when the page is hidden again before the browser is online", async () => {
+    const root = renderVisibilityRoot(
+      withVisibilityRefresh(createInMemoryInvalidationAdapter())
+    )
+
+    act(() => setOnline(false))
+    root.returnToPage()
+    act(() => setVisibility("hidden"))
+    act(() => setOnline(true))
+    await flushMicrotasks()
+    expect(root.request).not.toHaveBeenCalled()
+    root.unmount()
+  })
+
+  it.each([
+    {
+      order: "outside polling fallback",
+      wrap: (adapter: InvalidationAdapter) =>
+        withVisibilityRefresh(
+          withPollingFallback(adapter, { intervalMs: 100 })
+        ),
+    },
+    {
+      order: "inside polling fallback",
+      wrap: (adapter: InvalidationAdapter) =>
+        withPollingFallback(withVisibilityRefresh(adapter), {
+          intervalMs: 100,
+        }),
+    },
+  ])(
+    "coalesces with a polling return into one refresh $order",
+    async ({ wrap }) => {
+      const composed = wrap(createNoRealtimeInvalidationAdapter())
+      const gaps = vi.fn()
+      const root = renderVisibilityRoot({
+        initialStatus: composed.initialStatus,
+        subscribe: (subscription) =>
+          composed.subscribe({
+            ...subscription,
+            onSubscriptionGap() {
+              gaps()
+              subscription.onSubscriptionGap?.()
+            },
+          }),
+      })
+
+      expect(root.result.current.status.invalidations).toBe("polling")
+      root.returnToPage()
+      await flushMicrotasks()
+
+      // Both wrappers report the same return.
+      expect(gaps).toHaveBeenCalledTimes(2)
+      expect(root.request).toHaveBeenCalledTimes(1)
+      expect(root.result.current.status.freshness).toBe("current")
+      root.unmount()
+    }
+  )
+
+  it("stops listening when the root unmounts", async () => {
+    const root = renderVisibilityRoot(
+      withVisibilityRefresh(createInMemoryInvalidationAdapter())
+    )
+
+    root.unmount()
+    root.returnToPage()
+    act(() => setOnline(false))
+    root.returnToPage()
+    act(() => setOnline(true))
+    await flushMicrotasks()
+    expect(root.request).not.toHaveBeenCalled()
   })
 })
