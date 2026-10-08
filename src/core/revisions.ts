@@ -16,10 +16,10 @@ export type Revision = number & { readonly [revisionBrand]: "Revision" }
 /**
  * The latest authoritative revision observed for each axis in a projection.
  *
- * Opaque: build one with {@link revisionVector} or {@link defineCanon} and read
- * it only with {@link revisionAt} and {@link revisionEntries}, because axis
- * strings may collide with `Object.prototype` members. It is a frozen plain
- * object, so it crosses the RSC boundary.
+ * Opaque: build one with {@link defineCanon} and read it only with
+ * {@link revisionAt} and {@link revisionEntries}, because axis strings may
+ * collide with `Object.prototype` members. It is a frozen plain object, so it
+ * crosses the RSC boundary.
  */
 export type RevisionVector = {
   readonly [revisionVectorBrand]: "RevisionVector"

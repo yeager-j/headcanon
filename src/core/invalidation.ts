@@ -39,8 +39,8 @@ export interface AxisInvalidation {
  * - `polling`: reported only by a polling fallback wrapper while its primary
  *   transport is degraded; refreshes are requested on an interval instead.
  *
- * `disabled`, `reauthorizing`, and `unavailable` are the degraded statuses
- * (see {@link isDegradedInvalidationStatus}).
+ * `disabled`, `reauthorizing`, and `unavailable` are the degraded statuses:
+ * push delivery cannot be trusted, so `withPollingFallback` polls.
  */
 export type InvalidationStatus =
   | "disabled"
@@ -117,32 +117,6 @@ export interface LazyInvalidationAdapterOptions {
   readonly onInitializationError?: (error: unknown) => void
 }
 
-/**
- * Adapts an asynchronously-created transport to the synchronous root seam,
- * for example one that lazily imports a realtime SDK.
- *
- * Initialization happens at most once, on the first subscription. Until it
- * completes, the adapter reports `reauthorizing` and buffers subscriptions;
- * cancelling one before readiness prevents it from ever reaching the
- * transport. When the inner adapter is ready, each buffered subscription
- * receives the inner adapter's `initialStatus` (when it differs) and is then
- * subscribed to it, and `initialStatus` forwards the inner adapter's from then
- * on. A `null` result or a rejected initialization reports `unavailable`.
- * @param options Initialization callback and optional diagnostics handler.
- * @returns An invalidation adapter that buffers subscriptions until ready.
- */
-export function createLazyInvalidationAdapter(
-  options: LazyInvalidationAdapterOptions
-): InvalidationAdapter {
-  const lazy = createRestartableLazyAdapter(options)
-  return {
-    get initialStatus() {
-      return lazy.initialStatus
-    },
-    subscribe: lazy.subscribe,
-  }
-}
-
 /** A lazy adapter that can run its initialization again after it failed. */
 export interface RestartableLazyAdapter extends InvalidationAdapter {
   /**
@@ -154,11 +128,20 @@ export interface RestartableLazyAdapter extends InvalidationAdapter {
 }
 
 /**
- * The lazy adapter behind {@link createLazyInvalidationAdapter}, plus
- * `restart()`. Not a package export: the public lazy adapter initializes at
- * most once, and only `createAblyAxisInvalidations` offers a restart, through
- * its `retry()`. Until the transport is ready, live subscriptions wait here,
- * including while unavailable, so a restart can forward them.
+ * Adapts an asynchronously-created transport to the synchronous root seam,
+ * for example one that lazily imports a realtime SDK. Not a package export:
+ * `createAblyAxisInvalidations` builds on it and offers the restart through
+ * its `retry()`.
+ *
+ * Initialization happens on the first subscription. Until it completes, the
+ * adapter reports `reauthorizing` and buffers subscriptions; cancelling one
+ * before readiness prevents it from ever reaching the transport. When the
+ * inner adapter is ready, each buffered subscription receives the inner
+ * adapter's `initialStatus` (when it differs) and is then subscribed to it,
+ * and `initialStatus` forwards the inner adapter's from then on. A `null`
+ * result or a rejected initialization reports `unavailable`. Until the
+ * transport is ready, live subscriptions wait here, including while
+ * unavailable, so a restart can forward them.
  * @param options Initialization callback and optional diagnostics handler.
  * @returns A lazy adapter with a `restart()` control.
  */

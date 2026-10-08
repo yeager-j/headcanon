@@ -19,19 +19,19 @@ import {
   createNoRealtimeInvalidationAdapter,
   defineMutation,
   defineProtocol,
-  revision,
-  revisionVector,
   withPollingFallback,
   withVisibilityRefresh,
   type AcceptedStamp,
   type AxisId,
-  type AxisInvalidation,
   type Canon,
   type InvalidationAdapter,
-  type InvalidationSubscription,
   type MutationEnvelope,
 } from ".."
-import { covers } from "../core/revisions"
+import type {
+  AxisInvalidation,
+  InvalidationSubscription,
+} from "../core/invalidation"
+import { covers, revision, revisionVector } from "../core/revisions"
 import { ROUTER_ACCEPTANCE_GRACE_MS } from "../next/client"
 import { createInMemoryInvalidationAdapter } from "../testing"
 import { verifyRefreshContract } from "../testing/react"

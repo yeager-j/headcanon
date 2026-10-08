@@ -5,13 +5,12 @@ import { describe, expect, expectTypeOf, it } from "vitest"
 import {
   defineMutation,
   defineProtocol,
-  type MutationErrorOf,
   type MutationInvocation,
   type MutationRefusalOf,
   type ProtocolInvocation,
 } from ".."
 import { prepareMutationRequest } from "./authority"
-import { findMutation } from "./protocol"
+import { findMutation, type MutationErrorOf } from "./protocol"
 
 type AmountArgs = { readonly amount: number }
 

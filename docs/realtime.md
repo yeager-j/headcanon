@@ -493,4 +493,4 @@ For missing updates, check the namespace, granted channel set, stamped revisions
 - [Loading data](loading-data.md) — revisions, collection axes, and cache invalidation.
 - [React usage](react.md) — freshness, recovery controls, and observed roots.
 - [Server setup](server-setup.md) — accepted finalization and receipt recovery.
-- [Testing](testing.md) — planned guide to invalidation contract tests.
+- [Testing](testing.md) — testing the token endpoint and transport status.

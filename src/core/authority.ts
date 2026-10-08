@@ -53,9 +53,9 @@ export interface ReadableStampAccumulator extends StampAccumulator {
 }
 
 /**
- * Creates one isolated revision vector for a single authority attempt. A
- * custom {@link MutationAuthorityAdapter} uses it to mint the accepted stamp
- * for each attempt.
+ * Creates one isolated revision vector for a single authority attempt. Each
+ * {@link MutationAuthorityAdapter} uses it to mint the accepted stamp for each
+ * attempt.
  *
  * Commands call `record` once for every persisted revision they advance. The
  * accumulator rejects invalid or regressing coordinates and `accepted()`
@@ -164,6 +164,9 @@ export interface MutationAuthorityRequest<Actor, Refusal = unknown> {
 
 /**
  * Owns receipt identity, transaction attempts, savepoint behavior, and retry.
+ * Not a package export: only Headcanon's own authorities implement it, with
+ * the receipt helpers in this module. An application gets one from
+ * `createDrizzleMutationAuthority` or `createInMemoryMutationAuthority`.
  *
  * The callback may run more than once. An adapter must discard both its
  * transactional effects and its stamp accumulator whenever an attempt rolls
@@ -225,7 +228,8 @@ export class MutationContentionError extends Error {
  * Rolls the current attempt back so the authority can retry from current state.
  * Call it from a command when a guarded write loses a race.
  * @returns Never; throws transaction-control-flow contention.
- * @throws {@link MutationContentionError} to request an authority retry.
+ * @throws The authority's contention signal, which requests a retry. Do not
+ * catch it.
  */
 export function throwMutationContention(): never {
   throw new MutationContentionError()

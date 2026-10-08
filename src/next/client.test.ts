@@ -12,10 +12,10 @@ import {
   axisId,
   defineMutation,
   defineProtocol,
-  revisionVector,
   type Canon,
   type MutationEnvelope,
 } from ".."
+import { revisionVector } from "../core/revisions"
 import { TerminalDeliveryError, type PredictedRootOptions } from "../react"
 import { createInMemoryInvalidationAdapter } from "../testing"
 import {

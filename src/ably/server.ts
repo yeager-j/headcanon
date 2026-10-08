@@ -6,21 +6,21 @@ import { revisionEntries, type AxisId, type Revision } from "../core/revisions"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
-  ablyChannelNamespace,
   ablySubscribeCapability,
-} from "./channels"
+} from "./channel-names"
+import { ablyChannelNamespace } from "./channels"
 import type { AblyTokenRequest } from "./token-request"
 
 export type { AblyTokenRequest } from "./token-request"
 
 /** One REST batch-publish request entry: these messages to these channels. */
-export interface AblyBatchPublishSpec {
+interface AblyBatchPublishSpec {
   readonly channels: string[]
   readonly messages: { readonly name: string; readonly data: unknown }[]
 }
 
 /** Ably's outcome for one spec; a per-channel `error` marks that channel failed. */
-export interface AblyBatchPublishResult {
+interface AblyBatchPublishResult {
   readonly results: readonly {
     readonly channel: string
     readonly error?: unknown

@@ -1,14 +1,8 @@
-import {
-  defineCanon,
-  type Canon,
-  type MutationAuthorityAdapter,
-} from "headcanon"
+import { defineCanon, type Canon } from "headcanon"
 import { createMutationBinder } from "headcanon/server"
 import {
   createInMemoryMutationAuthority,
   type InMemoryMutationAuthority,
-  type InMemoryReader,
-  type InMemoryTransaction,
 } from "headcanon/testing"
 
 import { ITEMS_AXIS, type FixtureState } from "./protocol"
@@ -56,8 +50,17 @@ interface HangGate {
   readonly release: () => void
 }
 
+type FixtureAuthority = InMemoryMutationAuthority<
+  FixtureRecord,
+  FixtureActor,
+  unknown
+>
+
+/** The part of an authority a binder uses: its preflight and its deliveries. */
+type BindableAuthority = Pick<FixtureAuthority, "preflight" | "execute">
+
 interface FixtureServer {
-  authority: InMemoryMutationAuthority<FixtureRecord, FixtureActor, unknown>
+  authority: FixtureAuthority
   faults: FixtureFaults
   frozen: FixtureRecord | null
   hang: HangGate
@@ -97,15 +100,11 @@ function server(): FixtureServer {
 
 /**
  * The authority the Server Action uses: the package's in-memory authority with
- * the delivery faults of {@link FixtureFaults} applied. {@link resetFixture}
- * replaces the authority behind it.
+ * the delivery faults of {@link FixtureFaults} applied around it. It forwards
+ * every delivery to that authority, so receipts and retries stay the
+ * package's. {@link resetFixture} replaces the authority behind it.
  */
-export const fixtureAuthority: MutationAuthorityAdapter<
-  InMemoryTransaction<FixtureRecord>,
-  FixtureActor,
-  unknown,
-  InMemoryReader<FixtureRecord>
-> = {
+export const fixtureAuthority: BindableAuthority = {
   get preflight() {
     return server().authority.preflight
   },

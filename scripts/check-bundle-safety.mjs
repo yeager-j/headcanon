@@ -34,7 +34,7 @@ const FRAMEWORK_FREE_EXPORTS = [".", "./server"]
 /**
  * Exports of test doubles. Their graphs must import no test framework, so the
  * doubles load in any runner and in an application's server code. The exact
- * key only: `./testing/contracts` and `./testing/react` publish vitest suites.
+ * key only: `./testing/react` publishes a vitest suite.
  */
 const TEST_DOUBLE_EXPORTS = ["./testing"]
 

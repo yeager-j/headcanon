@@ -2,16 +2,12 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { err, ok } from "serializable-result"
 import { describe, expect, it } from "vitest"
 
-import {
-  axisId,
-  createStampAccumulator,
-  defineMutation,
-  defineProtocol,
-} from ".."
+import { axisId, defineMutation, defineProtocol } from ".."
 import { createDrizzleMutationAuthority } from "../drizzle"
 import { createInMemoryMutationAuthority } from "../testing"
 import {
   checkDeliveryAge,
+  createStampAccumulator,
   DEFAULT_CLOCK_SKEW_TOLERANCE_MS,
   DEFAULT_MAX_DELIVERY_AGE_MS,
   deliveryAgePolicy,

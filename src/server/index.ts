@@ -1,6 +1,9 @@
 // `headcanon/server`: the binder that types commands and the outcomes they
 // return. It loads no framework, so a command module imports in any runtime.
-export { throwMutationContention } from "../core/authority"
+export {
+  throwMutationContention,
+  type StampAccumulator,
+} from "../core/authority"
 export {
   createMutationBinder,
   type MutationBinder,

@@ -290,7 +290,7 @@ Choose a maximum age longer than the longest time a user can leave a tab with an
 
 A client whose clock is wrong by more than these limits cannot save: a slow clock gets `delivery-expired`, and a fast clock gets `delivery-from-future`. Headcanon does not correct client clocks and never changes an envelope's `createdAt`.
 
-> **Breaking change in 0.1.0.** `createdAt` is a required envelope field. The server rejects an envelope without it as `invalid-envelope` with reason `unexpected-fields`. Reload old clients after you deploy. Code that builds envelopes itself, such as tests or a custom sender, must add `createdAt: Date.now()`. A custom authority adapter must apply the delivery window; see [Verify custom adapters](testing.md#verify-custom-adapters).
+> **Breaking change in 0.1.0.** `createdAt` is a required envelope field. The server rejects an envelope without it as `invalid-envelope` with reason `unexpected-fields`. Reload old clients after you deploy. Code that builds envelopes itself, such as tests or a custom sender, must add `createdAt: Date.now()`.
 
 ## Delete old receipts
 
@@ -342,4 +342,4 @@ Keep stored refusal values readable across deployments for as long as their rece
 - [Getting started](getting-started.md) — the complete note editor.
 - [Loading data](loading-data.md) — planned guide to revisions, loaders, and caching.
 - [React usage](react.md) — planned guide to feedback and delivery recovery.
-- [Testing](testing.md) — planned guide to authority helpers and contract suites.
+- [Testing](testing.md) — command tests and the in-memory authority.

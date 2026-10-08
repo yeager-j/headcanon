@@ -102,9 +102,9 @@ export interface DeleteExpiredReceiptsOptions {
 }
 
 /**
- * The mutation authority `createDrizzleMutationAuthority` returns: a
- * {@link MutationAuthorityAdapter} that can also delete the receipts its own
- * delivery window no longer needs.
+ * The mutation authority `createDrizzleMutationAuthority` returns. Pass it to
+ * `createMutationBinder`. It can also delete the receipts its own delivery
+ * window no longer needs.
  */
 export interface DrizzleMutationAuthority<
   QueryResult extends PgQueryResultHKT,
@@ -288,11 +288,11 @@ export async function deleteReceiptsOlderThan<
 }
 
 /**
- * Creates the Postgres {@link MutationAuthorityAdapter} for a Drizzle
- * database. It requires an interactive transaction client.
+ * Creates the Postgres mutation authority for a Drizzle database. It
+ * requires an interactive transaction client.
  *
- * Receipts, replay, the delivery window, and contention reruns follow the
- * {@link MutationAuthorityAdapter} rules. A transaction-scoped advisory lock
+ * Receipts, replay, the delivery window, and contention reruns work as
+ * `createNextMutationAction` describes. A transaction-scoped advisory lock
  * on the actor scope and mutation ID serializes executions of one mutation.
  * The delivery window uses the database clock, read after the receipt
  * lookup, and each receipt's `created_at` is that reading.

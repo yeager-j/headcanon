@@ -2,7 +2,6 @@ import { describe, expect, expectTypeOf, it, vi } from "vitest"
 
 import {
   axisInvalidation,
-  createLazyInvalidationAdapter,
   createNoRealtimeInvalidationAdapter,
   createRestartableLazyAdapter,
   isDegradedInvalidationStatus,
@@ -135,7 +134,7 @@ function subscription(
   }
 }
 
-describe("createLazyInvalidationAdapter", () => {
+describe("createRestartableLazyAdapter before a restart", () => {
   const transportError = new Error("transport failed")
 
   it("initializes once and forwards buffered and ready subscriptions", async () => {
@@ -149,7 +148,7 @@ describe("createLazyInvalidationAdapter", () => {
         return () => undefined
       },
     }
-    const adapter = createLazyInvalidationAdapter({
+    const adapter = createRestartableLazyAdapter({
       initialize: () => {
         initializeCount += 1
         return readiness.promise
@@ -172,7 +171,7 @@ describe("createLazyInvalidationAdapter", () => {
   it("does not forward a subscription cancelled before readiness", async () => {
     const readiness = deferred<InvalidationAdapter | null>()
     const subscribed: InvalidationSubscription[] = []
-    const adapter = createLazyInvalidationAdapter({
+    const adapter = createRestartableLazyAdapter({
       initialize: () => readiness.promise,
     })
     const unsubscribe = adapter.subscribe(subscription([]))
@@ -198,7 +197,7 @@ describe("createLazyInvalidationAdapter", () => {
       initialStatus: "active",
       subscribe: () => () => undefined,
     }
-    const adapter = createLazyInvalidationAdapter({
+    const adapter = createRestartableLazyAdapter({
       initialize: () => readiness.promise,
     })
 
@@ -213,7 +212,7 @@ describe("createLazyInvalidationAdapter", () => {
 
   it("reads the inner adapter's status at subscribe time", async () => {
     let innerStatus: InvalidationStatus = "active"
-    const adapter = createLazyInvalidationAdapter({
+    const adapter = createRestartableLazyAdapter({
       initialize: () =>
         Promise.resolve({
           get initialStatus() {
@@ -232,7 +231,7 @@ describe("createLazyInvalidationAdapter", () => {
 
   it("releases the inner subscription when unsubscribed after readiness", async () => {
     const released: string[] = []
-    const adapter = createLazyInvalidationAdapter({
+    const adapter = createRestartableLazyAdapter({
       initialize: () =>
         Promise.resolve({
           initialStatus: "active",
@@ -251,7 +250,7 @@ describe("createLazyInvalidationAdapter", () => {
 
   it("does not subscribe when the forwarded status cancels the subscription", async () => {
     const subscribed: InvalidationSubscription[] = []
-    const adapter = createLazyInvalidationAdapter({
+    const adapter = createRestartableLazyAdapter({
       initialize: () =>
         Promise.resolve({
           initialStatus: "active",
@@ -287,7 +286,7 @@ describe("createLazyInvalidationAdapter", () => {
     async ({ initialize, reported }) => {
       const statuses: InvalidationStatus[] = []
       const errors: unknown[] = []
-      const adapter = createLazyInvalidationAdapter({
+      const adapter = createRestartableLazyAdapter({
         initialize,
         onInitializationError: (value) => errors.push(value),
       })
@@ -303,7 +302,7 @@ describe("createLazyInvalidationAdapter", () => {
   )
 })
 
-describe("createRestartableLazyAdapter", () => {
+describe("createRestartableLazyAdapter restart", () => {
   function innerAdapter(subscribed: InvalidationSubscription[]) {
     return {
       initialStatus: "active",
@@ -531,14 +530,6 @@ describe("createRestartableLazyAdapter", () => {
 
     expect(second).toEqual(["reauthorizing"])
     expect(adapter.initialStatus).toBe("reauthorizing")
-  })
-
-  it("leaves the public lazy adapter without a restart", () => {
-    const adapter = createLazyInvalidationAdapter({
-      initialize: () => Promise.resolve(null),
-    })
-
-    expect("restart" in adapter).toBe(false)
   })
 })
 

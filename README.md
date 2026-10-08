@@ -154,5 +154,5 @@ Documentation is coming soon:
 - [Loading data](docs/loading-data.md) — revisions, loaders, and caching.
 - [React usage](docs/react.md) — shared state, feedback, and recovery.
 - [Realtime updates](docs/realtime.md) — Ably and polling fallback.
-- [Testing](docs/testing.md) — test helpers and adapter contracts.
+- [Testing](docs/testing.md) — test helpers and the refresh adapter contract.
 - [API reference](docs/api.md) — package exports and options.

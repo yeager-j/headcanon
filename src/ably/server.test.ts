@@ -5,18 +5,21 @@ import { acceptedStamp, axisId, type AcceptedStamp } from "../core/revisions"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
-  ablyChannelNamespace,
   ablySubscribeCapability,
-} from "./channels"
+} from "./channel-names"
+import { ablyChannelNamespace } from "./channels"
 import {
   AblyInvalidationPublicationError,
   createAblyAxisTokenRequest,
   createAblyInvalidationPublisher,
-  type AblyBatchPublishSpec,
   type AblyRestClient,
   type AblyTokenRequest,
   type AblyTokenRestClient,
 } from "./server"
+
+type AblyBatchPublishSpec = Parameters<
+  AblyRestClient["batchPublish"]
+>[0][number]
 
 const axisA = axisId("entity/a")
 const axisB = axisId("entity/b")

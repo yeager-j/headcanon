@@ -41,13 +41,22 @@ with the same options instead of guessing.
 | `src/drizzle` | The Postgres authority and its receipt table.                                    |
 | `src/testing` | Test doubles; the contract suites are in `suites/`.                              |
 
+`headcanon` is for application code. Every export there is used by the docs
+or the fixture, names a type in a public signature, or is grouped under the
+diagnostics comment in `src/index.ts`. Adapter internals stay unexported: the
+authority receipt protocol in `src/core/authority.ts` (only the Drizzle and
+in-memory authorities implement `MutationAuthorityAdapter`), the invalidation
+payload parser and lazy adapter, and the Ably channel names. Exporting one
+later is an addition; removing one is a breaking change.
+
 `headcanon/testing` holds only test doubles and must import no test framework:
 `scripts/check-bundle-safety.mjs` walks its import graph and rejects `vitest`
-and Testing Library. Contract suites go in `src/testing/suites/` and are published from
-`headcanon/testing/contracts` (vitest) or `headcanon/testing/react` (vitest,
-Testing Library, DOM). Each suite's cases also run against deliberately broken
-harnesses in `src/testing/*.test.ts`, so a new case needs a broken harness that
-it catches.
+and Testing Library. Contract suites go in `src/testing/suites/`. The refresh
+suite is published from `headcanon/testing/react` (vitest, Testing Library,
+DOM). The authority and invalidation suites are internal: Headcanon's own
+adapters run them by relative import. Each suite's cases also run against
+deliberately broken harnesses in `src/testing/*.test.ts`, so a new case needs a
+broken harness that it catches.
 
 ## Commands
 

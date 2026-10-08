@@ -14,7 +14,8 @@ import {
   type AcceptedStamp,
   type InvalidationPublisher,
 } from "../.."
-import { ablyAxisChannelName, ablyChannelNamespace } from "../../ably/channels"
+import { ablyAxisChannelName } from "../../ably/channel-names"
+import { ablyChannelNamespace } from "../../ably/channels"
 
 const nextCache = vi.hoisted(() => ({
   cacheTag: vi.fn(),
