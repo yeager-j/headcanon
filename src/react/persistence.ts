@@ -30,8 +30,9 @@ export interface QueuePersistence {
   load(): unknown
   /**
    * Replaces the stored queue with `envelopes`, in mutation order. An empty
-   * list means no mutation is pending. When it throws, the root writes again
-   * on the next change.
+   * list means no mutation is pending. When it throws, it must leave the
+   * stored queue unchanged: the root relies on that to know which mutations
+   * a later mount restores. The root writes again on the next change.
    */
   save(envelopes: readonly MutationEnvelope<unknown>[]): void
 }
@@ -84,12 +85,21 @@ export interface QueueStorage<Invocation> {
   /** The stored envelopes the root can deliver, in mutation order. */
   load(): readonly MutationEnvelope<Invocation>[]
   save(envelopes: readonly MutationEnvelope<Invocation>[]): void
+  /**
+   * The mutation IDs a later mount would restore: those of the queue last
+   * loaded or saved, less the envelopes a load would drop. Empty for a queue
+   * that lives only in memory.
+   */
+  restorableIds(): ReadonlySet<string>
 }
+
+const NO_IDS: ReadonlySet<string> = new Set()
 
 /** Storage for a root without `persistence`: the queue lives in memory. */
 const MEMORY_QUEUE_STORAGE: QueueStorage<never> = {
   load: () => [],
   save: () => undefined,
+  restorableIds: () => NO_IDS,
 }
 
 /**
@@ -105,6 +115,7 @@ export function createQueueStorage<Invocation>(
   if (!persistence) return MEMORY_QUEUE_STORAGE
 
   let readFailed = false
+  let restorable = NO_IDS
 
   return {
     load() {
@@ -116,7 +127,9 @@ export function createQueueStorage<Invocation>(
         return []
       }
 
-      return parseStoredQueue<Invocation>(stored, protocol)
+      const envelopes = parseStoredQueue<Invocation>(stored, protocol)
+      restorable = new Set(envelopes.map((envelope) => envelope.mutationId))
+      return envelopes
     },
     save(envelopes) {
       if (readFailed) return
@@ -125,8 +138,12 @@ export function createQueueStorage<Invocation>(
         persistence.save(envelopes)
       } catch {
         // Storage is best effort; the queue in memory is still complete.
+        return
       }
+      const kept = parseStoredQueue(envelopes, protocol)
+      restorable = new Set(kept.map((envelope) => envelope.mutationId))
     },
+    restorableIds: () => restorable,
   }
 }
 

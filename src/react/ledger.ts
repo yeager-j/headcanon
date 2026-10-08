@@ -305,6 +305,23 @@ export function isCanonized(
 }
 
 /**
+ * A later mount would restore a mutation that `entries` has not seen
+ * accepted. A restorable ID with no entry counts: the root may have dropped
+ * a mutation the authority never stored.
+ */
+function restoresUnaccepted(
+  restorableIds: ReadonlySet<string>,
+  entries: readonly LedgerEntry<unknown>[]
+): boolean {
+  const accepted = new Set(
+    entries
+      .filter((entry) => entry.delivery.kind === "accepted")
+      .map((entry) => entry.envelope.mutationId)
+  )
+  return [...restorableIds].some((mutationId) => !accepted.has(mutationId))
+}
+
+/**
  * The one authority for a root's mutation lifecycle: the rendered ledger, the
  * receipts, and the delivery queue. React reads the ledger through
  * `useSyncExternalStore`; every change goes through `advance` (delivery
@@ -570,26 +587,37 @@ export function createLedgerStore<Invocation, Error>(
     }
   }
 
-  /** Sends every envelope awaiting delivery and settles every receipt as unmounted. */
+  /**
+   * Settles every receipt as unmounted. Unless a later mount will restore an
+   * unaccepted mutation, first sends every envelope awaiting delivery.
+   */
   function dispose(): void {
     // Unmount ends this root's ability to *observe* an outcome; it does not
-    // repeal the user's intent. An envelope that never reached the authority
-    // — typically a debounced autosave flushed from a leaf's unmount
-    // cleanup, where the leaf tears down before the provider — is sent
-    // fire-and-forget on the way down, after every attempt already in flight
-    // has been answered, so two edits to one field keep their order. The
-    // canonical envelope and durable mutation ID make the send
-    // effectively-once at the authority.
+    // repeal the user's intent.
     //
-    // A `sending` or `uncertain` entry may already have committed; its
-    // receipt, not a second send, is what would resolve it.
+    // Unmount removes no stored envelope, so a later mount restores what
+    // storage holds and delivers it in order under the same mutation IDs.
+    // While storage holds an unaccepted mutation, this root sends nothing on
+    // the way down: a farewell send could commit a mutation before an
+    // earlier one that never reached the authority, or race the later mount
+    // that delivers it. That includes a stored mutation this root has
+    // already dropped, as after a terminal answer since `deactivate`.
     //
-    // Unmount settles nothing, so storage keeps every unsettled envelope. A
-    // later mount that restores it redelivers it under the same mutation ID.
-    const awaiting = ledger.entries.filter((entry) =>
-      awaitsDelivery(entry.delivery)
-    )
-    void sendInOrder(awaiting.map((entry) => entry.envelope))
+    // Otherwise no later mount can deliver this queue. An envelope that never
+    // reached the authority — typically a debounced autosave flushed from a
+    // leaf's unmount cleanup, where the leaf tears down before the provider —
+    // is sent fire-and-forget on the way down, after every attempt already
+    // in flight has been answered, so two edits to one field keep their
+    // order. The canonical envelope and durable mutation ID make the send
+    // effectively-once at the authority. A `sending` or `uncertain` entry may
+    // already have committed; its receipt, not a second send, is what would
+    // resolve it.
+    if (!restoresUnaccepted(storage.restorableIds(), ledger.entries)) {
+      const awaiting = ledger.entries.filter((entry) =>
+        awaitsDelivery(entry.delivery)
+      )
+      void sendInOrder(awaiting.map((entry) => entry.envelope))
+    }
 
     for (const entry of ledger.entries) {
       const lifetime = lifetimes.get(entry.envelope.mutationId)
