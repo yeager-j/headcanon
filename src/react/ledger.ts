@@ -205,10 +205,10 @@ const DELIVERY_TRANSITIONS: Readonly<
 }
 
 /**
- * No commit can exist for this envelope: it was never sent, or the authority
- * verifiably stored no receipt and it awaits redelivery.
+ * The envelope waits for its next delivery attempt. A retried uncertain
+ * envelope waits too, though its earlier attempt may have committed.
  */
-function isUnsent(delivery: DeliveryState): boolean {
+function awaitsDelivery(delivery: DeliveryState): boolean {
   return delivery.kind === "queued" || delivery.kind === "retry-scheduled"
 }
 
@@ -239,6 +239,11 @@ interface EntryLifetime<Error> {
   attempt: number
   /** Automatic redeliveries consumed after {@link RetryableDeliveryError}s. */
   retryAttempts: number
+  /**
+   * An attempt became uncertain, so a commit may exist. Retry re-queues the
+   * envelope but never clears this.
+   */
+  mayHaveCommitted: boolean
   /**
    * Holds the current attempt's React Action open. While an Action is open,
    * React parks every transition — including the Server Action's RSC payload
@@ -428,7 +433,7 @@ export function createLedgerStore<Invocation, Error>(
       if (retryDelay === undefined) {
         // An ordinary throw (the commit may exist) or a spent redelivery
         // budget: keep the envelope as honestly uncertain.
-        advance(mutationId, { kind: "uncertain" })
+        markUncertain(mutationId, lifetime)
       } else {
         // A known-clean miss: redeliver the same envelope after a bounded
         // backoff. The entry stays at the queue head, so order holds.
@@ -443,11 +448,20 @@ export function createLedgerStore<Invocation, Error>(
     hold.resolve()
   }
 
+  function markUncertain(
+    mutationId: string,
+    lifetime: EntryLifetime<Error>
+  ): boolean {
+    if (!advance(mutationId, { kind: "uncertain" })) return false
+    lifetime.mayHaveCommitted = true
+    return true
+  }
+
   function expireAttempt(mutationId: string, attempt: number): void {
     const lifetime = lifetimes.get(mutationId)
     if (!lifetime || lifetime.attempt !== attempt) return
     lifetime.waitTimer = null
-    if (advance(mutationId, { kind: "uncertain" })) lifetime.hold?.resolve()
+    if (markUncertain(mutationId, lifetime)) lifetime.hold?.resolve()
   }
 
   /**
@@ -467,7 +481,7 @@ export function createLedgerStore<Invocation, Error>(
     }
   }
 
-  /** Sends whatever is still unsent and settles every receipt as unmounted. */
+  /** Sends every envelope awaiting delivery and settles every receipt as unmounted. */
   function dispose(): void {
     // Unmount ends this root's ability to *observe* an outcome; it does not
     // repeal the user's intent. An envelope that never reached the authority
@@ -480,8 +494,10 @@ export function createLedgerStore<Invocation, Error>(
     //
     // A `sending` or `uncertain` entry may already have committed; its
     // receipt, not a second send, is what would resolve it.
-    const unsent = ledger.entries.filter((entry) => isUnsent(entry.delivery))
-    void sendInOrder(unsent.map((entry) => entry.envelope))
+    const awaiting = ledger.entries.filter((entry) =>
+      awaitsDelivery(entry.delivery)
+    )
+    void sendInOrder(awaiting.map((entry) => entry.envelope))
 
     for (const entry of ledger.entries) {
       const lifetime = lifetimes.get(entry.envelope.mutationId)
@@ -527,6 +543,7 @@ export function createLedgerStore<Invocation, Error>(
         canonized: createDeferred(),
         attempt: 0,
         retryAttempts: 0,
+        mayHaveCommitted: false,
         hold: null,
         waitTimer: null,
         retryTimer: null,
@@ -588,9 +605,9 @@ export function createLedgerStore<Invocation, Error>(
     },
 
     /**
-     * Records a replay refusal once per mutation. An envelope that has not
-     * reached the authority is retracted; one that may have committed keeps
-     * waiting for its receipt.
+     * Records a replay refusal once per mutation. An envelope that never
+     * reached the authority is retracted; one that may have committed, even
+     * when retried and queued again, keeps waiting for its receipt.
      * @returns The new conflict, or `null` when it was already recorded.
      */
     recordConflict(
@@ -611,7 +628,8 @@ export function createLedgerStore<Invocation, Error>(
         ),
         conflicts: [...ledger.conflicts, conflict].slice(-RETAINED_CONFLICTS),
       })
-      if (isUnsent(entry.delivery)) {
+      const lifetime = lifetimes.get(mutationId)
+      if (awaitsDelivery(entry.delivery) && !lifetime?.mayHaveCommitted) {
         settle(mutationId, err({ kind: "replay-refused", error }))
       }
       return conflict

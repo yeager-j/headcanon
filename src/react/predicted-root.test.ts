@@ -743,6 +743,32 @@ describe("createPredictedRoot", () => {
     await waitFor(() => expect(send).toHaveBeenCalledTimes(3))
   })
 
+  it("waits for the server outcome when replay refuses a retried uncertain envelope", async () => {
+    // Retry re-queues the envelope, but the lost attempt may have committed:
+    // canon that holds the change must not withdraw it as replay-refused.
+    const { result, deliveries, rerender, send } = setup()
+    let receipt: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1, refuseAt: 10 }))
+    })
+    act(() => deliveries[0]?.reject(new Error("response lost")))
+    await waitFor(() =>
+      expect(result.current.status.delivery).toBe("uncertain")
+    )
+
+    act(() => {
+      result.current.retryDelivery()
+      rerender({ currentCanon: canon(10, 10) })
+    })
+    expect(result.current.conflicts).toHaveLength(1)
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2))
+    expect(deliveries[1]?.envelope).toBe(deliveries[0]?.envelope)
+
+    act(() => deliveries[1]?.resolve(ok(stamp(10))))
+    await expect(receipt!.accepted).resolves.toEqual(ok(stamp(10)))
+    await expect(receipt!.canonized).resolves.toEqual(ok(undefined))
+  })
+
   it("settles unresolved receipts and releases Actions on unmount", async () => {
     const { result, deliveries, unmount } = setup()
     const inFlight = mutate(result, add({ amount: 1 }))
