@@ -14,7 +14,9 @@ The package documentation is in [`README.md`](README.md) and the guides in
 The repo root is the package and an npm workspace root. The fixture is its only
 workspace and depends on the package through `file:..`, so both resolve one
 installed copy of React and Next; `npm test` fails if they do not. `files` in
-`package.json` keeps the fixture out of the published tarball.
+`package.json` keeps the fixture out of the published tarball and ships
+`docs/`, so JSDoc pointers such as `docs/server-setup.md#...` resolve in an
+installed copy.
 
 `package.json#exports` is the one list of public entries. The gates read it, so
 a new export is checked with no edit to them. Every export ships to browsers

@@ -68,7 +68,8 @@
     "dist",
     "src",
     "!src/**/*.test.ts",
-    "drizzle"
+    "drizzle",
+    "docs"
   ],
   "engines": {
     "node": ">=22"
