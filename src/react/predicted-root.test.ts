@@ -2194,6 +2194,143 @@ describe("createPredictedRoot — persisted queue", () => {
     act(() => deliveries[1]?.resolve(ok(stamp(2))))
   })
 
+  it("sends unsent mutations on unmount when the store refuses every write", async () => {
+    // No later mount can restore them, so unmount is their only delivery.
+    const persistence: QueuePersistence = {
+      load: () => undefined,
+      save() {
+        throw new DOMException("full", "QuotaExceededError")
+      },
+    }
+    const { result, deliveries, unmount } = mountPersisted(persistence)
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+      mutate(result, add({ amount: 2 }))
+    })
+
+    unmount()
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    expect(deliveries[1]?.envelope.invocation.args.amount).toBe(2)
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
+  })
+
+  it("sends unsent mutations on unmount when a later mount would drop them", async () => {
+    // A schema that validates asynchronously cannot be checked on restore.
+    const asyncArgsSchema: StandardSchemaV1<unknown, CounterArgs> = {
+      "~standard": {
+        version: 1,
+        vendor: "headcanon-test",
+        validate: (value) => Promise.resolve({ value: value as CounterArgs }),
+      },
+    }
+    const addAsync = defineMutation({
+      name: "counter.add-async",
+      args: asyncArgsSchema,
+      predict: (state: number, args): Result<number, CounterError> =>
+        ok(state + args.amount),
+    })
+    const asyncProtocol = defineProtocol({
+      id: "test.async.v1",
+      mutations: [addAsync],
+    })
+    const { persistence, stored } = createMemoryPersistence()
+    const { deliveries, send } =
+      createControlledSender<ReturnType<typeof addAsync>>()
+    const useAsyncPredictions = createPredictedRoot({
+      protocol: asyncProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const { result, unmount } = renderHook(() =>
+      useAsyncPredictions({ canon: canon(0, 0) })
+    )
+    act(() => {
+      result.current.mutate(addAsync({ amount: 1 }))
+      result.current.mutate(addAsync({ amount: 2 }))
+    })
+    expect(stored()).toHaveLength(2)
+
+    unmount()
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    expect(deliveries[1]?.envelope.invocation.args.amount).toBe(2)
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
+  })
+
+  it("sends nothing on unmount while the store holds an earlier unsettled mutation", async () => {
+    // The store holds the uncertain head but refused the write that added
+    // the second mutation. Sending that one could commit it before the next
+    // mount redelivers the head, so it stays unsent.
+    const memory = createMemoryPersistence()
+    let writesFail = false
+    const persistence: QueuePersistence = {
+      load: memory.persistence.load,
+      save(envelopes) {
+        if (writesFail) throw new DOMException("full", "QuotaExceededError")
+        memory.persistence.save(envelopes)
+      },
+    }
+    const { result, deliveries, send, unmount } = mountPersisted(persistence)
+    let head!: MutationReceipt<CounterError>
+    act(() => {
+      head = mutate(result, add({ amount: 1 }))
+    })
+    await act(async () => deliveries[0]?.reject(new Error("connection lost")))
+    writesFail = true
+    act(() => {
+      mutate(result, add({ amount: 2 }))
+    })
+
+    unmount()
+    await act(async () => {})
+
+    expect(send).toHaveBeenCalledOnce()
+    expect(mutationIds(memory.stored())).toEqual([head.id])
+  })
+
+  it("sends nothing on unmount when a stored mutation ended after the root deactivated", async () => {
+    // The store holds only the head: the write that added the second
+    // mutation failed. The head's terminal answer arrives between
+    // deactivation and disposal, so the root drops it but no longer writes
+    // storage. A refusal of a future-dated delivery leaves no receipt, so a
+    // later mount can still commit the head; sending the second mutation now
+    // could commit it first.
+    const memory = createMemoryPersistence()
+    let writesFail = false
+    const persistence: QueuePersistence = {
+      load: memory.persistence.load,
+      save(envelopes) {
+        if (writesFail) throw new DOMException("full", "QuotaExceededError")
+        memory.persistence.save(envelopes)
+      },
+    }
+    const { result, deliveries, send, unmount } = mountPersisted(persistence)
+    let head!: MutationReceipt<CounterError>
+    act(() => {
+      head = mutate(result, add({ amount: 1 }))
+    })
+    writesFail = true
+    act(() => {
+      mutate(result, add({ amount: 2 }))
+    })
+    const refusal = {
+      kind: "undeliverable",
+      error: { code: "delivery-from-future", mutationId: head.id },
+    } as const
+
+    deliveries[0]?.reject(new TerminalDeliveryError(refusal))
+    unmount()
+    await expect(head.accepted).resolves.toEqual(err(refusal))
+    await act(async () => {})
+
+    expect(send).toHaveBeenCalledOnce()
+    expect(mutationIds(memory.stored())).toEqual([head.id])
+  })
+
   it("keeps working in memory when the store throws", async () => {
     const persistence: QueuePersistence = {
       load() {

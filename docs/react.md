@@ -374,7 +374,9 @@ Unmount is not cancellation. Without `persistence`, the root starts a best-effor
 
 That ordering applies only within the unsent group. While mounted, the queue waits behind an uncertain head; after unmount, later queued mutations can be sent without recovering that head's outcome. If the head never reached the server, a later mutation can commit without the earlier one. If an outstanding request never settles, the unsent group remains waiting. Do not rely on unmount delivery to preserve dependencies across an uncertain mutation.
 
-With `persistence`, unmount sends nothing. Every unsettled mutation stays in storage, including sending and uncertain ones. The next root that mounts with the same storage in the same tab restores them and delivers them in order, so a later mutation never commits before an earlier one that did not reach the server. A mutation queued at unmount, such as an autosave, therefore waits until that root mounts again in the tab. A root that cannot read its storage keeps its queue in memory, so it sends at unmount like a root without `persistence`. See [Keep the queue across a reload](#keep-the-queue-across-a-reload).
+With `persistence`, unmount sends nothing while storage holds a mutation that the server has not accepted. Every unsettled mutation stays in storage, including sending and uncertain ones. The next root that mounts with the same storage in the same tab restores them and delivers them in order, so a later mutation never commits before an earlier one that did not reach the server. A mutation queued at unmount, such as an autosave, therefore waits until that root mounts again in the tab. See [Keep the queue across a reload](#keep-the-queue-across-a-reload).
+
+When storage holds none of the root's unaccepted mutations, no later mount can deliver them, so unmount sends them like a root without `persistence`. This happens when storage refuses every write, when the next mount would drop the mutations (see the checks in [Keep the queue across a reload](#keep-the-queue-across-a-reload)), or when the root cannot read its storage. When storage holds only some of them, for example because one write failed, unmount sends nothing, and the mutations that storage does not hold are lost. A root that cannot read its storage does not know what the storage holds, so a later mount can deliver an older stored mutation after this root's mutations.
 
 If navigation depends on knowing that a write succeeded, await acceptance before navigating. If it depends on this view receiving the updated data, await canonization while the root is still mounted. Do not infer that a write failed just because its root disappeared.
 
@@ -423,14 +425,14 @@ If storage is missing or refuses a read or write, for example in a private windo
 
 Know the limits:
 
-- **Delivery after unmount waits for a remount.** A root with `persistence` sends nothing when it unmounts, so its queue stays in order. Mutations still in storage are delivered only when a root with the same key mounts again in the tab. See [Choose the root's lifetime](#choose-the-roots-lifetime).
+- **Delivery after unmount waits for a remount.** While storage holds an unaccepted mutation, the root sends nothing when it unmounts, so its queue stays in order. Mutations still in storage are delivered only when a root with the same key mounts again in the tab. See [Choose the root's lifetime](#choose-the-roots-lifetime).
 - **One tab.** `sessionStorage` belongs to one tab, and a closed tab loses it. A duplicated tab gets a copy, so both tabs deliver the same mutations. This is safe: they share mutation IDs, and the server's receipts make the second delivery return the first one's outcome.
 - **One mounted root per key.** Two roots mounted at the same time with the same key restore and deliver the same mutations, and each overwrites the other's queue. Give each mounted root its own key, such as one that includes the record's ID.
 - **No other devices or browsers.** Nothing leaves the browser until it is delivered.
 - **Delivery age.** A restored envelope keeps its original `createdAt`. If it is older than the server's maximum delivery age and the server has no receipt for it, delivery fails with `"undeliverable"` and `error.code` `"delivery-expired"`. See [Limit delivery age](server-setup.md#limit-delivery-age).
 - **JSON arguments.** `sessionStoragePersistence` stores envelopes as JSON. Mutation arguments must already be canonical JSON for the server, so this loses nothing.
 
-To use another store, such as `localStorage` or a store in memory, pass any object with synchronous `load()` and `save(envelopes)` methods. An asynchronous store, such as IndexedDB, is not supported. A store that several tabs share, such as `localStorage`, acts like two roots with one key: each tab overwrites the other's queue.
+To use another store, such as `localStorage` or a store in memory, pass any object with synchronous `load()` and `save(envelopes)` methods. A `save` that throws must leave the stored value unchanged. An asynchronous store, such as IndexedDB, is not supported. A store that several tabs share, such as `localStorage`, acts like two roots with one key: each tab overwrites the other's queue.
 
 ## Use an observed root for read-only views
 
