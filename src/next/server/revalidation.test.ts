@@ -33,6 +33,7 @@ function stamp(entries: Record<string, number>): AcceptedStamp {
 
 function recordingPublisher(events: string[]): InvalidationPublisher {
   return {
+    onFailure: () => undefined,
     publish(eventId, accepted) {
       for (const [axis, revision] of revisionEntries(accepted.revisions)) {
         events.push(`publish:${eventId}:${axis}:${revision}`)
@@ -142,7 +143,10 @@ describe("Next commit finalization", () => {
   })
 
   it("uses immediate revalidation outside a Server Action and never refreshes", async () => {
-    await announceExternalCommit(accepted, { publish: vi.fn() })
+    await announceExternalCommit(accepted, {
+      publish: vi.fn(),
+      onFailure: vi.fn(),
+    })
 
     expect(nextCache.revalidateTag.mock.calls).toEqual([
       [await axisCacheTag(first), { expire: 0 }],
@@ -197,26 +201,6 @@ describe("Next commit finalization", () => {
         },
       })
     ).resolves.toBeUndefined()
-  })
-
-  it("reports a publication failure to console.error when the publisher has no onFailure", async () => {
-    const consoleError = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined)
-    const error = new Error("realtime unavailable")
-
-    try {
-      await finalizeExternalActionCommit(accepted, {
-        publish: async () => Promise.reject(error),
-      })
-
-      expect(consoleError).toHaveBeenCalledExactlyOnceWith(
-        expect.any(String),
-        expect.objectContaining({ kind: "rejected", error })
-      )
-    } finally {
-      consoleError.mockRestore()
-    }
   })
 
   it("bounds stalled advisory publication after refreshing the route", async () => {

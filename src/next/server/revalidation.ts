@@ -59,8 +59,7 @@ function recordPublicationFailure(
   failure: InvalidationPublicationFailure
 ): void {
   try {
-    if (invalidations.onFailure) invalidations.onFailure(failure)
-    else console.error("Headcanon invalidation publication failed:", failure)
+    invalidations.onFailure(failure)
   } catch {
     // Diagnostics remain advisory just like the publication they observe.
   }

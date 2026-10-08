@@ -251,7 +251,7 @@ Do not treat finalization as a durable background job or a once-only hook. For e
 
 To notify other clients, supply an `invalidations` publisher to `createNextMutationAction`. Omit it when using route refresh alone.
 
-The publisher owns its failure reporter: give `onFailure` to the publisher, such as `createAblyInvalidationPublisher`. Without `onFailure`, failures go to `console.error`. Publication failures and timeouts are reported without changing an accepted outcome. The action waits up to one second for publication; it does not provide a durable publication retry queue. See the planned [Realtime updates](realtime.md) guide for transport setup and recovery.
+The publisher owns its failure reporter: give `onFailure` to the publisher, such as `createAblyInvalidationPublisher`. Publication failures and timeouts are reported without changing an accepted outcome. The action waits up to one second for publication; it does not provide a durable publication retry queue. See the planned [Realtime updates](realtime.md) guide for transport setup and recovery.
 
 ## Bound database and network waits
 

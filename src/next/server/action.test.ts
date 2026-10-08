@@ -448,7 +448,10 @@ describe("Next mutation action", () => {
       protocol,
       binder,
       commands: [binder.bind(increment, registered)],
-      invalidations: options.invalidations ?? { publish: vi.fn() },
+      invalidations: options.invalidations ?? {
+        publish: vi.fn(),
+        onFailure: vi.fn(),
+      },
     })
   }
 
@@ -612,7 +615,12 @@ describe("Next mutation action", () => {
     const execute = action(
       createAuthority(),
       command({ finalizeAccepted: () => void events.push("project") }),
-      { invalidations: { publish: () => void events.push("publish") } }
+      {
+        invalidations: {
+          publish: () => void events.push("publish"),
+          onFailure: vi.fn(),
+        },
+      }
     )
 
     await execute(envelope)
@@ -634,7 +642,12 @@ describe("Next mutation action", () => {
           throw failure
         },
       }),
-      { invalidations: { publish: () => void events.push("publish") } }
+      {
+        invalidations: {
+          publish: () => void events.push("publish"),
+          onFailure: vi.fn(),
+        },
+      }
     )
 
     await expect(execute(envelope)).rejects.toBe(failure)
@@ -895,7 +908,7 @@ describe("Next mutation action", () => {
           binder.bind(increment, registered),
           binder.bind(increment, registered),
         ],
-        invalidations: { publish: vi.fn() },
+        invalidations: { publish: vi.fn(), onFailure: vi.fn() },
       })
     ).toThrow("Duplicate mutation binding: next.increment")
   })
@@ -936,7 +949,7 @@ describe("Next mutation action", () => {
         protocol,
         binder: counterBinder,
         commands: [] as never,
-        invalidations: { publish: vi.fn() },
+        invalidations: { publish: vi.fn(), onFailure: vi.fn() },
       })
     ).toThrow("Incomplete mutation bindings: missing [next.increment]")
   })

@@ -534,10 +534,10 @@ export interface InvalidationPublisher {
    */
   publish(eventId: string, stamp: AcceptedStamp): void | Promise<void>
   /**
-   * Receives each publication that rejected or timed out. Without it,
-   * failures go to `console.error`. A throw from it is ignored.
+   * Receives each publication that rejected or timed out. A throw from it is
+   * ignored.
    */
-  readonly onFailure?: InvalidationPublicationFailureReporter
+  readonly onFailure: InvalidationPublicationFailureReporter
 }
 
 /** Diagnostic record for an invalidation publication that did not complete. */

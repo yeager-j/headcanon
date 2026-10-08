@@ -1,6 +1,7 @@
 import type {
   AxisInvalidation,
   InvalidationAdapter,
+  InvalidationPublicationFailureReporter,
   InvalidationPublisher,
   InvalidationStatus,
   InvalidationSubscription,
@@ -24,15 +25,23 @@ export interface InMemoryInvalidationAdapter
 
 /**
  * A synchronous per-axis invalidation bus for tests and local fixtures. It has
- * no test-framework dependency.
+ * no test-framework dependency. Its own `publish` never fails, so the default
+ * `onFailure` does nothing; pass one when a test wraps the publisher to fail.
+ * @param options Optional failure reporter for the publisher.
  * @returns An in-memory invalidation adapter and publisher.
  */
-export function createInMemoryInvalidationAdapter(): InMemoryInvalidationAdapter {
+export function createInMemoryInvalidationAdapter(
+  options: {
+    /** Receives each publication that rejected or timed out. */
+    readonly onFailure?: InvalidationPublicationFailureReporter
+  } = {}
+): InMemoryInvalidationAdapter {
   const subscriptions = new Set<InvalidationSubscription>()
   const published: AxisInvalidation[] = []
   let status: InvalidationStatus = "active"
 
   return {
+    onFailure: options.onFailure ?? (() => undefined),
     get initialStatus() {
       return status
     },

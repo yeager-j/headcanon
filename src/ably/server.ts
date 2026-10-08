@@ -141,18 +141,15 @@ function batchFailures(
  * receipts, or retry; those concerns belong to the application or authority
  * boundary.
  *
- * @param options Ably REST client, deployment namespace, and optional failure reporter.
+ * @param options Ably REST client, deployment namespace, and failure reporter.
  * @returns An invalidation publisher for accepted stamps.
  * @throws Error at construction when `namespace` is invalid (see `ablyChannelNamespace`).
  */
 export function createAblyInvalidationPublisher(options: {
   readonly rest: AblyRestClient
   readonly namespace: string
-  /**
-   * Receives each publication that rejected or timed out. Defaults to
-   * `console.error`.
-   */
-  readonly onFailure?: InvalidationPublicationFailureReporter
+  /** Receives each publication that rejected or timed out. */
+  readonly onFailure: InvalidationPublicationFailureReporter
 }): InvalidationPublisher {
   const namespace = ablyChannelNamespace(options.namespace)
 

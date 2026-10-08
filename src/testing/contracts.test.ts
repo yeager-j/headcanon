@@ -310,6 +310,7 @@ const invalidationMutants: ReadonlyArray<{
           },
         },
         publisher: {
+          onFailure: bus.onFailure,
           publish(eventId, stamp) {
             bus.publish(eventId, stamp)
             for (const invalidation of bus.published.filter(

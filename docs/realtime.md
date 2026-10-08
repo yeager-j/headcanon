@@ -92,7 +92,7 @@ export const noteInvalidations = createAblyInvalidationPublisher({
 })
 ```
 
-The publisher owns its failure reporter. `onFailure` receives each publication that Ably rejects or that times out. Without `onFailure`, failures go to `console.error`.
+The publisher owns its failure reporter. `onFailure` receives each publication that Ably rejects or that times out. It is required, so decide where these diagnostics go.
 
 Pass the publisher to the generated action from [Server setup](server-setup.md):
 
