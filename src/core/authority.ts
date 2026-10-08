@@ -535,7 +535,8 @@ export type MutationExecutorError =
     }
   | MutationAuthorityAdapterError
 
-interface ParsedEnvelope {
+/** An envelope that passed {@link parseEnvelope}. */
+export interface ParsedEnvelope {
   readonly mutationId: string
   readonly createdAt: number
   readonly definition: AnyMutationDefinition
@@ -556,7 +557,12 @@ export interface PreparedMutationRequest {
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-function parseEnvelope(
+/**
+ * Checks an untrusted envelope's exact shape against `protocol`. Not a package
+ * export: the authority admits deliveries with it, and a predicted root checks
+ * a stored queue with it.
+ */
+export function parseEnvelope(
   value: unknown,
   protocol: AnyProtocolDefinition
 ): Result<ParsedEnvelope, MutationExecutorError> {

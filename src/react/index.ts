@@ -25,7 +25,9 @@ export {
   type PredictedRootOptions,
   type PredictedRootRecoveryListeners,
   type ProtocolPredictedRoot,
+  type StagedMutation,
 } from "./predicted-root"
+export { sessionStoragePersistence, type QueuePersistence } from "./persistence"
 export {
   createPredictedRootContext,
   type PredictedRootContext,

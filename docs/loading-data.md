@@ -261,6 +261,8 @@ In the browser, a failed `router.refresh()` does not stay pending. In Next.js 16
 
 A reload loses all in-memory state: the root's mutation queue, including mutations the server has not accepted yet, and every open draft or unsaved input. If the browser is offline, the reload can show the browser's own offline error page instead of your app.
 
+To keep the queue, give the root `persistence`. The reloaded page restores the mutations the server has not accepted and delivers them again. See [Keep the queue across a reload](react.md#keep-the-queue-across-a-reload). Drafts that were never passed to `mutate` are still lost.
+
 This is common on a phone that loses signal. Polling makes it more likely, because `withPollingFallback` refreshes on each interval while push delivery is degraded. To lower the risk, `withPollingFallback` and `withVisibilityRefresh` do not request a refresh while the browser reports it is offline (`navigator.onLine === false`); they request one when the browser is online again. See [Realtime updates](realtime.md#add-polling-fallback). `navigator.onLine` is only a hint, so a refresh can still fail.
 
 Later Next.js versions add an `experimental.useOffline` option. With it, the router waits for the connection and tries again instead of reloading. Headcanon is still verifying this option, so this guide does not recommend it yet.

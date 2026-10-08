@@ -257,7 +257,7 @@ The client's delivery timeout marks the result as uncertain; it does not cancel 
 
 ## Limit delivery age
 
-Each envelope carries `createdAt`, the time the client created the mutation, in epoch milliseconds on the client's clock. A retry, a delivery at unmount, and a later redelivery all keep the original value.
+Each envelope carries `createdAt`, the time the client created the mutation, in epoch milliseconds on the client's clock. A retry, a delivery at unmount, and a later redelivery all keep the original value. So does a mutation that a root restores from its stored queue after a page reload; see [Keep the queue across a reload](react.md#keep-the-queue-across-a-reload).
 
 When no receipt exists for the mutation ID, the authority compares `createdAt` with its own clock before every attempt. The Drizzle adapter uses the database clock. It refuses the delivery when `createdAt` is:
 
