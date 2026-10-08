@@ -8,6 +8,7 @@ import {
   startTransition,
   StrictMode,
   useEffect,
+  useEffectEvent,
   useState,
   type ReactNode,
 } from "react"
@@ -2980,6 +2981,127 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     expect(roots.get("replacement")?.conflicts).toHaveLength(1)
   })
 
+  it("sends a held mutate and a mounting root's mutate in one queue, in order", async () => {
+    // The first root left idle, so its ledger left the factory's queues. A
+    // child's mount effect under the next root calls the held `mutate`, then
+    // the new root's. Both must go to one queue, in that order.
+    const { persistence, flaky } = createFlakyPersistence()
+    const { deliveries, send } = createControlledSender()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+      name: "CounterRoot",
+    })
+    const firstVisit = renderHook(() =>
+      useCounterPredictions({ canon: canon(0, 0) })
+    )
+    const heldMutate = firstVisit.result.current.mutate
+    firstVisit.unmount()
+    await act(async () => {})
+    flaky.failWrites = true
+
+    const receipts: MutationReceipt<CounterError>[] = []
+    function MutateOnMount() {
+      const { mutate: mutateRoot } = CounterRoot.useRoot()
+      useEffect(() => {
+        if (receipts.length > 0) return
+        receipts.push(acceptedLocally(heldMutate(add({ amount: 1 }))))
+        receipts.push(acceptedLocally(mutateRoot(add({ amount: 2 }))))
+      }, [mutateRoot])
+      return null
+    }
+    render(
+      createElement(CounterRoot.Provider, {
+        canon: canon(0, 0),
+        children: createElement(MutateOnMount),
+      })
+    )
+    await act(async () => {})
+    expect(send).toHaveBeenCalledOnce()
+
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    expect(deliveries.map((delivery) => delivery.envelope.mutationId)).toEqual(
+      receipts.map((receipt) => receipt.id)
+    )
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
+    await expect(receipts[0]?.accepted).resolves.toEqual(ok(stamp(1)))
+  })
+
+  it("settles a held mutate's receipt after a later root takes over its queue", async () => {
+    const { persistence } = createMemoryPersistence()
+    const { mount, deliveries } = createPersistedFactory(persistence)
+    const firstVisit = mount()
+    const heldMutate = firstVisit.result.current.mutate
+    firstVisit.unmount()
+    await act(async () => {})
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = acceptedLocally(heldMutate(add({ amount: 1 })))
+    })
+    mount()
+    await act(async () => {})
+
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    await expect(receipt.accepted).resolves.toEqual(ok(stamp(1)))
+  })
+
+  it("withdraws a refused clean miss instead of sending it when a root replaces its observer", async () => {
+    // Every attempt was a known-clean miss, then canon refused the
+    // prediction. The replacement root must not send it before it projects
+    // the entry against its own canon.
+    vi.useFakeTimers()
+    const send = vi.fn(
+      async (_envelope: MutationEnvelope<CounterInvocation>) => {
+        throw new RetryableDeliveryError("contention")
+      }
+    )
+    const { persistence } = createMemoryPersistence()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const roots = new Map<string, ReturnType<typeof useCounterPredictions>>()
+    function CounterView({
+      name,
+      value,
+    }: {
+      readonly name: string
+      readonly value: number
+    }) {
+      roots.set(name, useCounterPredictions({ canon: canon(value, value) }))
+      return null
+    }
+    const view = render(
+      createElement(CounterView, { key: "a", name: "a", value: 0 })
+    )
+    act(() => {
+      acceptedLocally(roots.get("a")!.mutate(add({ amount: 1, refuseAt: 5 })))
+    })
+    await act(async () => {})
+    for (const delay of DELIVERY_RETRY_DELAYS_MS) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delay)
+      })
+    }
+    view.rerender(createElement(CounterView, { key: "a", name: "a", value: 5 }))
+    await act(async () => {})
+    expect(roots.get("a")?.conflicts).toHaveLength(1)
+    const attempts = send.mock.calls.length
+
+    view.rerender(createElement(CounterView, { key: "b", name: "b", value: 5 }))
+    await act(async () => {})
+
+    expect(send).toHaveBeenCalledTimes(attempts)
+    expect(roots.get("b")?.status.pending).toBe(0)
+  })
+
   it("does not pass a background delivery's control flow to React", async () => {
     const signal = new Error("framework control flow")
     const propagated = vi.fn()
@@ -3060,6 +3182,51 @@ describe("createPredictedRoot — Activity", () => {
       act(() => deliveries[0]?.resolve(ok(stamp(1))))
     }
   )
+})
+
+describe("createPredictedRoot — Activity with a child's mutate", () => {
+  it("settles the receipt of a mutate from a child's effect as the root is revealed", async () => {
+    const { persistence } = createMemoryPersistence()
+    const { deliveries, send } = createControlledSender()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+      name: "CounterRoot",
+    })
+    const receipts: MutationReceipt<CounterError>[] = []
+    function MutateOnReveal() {
+      const { mutate: mutateRoot } = CounterRoot.useRoot()
+      const save = useEffectEvent(() => {
+        receipts.push(acceptedLocally(mutateRoot(add({ amount: 1 }))))
+      })
+      // Runs on mount and again each time Activity reveals the child.
+      useEffect(() => save(), [])
+      return null
+    }
+    const shown = (mode: "visible" | "hidden") =>
+      createElement(Activity, {
+        mode,
+        children: createElement(CounterRoot.Provider, {
+          canon: canon(0, 0),
+          children: createElement(MutateOnReveal),
+        }),
+      })
+    const view = render(shown("visible"))
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    view.rerender(shown("hidden"))
+    await act(async () => {})
+
+    view.rerender(shown("visible"))
+    await act(async () => {})
+    expect(send).toHaveBeenCalledTimes(2)
+    await act(async () => deliveries[1]?.resolve(ok(stamp(2))))
+
+    await expect(receipts[1]?.accepted).resolves.toEqual(ok(stamp(2)))
+  })
 })
 
 describe("sessionStoragePersistence", () => {

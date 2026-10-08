@@ -280,6 +280,11 @@ interface Milestones<Error> {
 interface EntryLifetime<Error> {
   /** Replaced when a root takes over the queue: each root holds its own receipts. */
   milestones: Milestones<Error>
+  /**
+   * A root or a `mutate` caller holds the receipt for `milestones`. A
+   * mutation restored before any root observed is unclaimed until one does.
+   */
+  claimed: boolean
   /** Numbers delivery attempts, so a late answer knows whether it is current. */
   attempt: number
   /** Automatic redeliveries consumed after {@link RetryableDeliveryError}s. */
@@ -329,13 +334,6 @@ export function isCanonized(
     entry.delivery.kind === "accepted" &&
     covers(revisions, entry.delivery.stamp.revisions)
   )
-}
-
-/** Matches the entry of the same mutation, in any render's ledger. */
-function isEntryOf<Invocation>(
-  entry: LedgerEntry<Invocation>
-): (candidate: LedgerEntry<Invocation>) => boolean {
-  return (candidate) => candidate.envelope === entry.envelope
 }
 
 function createMilestones<Error>(): Milestones<Error> {
@@ -464,9 +462,13 @@ export function createLedgerStore<Invocation, Error>(
     }
   }
 
-  function createLifetime(mayHaveCommitted: boolean): EntryLifetime<Error> {
+  function createLifetime(
+    mayHaveCommitted: boolean,
+    claimed: boolean
+  ): EntryLifetime<Error> {
     return {
       milestones: createMilestones(),
+      claimed,
       attempt: 0,
       retryAttempts: 0,
       mayHaveCommitted,
@@ -677,9 +679,11 @@ export function createLedgerStore<Invocation, Error>(
     reconciled: readonly LedgerEntry<Invocation>[] | null
   ): void {
     const head = queueHead(ledger.entries)
-    if (head?.delivery.kind !== "queued") return
+    // Unrestored, the queue may still be missing older stored mutations.
+    if (!restored || head?.delivery.kind !== "queued") return
     if (observer === null ? !outlivesRoot : !observer.active) return
-    if (observer !== null && !reconciled?.some(isEntryOf(head))) return
+    // Entries are immutable, so only the same object was projected as it is.
+    if (observer !== null && !reconciled?.includes(head)) return
     // A later mount could restore an ended mutation that storage still
     // holds and commit it after anything sent now.
     forgetUnstoredEndedMutations()
@@ -748,6 +752,7 @@ export function createLedgerStore<Invocation, Error>(
       } as const)
       lifetime.milestones.accepted.resolve(unmounted)
       lifetime.milestones.canonized.resolve(unmounted)
+      lifetime.claimed = false
     }
 
     if (!outlivesRoot) {
@@ -812,7 +817,7 @@ export function createLedgerStore<Invocation, Error>(
     for (const envelope of storage.load()) {
       if (entryFor(envelope.mutationId)) continue
 
-      const lifetime = createLifetime(true)
+      const lifetime = createLifetime(true, observer !== null)
       lifetimes.set(envelope.mutationId, lifetime)
       restoredEntries.push({
         envelope,
@@ -836,9 +841,12 @@ export function createLedgerStore<Invocation, Error>(
   }
 
   /**
-   * Gives a root that takes over the queue its own receipts. An uncertain
-   * head is delivered again, as a reload would; an attempt still in its wait
-   * holds the new root's Action, and its answer still settles the mutation.
+   * Gives a root that takes over the queue the receipts no one holds: those
+   * that ended with the earlier root, and those of mutations restored before
+   * any root observed. A receipt from a `mutate` that ran after the earlier
+   * root unmounted stays with its caller. An uncertain head is delivered
+   * again, as a reload would; an attempt still in its wait holds the new
+   * root's Action, and its answer still settles the mutation.
    */
   function resumeObserved(): MutationReceipt<Error>[] {
     const receipts: MutationReceipt<Error>[] = []
@@ -846,9 +854,12 @@ export function createLedgerStore<Invocation, Error>(
     for (const entry of ledger.entries) {
       const mutationId = entry.envelope.mutationId
       const lifetime = lifetimes.get(mutationId)
-      if (!lifetime) continue
+      if (!lifetime || lifetime.claimed) continue
 
-      lifetime.milestones = createMilestones()
+      lifetime.claimed = true
+      if (lifetime.milestones.canonized.settled) {
+        lifetime.milestones = createMilestones()
+      }
       if (entry.delivery.kind === "accepted") {
         lifetime.milestones.accepted.resolve(ok(entry.delivery.stamp))
       }
@@ -910,7 +921,11 @@ export function createLedgerStore<Invocation, Error>(
 
     /** Records one predicted mutation at the end of the queue. */
     enqueue(envelope: MutationEnvelope<Invocation>): MutationReceipt<Error> {
-      const lifetime = createLifetime(false)
+      // A `mutate` that outlives its root, such as a debounced save, can
+      // reach a ledger no root has restored yet. The stored queue goes first.
+      if (!restored) restoreStored()
+
+      const lifetime = createLifetime(false, true)
       lifetimes.set(envelope.mutationId, lifetime)
       publish({
         ...ledger,
@@ -921,8 +936,7 @@ export function createLedgerStore<Invocation, Error>(
       })
       saveQueue()
       if (observer === null) {
-        // A `mutate` that outlives its root, such as a debounced save. A
-        // later root with this key must continue the queue it starts.
+        // A later root with this key must continue the queue it starts.
         registration.register()
         continueUnobserved()
       }
@@ -974,14 +988,9 @@ export function createLedgerStore<Invocation, Error>(
       }
     },
 
-    /**
-     * Starts delivery for the observing root, and registers a persisted
-     * queue so a later root with its key takes it over.
-     */
+    /** Starts delivery for the observing root. */
     activate(token: object): void {
-      if (observer?.token !== token) return
-      observer.active = true
-      registration.register()
+      if (observer?.token === token) observer.active = true
     },
 
     /**

@@ -513,8 +513,9 @@ export function createPredictedRootHook<
   /**
    * The ledger of the queue `canon` selects: the one an earlier root of this
    * factory left delivering under the same key, or a new one. A new ledger
-   * joins `queues` only when its root activates, so a server render, which
-   * runs no effects, adds nothing.
+   * joins `queues` as it is created, so a `mutate` that outlived an earlier
+   * root of the key finds it. A server render adds nothing: no later root
+   * of that request could continue it.
    */
   const ledgerFor = (canon: Canon<State>): LedgerStore<Invocation, Error> => {
     const persistence = persistenceFor(options.persistence, canon)
@@ -548,6 +549,7 @@ export function createPredictedRootHook<
         },
       }
     )
+    if (typeof window !== "undefined") queues.set(key, store)
     return store
   }
 
