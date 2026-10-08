@@ -252,6 +252,11 @@ export interface LedgerEntry<Invocation> {
 interface Ledger<Invocation, Error> {
   readonly entries: readonly LedgerEntry<Invocation>[]
   readonly conflicts: readonly ReplayConflict<Invocation, Error>[]
+  /**
+   * The entries restored from storage, as restore added them. Empty until
+   * then, so a render can tell whether it includes them.
+   */
+  readonly restoredEntries: readonly LedgerEntry<Invocation>[]
 }
 
 /** The facts of one live mutation that never render. */
@@ -313,7 +318,11 @@ export function createLedgerStore<Invocation, Error>(
   rethrowControlFlow: (error: unknown) => void,
   storage: QueueStorage<Invocation>
 ) {
-  let ledger: Ledger<Invocation, Error> = { entries: [], conflicts: [] }
+  let ledger: Ledger<Invocation, Error> = {
+    entries: [],
+    conflicts: [],
+    restoredEntries: [],
+  }
   const lifetimes = new Map<string, EntryLifetime<Error>>()
   const listeners = new Set<() => void>()
   /** Settles once every delivery attempt sent so far has been answered. */
@@ -323,7 +332,9 @@ export function createLedgerStore<Invocation, Error>(
   let restored = false
   /**
    * The root deactivated. A root that replaces it may already own storage,
-   * so a late outcome here must not write its own queue over that one.
+   * so a late outcome here must not write its own queue over that one. A
+   * mutation queued from an unmount cleanup is still stored: it runs before
+   * any replacement restores.
    */
   let storageReleased = false
 
@@ -367,13 +378,18 @@ export function createLedgerStore<Invocation, Error>(
    * needs no redelivery, and unmount is not a settlement, so `dispose` never
    * calls this.
    */
-  function persist(): void {
-    if (!restored || storageReleased) return
+  function saveQueue(): void {
+    if (!restored) return
 
     const unaccepted = ledger.entries.filter(
       (entry) => entry.delivery.kind !== "accepted"
     )
     storage.save(unaccepted.map((entry) => entry.envelope))
+  }
+
+  /** Stores the queue after an outcome, unless the root has released storage. */
+  function saveOutcome(): void {
+    if (!storageReleased) saveQueue()
   }
 
   function createLifetime(mayHaveCommitted: boolean): EntryLifetime<Error> {
@@ -430,7 +446,7 @@ export function createLedgerStore<Invocation, Error>(
         (entry) => entry.envelope.mutationId !== mutationId
       ),
     })
-    persist()
+    saveOutcome()
   }
 
   function receiveOutcome(
@@ -448,7 +464,7 @@ export function createLedgerStore<Invocation, Error>(
       }
       if (outcome.ok) {
         advance(mutationId, { kind: "accepted", stamp: outcome.value })
-        persist()
+        saveOutcome()
         lifetime.accepted.resolve(ok(outcome.value))
       } else {
         settle(mutationId, err({ kind: "domain", error: outcome.error }))
@@ -590,7 +606,7 @@ export function createLedgerStore<Invocation, Error>(
       lifetime.canonized.resolve(unmounted)
     }
     lifetimes.clear()
-    publish({ entries: [], conflicts: ledger.conflicts })
+    publish({ ...ledger, entries: [] })
   }
 
   return {
@@ -640,11 +656,15 @@ export function createLedgerStore<Invocation, Error>(
       }
 
       if (restoredEntries.length > 0) {
-        publish({ ...ledger, entries: [...restoredEntries, ...ledger.entries] })
+        publish({
+          ...ledger,
+          entries: [...restoredEntries, ...ledger.entries],
+          restoredEntries,
+        })
       }
       // Also writes when nothing was restored: entries the root could not
       // deliver leave storage.
-      persist()
+      saveQueue()
       return receipts
     },
 
@@ -659,7 +679,7 @@ export function createLedgerStore<Invocation, Error>(
           { envelope, delivery: { kind: "queued" }, conflicted: false },
         ],
       })
-      persist()
+      saveQueue()
       return receiptFor(envelope.mutationId, lifetime)
     },
 
@@ -723,6 +743,7 @@ export function createLedgerStore<Invocation, Error>(
         error,
       }
       publish({
+        ...ledger,
         entries: ledger.entries.map((current) =>
           current === entry ? { ...current, conflicted: true } : current
         ),
@@ -746,12 +767,17 @@ export function createLedgerStore<Invocation, Error>(
 
     activate(): void {
       active = true
+      if (!storageReleased) return
+
+      // A Strict Mode effect replay: catch up on any outcome not stored.
       storageReleased = false
+      saveQueue()
     },
 
     /**
      * Disposes at the next microtask unless reactivated first, so a Strict
-     * Mode effect replay does not end the root. Storage writes stop at once.
+     * Mode effect replay does not end the root. Outcomes stop writing storage
+     * at once.
      */
     deactivate(): void {
       active = false

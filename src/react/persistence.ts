@@ -157,19 +157,19 @@ function parseStoredQueue<Invocation>(
  * in time and counts as a refusal.
  */
 function hasValidArguments(schema: StandardSchemaV1, args: unknown): boolean {
-  let validation: ReturnType<StandardSchemaV1["~standard"]["validate"]>
+  // A schema or the canonical check can throw on stored data, for example
+  // on nesting deep enough to exhaust the stack. That drops the entry.
   try {
-    validation = schema["~standard"].validate(args)
+    const validation = schema["~standard"].validate(args)
+    if (validation instanceof Promise) {
+      validation.catch(() => undefined)
+      return false
+    }
+
+    if (validation.issues !== undefined) return false
+
+    return isParsedForm(args, validation.value)
   } catch {
     return false
   }
-
-  if (validation instanceof Promise) {
-    validation.catch(() => undefined)
-    return false
-  }
-
-  if (validation.issues !== undefined) return false
-
-  return isParsedForm(args, validation.value)
 }

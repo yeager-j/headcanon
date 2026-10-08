@@ -1568,6 +1568,26 @@ function mutationIds(stored: unknown): string[] {
   )
 }
 
+/** A provider root over `persistence`, for tests that need real child effects. */
+function createPersistedContext(persistence: QueuePersistence) {
+  const controlled = createControlledSender()
+  const useCounterPredictions = createPredictedRoot({
+    protocol: counterProtocol,
+    send: controlled.send,
+    refresh: useNoRefresh,
+    persistence,
+  })
+  const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+    name: "CounterRoot",
+  })
+
+  return { ...controlled, CounterRoot }
+}
+
+type CounterMutate = ReturnType<
+  ReturnType<typeof createPersistedContext>["CounterRoot"]["useRoot"]
+>["mutate"]
+
 describe("createPredictedRoot — persisted queue", () => {
   afterEach(() => {
     globalThis.sessionStorage.clear()
@@ -1732,6 +1752,107 @@ describe("createPredictedRoot — persisted queue", () => {
     act(() => recordA.deliveries[0]?.resolve(ok(stamp(1))))
   })
 
+  it("lets every mutate before the restoring render predict over the restored queue", () => {
+    // Canon is 0 and the restored mutation adds 1. The second call refuses
+    // at 0, so it succeeds only when predicted over the restored mutation.
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence } = createMemoryPersistence([restored])
+    const { CounterRoot } = createPersistedContext(persistence)
+    const outcomes: Result<MutationReceipt<CounterError>, CounterError>[] = []
+    function MutateTwiceOnMount() {
+      const { mutate: mutateRoot, value } = CounterRoot.useRoot()
+      useEffect(() => {
+        if (outcomes.length > 0) return
+        outcomes.push(mutateRoot(add({ amount: 0 })))
+        outcomes.push(mutateRoot(add({ amount: 1, refuseAt: 0 })))
+      }, [mutateRoot])
+      return createElement("output", null, value)
+    }
+
+    const view = render(
+      createElement(CounterRoot.Provider, {
+        canon: canon(0, 0),
+        children: createElement(MutateTwiceOnMount),
+      })
+    )
+
+    expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, true])
+    expect(view.container.textContent).toBe("2")
+  })
+
+  it("stores a mutation queued from a child's unmount cleanup", async () => {
+    const { persistence, stored } = createMemoryPersistence()
+    const { CounterRoot, deliveries } = createPersistedContext(persistence)
+    let latestMutate: CounterMutate | undefined
+    let autosaved: Result<MutationReceipt<CounterError>, CounterError> | null =
+      null
+    function AutosaveOnUnmount() {
+      const { mutate: mutateRoot } = CounterRoot.useRoot()
+      useEffect(() => {
+        latestMutate = mutateRoot
+      })
+      useEffect(
+        () => () => {
+          autosaved ??= latestMutate?.(add({ amount: 5 })) ?? null
+        },
+        []
+      )
+      return null
+    }
+    const view = render(
+      createElement(CounterRoot.Provider, {
+        canon: canon(0, 0),
+        children: createElement(AutosaveOnUnmount),
+      })
+    )
+
+    view.unmount()
+    await act(async () => {})
+
+    const receipt = acceptedLocally(autosaved!)
+    expect(mutationIds(stored())).toEqual([receipt.id])
+    expect(deliveries[0]?.envelope.mutationId).toBe(receipt.id)
+  })
+
+  it("stores a mutation queued from a cleanup during Strict Mode's effect replay", async () => {
+    const { persistence, stored } = createMemoryPersistence()
+    const { CounterRoot } = createPersistedContext(persistence)
+    let latestMutate: CounterMutate | undefined
+    let autosaved: Result<MutationReceipt<CounterError>, CounterError> | null =
+      null
+    let pending = -1
+    function AutosaveOnUnmount() {
+      const { mutate: mutateRoot, status } = CounterRoot.useRoot()
+      useEffect(() => {
+        latestMutate = mutateRoot
+        pending = status.pending
+      })
+      useEffect(
+        () => () => {
+          autosaved ??= latestMutate?.(add({ amount: 5 })) ?? null
+        },
+        []
+      )
+      return null
+    }
+
+    render(
+      createElement(
+        StrictMode,
+        null,
+        createElement(CounterRoot.Provider, {
+          canon: canon(0, 0),
+          children: createElement(AutosaveOnUnmount),
+        })
+      )
+    )
+    await act(async () => {})
+
+    const receipt = acceptedLocally(autosaved!)
+    expect(pending).toBe(1)
+    expect(mutationIds(stored())).toEqual([receipt.id])
+  })
+
   it("keeps a late outcome of a replaced root out of its replacement's store", async () => {
     // Root B replaces root A in one commit. A's answer arrives after A
     // deactivated but before its deferred disposal; it must not write A's
@@ -1872,6 +1993,20 @@ describe("createPredictedRoot — persisted queue", () => {
     const { result } = mountPersisted(persistence)
 
     expect(result.current.value).toBe(1)
+    expect(result.current.status.pending).toBe(1)
+    expect(stored()).toEqual([valid])
+  })
+
+  it("drops stored arguments too deeply nested to check, without throwing", () => {
+    let nested: unknown = []
+    for (let depth = 0; depth < 10_000; depth += 1) nested = [nested]
+    const tooDeep = storedEnvelope({ amount: 1, nested } as CounterArgs)
+    const valid = storedEnvelope({ amount: 2 })
+    const { persistence, stored } = createMemoryPersistence([tooDeep, valid])
+
+    const { result } = mountPersisted(persistence)
+
+    expect(result.current.value).toBe(2)
     expect(result.current.status.pending).toBe(1)
     expect(stored()).toEqual([valid])
   })

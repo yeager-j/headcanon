@@ -527,12 +527,10 @@ export function createPredictedRootHook<
     // Restores in an effect or in `mutate`, never during render, so the
     // hydration render matches the server's. `mutate` restores too because a
     // child's mount effect runs before this root's.
-    const restoreQueue = useCallback((): boolean => {
-      const receipts = store.restore()
-      for (const receipt of receipts) {
+    const restoreQueue = useCallback((): void => {
+      for (const receipt of store.restore()) {
         observeStages(receipt, options.mutationListeners ?? {}, true)
       }
-      return receipts.length > 0
     }, [store])
 
     useEffect(() => {
@@ -561,10 +559,18 @@ export function createPredictedRootHook<
         invocation: Invocation,
         stageOverrides?: MutationStageListeners<Error>
       ): Result<MutationReceipt<Error>, Error> => {
-        // A queue restored just now is not in the rendered value yet.
-        const current = restoreQueue()
-          ? project(canon, store.getSnapshot().entries).value
-          : projection.value
+        restoreQueue()
+        // Until a render includes the restored entries, every call predicts
+        // over them and this render's entries, so calls in one event still
+        // check against one value.
+        const unrenderedRestore =
+          ledger.restoredEntries.length === 0
+            ? store.getSnapshot().restoredEntries
+            : []
+        const current =
+          unrenderedRestore.length === 0
+            ? projection.value
+            : project(canon, [...unrenderedRestore, ...ledger.entries]).value
         const stages = withDefaults(stageOverrides, options.mutationListeners)
         const envelope = freezeEnvelope(
           options.protocol.id,
@@ -585,7 +591,7 @@ export function createPredictedRootHook<
         stages.onPrediction?.(result)
         return result
       },
-      [canon, projection.value, restoreQueue, store]
+      [canon, ledger, projection.value, restoreQueue, store]
     )
 
     const head = queueHead(ledger.entries)
