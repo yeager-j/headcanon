@@ -178,6 +178,11 @@ export type ProtocolPredictedRoot<Protocol extends AnyProtocolDefinition> =
     >
   }
 
+/** One store for every root, or a store chosen per root from its first canon. */
+type PersistenceOption<State> =
+  | QueuePersistence
+  | ((canon: Canon<State>) => QueuePersistence | undefined)
+
 /** Protocol, delivery, refresh, and invalidation dependencies for a root factory. */
 export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
   /** The protocol whose mutations the root predicts and delivers. */
@@ -218,8 +223,18 @@ export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
    * restores the stored mutations ahead of new ones and delivers them again
    * under their original mutation IDs. Without it, the queue lives only in
    * memory.
+   *
+   * Each mounted root needs its own store. When one factory mounts a root
+   * per record, pass a function: each root calls it once, with its first
+   * canon, and keeps the result. Return `undefined` to keep that root's
+   * queue in memory.
+   * @example
+   * ```ts
+   * persistence: (canon) =>
+   *   sessionStoragePersistence(`notes-queue:${canon.value.id}`)
+   * ```
    */
-  readonly persistence?: QueuePersistence
+  readonly persistence?: PersistenceOption<StateOf<Protocol>>
   /** Default root-recovery observers used when a mounted root does not override a condition. */
   readonly recoveryListeners?: PredictedRootRecoveryListeners<
     ProtocolInvocation<Protocol>,
@@ -328,6 +343,14 @@ function freezeEnvelope<Invocation>(
     createdAt,
     invocation: structuredClone(invocation),
   })
+}
+
+/** The store one root uses: the option itself, or its answer for `canon`. */
+function persistenceFor<State>(
+  option: PersistenceOption<State> | undefined,
+  canon: Canon<State>
+): QueuePersistence | undefined {
+  return typeof option === "function" ? option(canon) : option
 }
 
 /** Calls the acceptance and canonization listeners when `receipt` settles. */
@@ -474,7 +497,10 @@ export function createPredictedRootHook<
       createLedgerStore<Invocation, Error>(
         options.send,
         rethrowControlFlow,
-        createQueueStorage(options.persistence, options.protocol)
+        createQueueStorage(
+          persistenceFor(options.persistence, canon),
+          options.protocol
+        )
       )
     )
     const ledger = useSyncExternalStore(
@@ -498,16 +524,22 @@ export function createPredictedRootHook<
     )
     const listeners = withDefaults(recoveryListeners, options.recoveryListeners)
 
-    // Restores in an effect, not during render, so the hydration render
-    // matches the server's. A child's mount effect can queue a mutation
-    // first; restore puts the stored mutations ahead of it.
-    useEffect(() => {
-      for (const receipt of store.restore()) {
+    // Restores in an effect or in `mutate`, never during render, so the
+    // hydration render matches the server's. `mutate` restores too because a
+    // child's mount effect runs before this root's.
+    const restoreQueue = useCallback((): boolean => {
+      const receipts = store.restore()
+      for (const receipt of receipts) {
         observeStages(receipt, options.mutationListeners ?? {}, true)
       }
+      return receipts.length > 0
+    }, [store])
+
+    useEffect(() => {
+      restoreQueue()
       store.activate()
       return store.deactivate
-    }, [store])
+    }, [restoreQueue, store])
 
     // Reconcile this render's projection, then deliver. Refusals first, so a
     // jossed envelope that never left is retracted before it could be sent.
@@ -529,6 +561,10 @@ export function createPredictedRootHook<
         invocation: Invocation,
         stageOverrides?: MutationStageListeners<Error>
       ): Result<MutationReceipt<Error>, Error> => {
+        // A queue restored just now is not in the rendered value yet.
+        const current = restoreQueue()
+          ? project(canon, store.getSnapshot().entries).value
+          : projection.value
         const stages = withDefaults(stageOverrides, options.mutationListeners)
         const envelope = freezeEnvelope(
           options.protocol.id,
@@ -536,7 +572,7 @@ export function createPredictedRootHook<
           Date.now(),
           invocation
         )
-        const predicted = predict(projection.value, envelope)
+        const predicted = predict(current, envelope)
         if (!predicted.ok) {
           const result = err<Error>(predicted.error)
           stages.onPrediction?.(result)
@@ -549,7 +585,7 @@ export function createPredictedRootHook<
         stages.onPrediction?.(result)
         return result
       },
-      [projection.value, store]
+      [canon, projection.value, restoreQueue, store]
     )
 
     const head = queueHead(ledger.entries)

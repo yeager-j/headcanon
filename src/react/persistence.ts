@@ -4,7 +4,11 @@
 // adapter, and the guarded shell the ledger writes through.
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 
-import { parseEnvelope, type MutationEnvelope } from "../core/authority"
+import {
+  isParsedForm,
+  parseEnvelope,
+  type MutationEnvelope,
+} from "../core/authority"
 import type { AnyProtocolDefinition } from "../core/protocol"
 
 /**
@@ -40,7 +44,8 @@ export interface QueuePersistence {
  * export const useNote = createNextPredictedRoot({
  *   protocol: notesProtocol,
  *   action: applyNotesMutation,
- *   persistence: sessionStoragePersistence("notes-queue"),
+ *   persistence: (canon) =>
+ *     sessionStoragePersistence(`notes-queue:${canon.value.id}`),
  * })
  * ```
  */
@@ -146,8 +151,10 @@ function parseStoredQueue<Invocation>(
 
 /**
  * The predictor runs on restored arguments before the authority sees them,
- * so they must pass the schema now. An asynchronous schema cannot answer in
- * time and counts as a refusal.
+ * so they must pass the schema now, in the parsed form the authority admits:
+ * a schema that coerces or fills in a value would give the predictor
+ * arguments its schema never produced. An asynchronous schema cannot answer
+ * in time and counts as a refusal.
  */
 function hasValidArguments(schema: StandardSchemaV1, args: unknown): boolean {
   let validation: ReturnType<StandardSchemaV1["~standard"]["validate"]>
@@ -162,5 +169,7 @@ function hasValidArguments(schema: StandardSchemaV1, args: unknown): boolean {
     return false
   }
 
-  return validation.issues === undefined
+  if (validation.issues !== undefined) return false
+
+  return isParsedForm(args, validation.value)
 }

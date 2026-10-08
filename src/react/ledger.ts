@@ -321,6 +321,11 @@ export function createLedgerStore<Invocation, Error>(
   let active = false
   /** Storage has been read; until then a write could erase an older page's queue. */
   let restored = false
+  /**
+   * The root deactivated. A root that replaces it may already own storage,
+   * so a late outcome here must not write its own queue over that one.
+   */
+  let storageReleased = false
 
   function publish(next: Ledger<Invocation, Error>): void {
     ledger = next
@@ -363,7 +368,7 @@ export function createLedgerStore<Invocation, Error>(
    * calls this.
    */
   function persist(): void {
-    if (!restored) return
+    if (!restored || storageReleased) return
 
     const unaccepted = ledger.entries.filter(
       (entry) => entry.delivery.kind !== "accepted"
@@ -741,14 +746,16 @@ export function createLedgerStore<Invocation, Error>(
 
     activate(): void {
       active = true
+      storageReleased = false
     },
 
     /**
      * Disposes at the next microtask unless reactivated first, so a Strict
-     * Mode effect replay does not end the root.
+     * Mode effect replay does not end the root. Storage writes stop at once.
      */
     deactivate(): void {
       active = false
+      storageReleased = true
       queueMicrotask(() => {
         if (!active) dispose()
       })

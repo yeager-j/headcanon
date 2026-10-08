@@ -372,7 +372,7 @@ If navigation depends on knowing that a write succeeded, await acceptance before
 
 ## Keep the queue across a reload
 
-A root keeps its queue in memory. A page reload, such as the one a failed router refresh causes, drops every mutation the server has not accepted. Pass `persistence` to keep the queue in the tab's `sessionStorage`:
+A root keeps its queue in memory. A page reload, such as the one a failed router refresh causes, drops every mutation the server has not accepted. Pass `persistence` to keep the queue in the tab's `sessionStorage`. Each mounted root needs its own key, so pass a function that picks the key from the root's canon:
 
 ```ts
 // lib/notes/root.ts
@@ -387,7 +387,8 @@ import { notesProtocol } from "./protocol"
 export const useNote = createNextPredictedRoot({
   protocol: notesProtocol,
   action: applyNotesMutation,
-  persistence: sessionStoragePersistence("notes-queue"),
+  persistence: (canon) =>
+    sessionStoragePersistence(`notes-queue:${canon.value.id}`),
   mutationListeners: {
     onAcceptance(result, mutation) {
       if (mutation.restored && !result.ok) {
@@ -400,20 +401,22 @@ export const useNote = createNextPredictedRoot({
 
 `showNotice` is an application-owned helper.
 
+Each root calls the function once, when it mounts, with its first canon. Key the root by the record's identity (see [Share one root across components](#share-one-root-across-components)), so the record's ID does not change while the root is mounted. Return `undefined` to keep a root's queue in memory only. A single `QueuePersistence` object, instead of a function, gives every root of the factory the same key; use it only when the factory mounts one root at a time.
+
 The root stores each envelope (mutation ID, protocol, `createdAt`, and invocation) when `mutate` queues it. It removes the envelope when the server accepts the mutation or the mutation fails. Unmount does not remove it. Every write finishes before `mutate` returns, so nothing is lost when the page closes right after an edit.
 
-When a root mounts, it restores the stored mutations once, ahead of any new mutation, and delivers them again in order under their original mutation IDs. This is safe: the server keeps one receipt per mutation ID, so a mutation that already committed gets its stored outcome and is not applied twice. The restored predictions are replayed over the new page's canon, like any pending mutation. A restored mutation may already have been sent by the earlier page, so a replay refusal hides its prediction but does not withdraw it; the root waits for the server's answer.
+When a root mounts, it restores the stored mutations once, ahead of any new mutation, and delivers them again in order under their original mutation IDs. A `mutate` call that comes first, such as one from a child's mount effect, restores the queue itself and is predicted over the restored mutations. This is safe: the server keeps one receipt per mutation ID, so a mutation that already committed gets its stored outcome and is not applied twice. The restored predictions are replayed over the new page's canon, like any pending mutation. A restored mutation may already have been sent by the earlier page, so a replay refusal hides its prediction but does not withdraw it; the root waits for the server's answer.
 
 Restored mutations count in `status.pending` and `status.delivery`. No `mutate` call holds their receipts, so the factory's `mutationListeners` report them. `onAcceptance` and `onCanonization` receive a second argument, `{ id, restored }`; `restored` is `true` for a restored mutation. `onPrediction` does not run for it.
 
-The root checks every stored envelope before it restores it. It drops an envelope for a different protocol ID, an unknown mutation name, an envelope with missing or extra fields (including a missing `createdAt`), arguments that the mutation's schema refuses, and a repeated mutation ID. A stored value that is not valid JSON is dropped completely. A schema that validates asynchronously cannot be checked in time, so its mutations are dropped too. Dropped mutations are not reported.
+The root checks every stored envelope before it restores it. It drops an envelope for a different protocol ID, an unknown mutation name, an envelope with missing or extra fields (including a missing `createdAt`), arguments that the mutation's schema refuses or changes (the server admits only arguments in parsed form), and a repeated mutation ID. A stored value that is not valid JSON is dropped completely. A schema that validates asynchronously cannot be checked in time, so its mutations are dropped too. Dropped mutations are not reported.
 
 If storage is missing or refuses a read or write, for example in a private window or when it is full, `mutate` still works and the queue stays in memory.
 
 Know the limits:
 
 - **One tab.** `sessionStorage` belongs to one tab, and a closed tab loses it. A duplicated tab gets a copy, so both tabs deliver the same mutations. This is safe: they share mutation IDs, and the server's receipts make the second delivery return the first one's outcome.
-- **One root per key.** Two roots mounted at the same time with the same key overwrite each other's queue. Give each mounted root its own key, for example by including the record's ID when one factory mounts a root per record.
+- **One mounted root per key.** Two roots mounted at the same time with the same key restore and deliver the same mutations, and each overwrites the other's queue. Give each mounted root its own key, such as one that includes the record's ID.
 - **No other devices or browsers.** Nothing leaves the browser until it is delivered.
 - **Delivery age.** A restored envelope keeps its original `createdAt`. If it is older than the server's maximum delivery age and the server has no receipt for it, delivery fails with `"undeliverable"` and `error.code` `"delivery-expired"`. See [Limit delivery age](server-setup.md#limit-delivery-age).
 - **JSON arguments.** `sessionStoragePersistence` stores envelopes as JSON. Mutation arguments must already be canonical JSON for the server, so this loses nothing.

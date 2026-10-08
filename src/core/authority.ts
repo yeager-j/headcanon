@@ -608,6 +608,23 @@ export function parseEnvelope(
   })
 }
 
+/**
+ * Arguments are in parsed form when their schema's output has the same
+ * canonical JSON as the arguments themselves. Not a package export: the
+ * authority admits arguments with it, and a predicted root checks a stored
+ * queue with it.
+ * @param received Arguments as they arrived.
+ * @param parsed The argument schema's output for `received`.
+ */
+export function isParsedForm(received: unknown, parsed: unknown): boolean {
+  const receivedJson = canonicalJson(received)
+  const parsedJson = canonicalJson(parsed)
+
+  return (
+    receivedJson.ok && parsedJson.ok && receivedJson.value === parsedJson.value
+  )
+}
+
 /** Reported when a schema changes arguments that should already be parsed. */
 const UNPARSED_ARGUMENTS_ISSUE: StandardSchemaV1.Issue = Object.freeze({
   message:
@@ -658,9 +675,7 @@ export async function prepareMutationRequest<
     return err({ code: "canonical-invocation", error: prepared.error })
   }
 
-  const received = canonicalJson(args)
-  const parsed = canonicalJson(parsedArguments.value)
-  if (!received.ok || !parsed.ok || received.value !== parsed.value) {
+  if (!isParsedForm(args, parsedArguments.value)) {
     return err({
       code: "invalid-arguments",
       mutation: definition.name,
