@@ -535,7 +535,8 @@ export type MutationExecutorError =
     }
   | MutationAuthorityAdapterError
 
-interface ParsedEnvelope {
+/** An envelope that passed {@link parseEnvelope}. */
+export interface ParsedEnvelope {
   readonly mutationId: string
   readonly createdAt: number
   readonly definition: AnyMutationDefinition
@@ -556,7 +557,12 @@ export interface PreparedMutationRequest {
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-function parseEnvelope(
+/**
+ * Checks an untrusted envelope's exact shape against `protocol`. Not a package
+ * export: the authority admits deliveries with it, and a predicted root checks
+ * a stored queue with it.
+ */
+export function parseEnvelope(
   value: unknown,
   protocol: AnyProtocolDefinition
 ): Result<ParsedEnvelope, MutationExecutorError> {
@@ -600,6 +606,23 @@ function parseEnvelope(
     definition,
     args: value.invocation.args,
   })
+}
+
+/**
+ * Arguments are in parsed form when their schema's output has the same
+ * canonical JSON as the arguments themselves. Not a package export: the
+ * authority admits arguments with it, and a predicted root checks a stored
+ * queue with it.
+ * @param received Arguments as they arrived.
+ * @param parsed The argument schema's output for `received`.
+ */
+export function isParsedForm(received: unknown, parsed: unknown): boolean {
+  const receivedJson = canonicalJson(received)
+  const parsedJson = canonicalJson(parsed)
+
+  return (
+    receivedJson.ok && parsedJson.ok && receivedJson.value === parsedJson.value
+  )
 }
 
 /** Reported when a schema changes arguments that should already be parsed. */
@@ -652,9 +675,7 @@ export async function prepareMutationRequest<
     return err({ code: "canonical-invocation", error: prepared.error })
   }
 
-  const received = canonicalJson(args)
-  const parsed = canonicalJson(parsedArguments.value)
-  if (!received.ok || !parsed.ok || received.value !== parsed.value) {
+  if (!isParsedForm(args, parsedArguments.value)) {
     return err({
       code: "invalid-arguments",
       mutation: definition.name,

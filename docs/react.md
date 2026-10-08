@@ -28,7 +28,7 @@ export const NoteRoot = createPredictedRootContext(useNote, {
 })
 ```
 
-The Next binding supplies Server Action delivery and router refresh. A router refresh that fails reloads the whole page, which drops the root's queue and any unsaved drafts; see [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page). The binding also passes Next.js navigation signals, such as redirects, back to the framework instead of treating them as uncertain delivery.
+The Next binding supplies Server Action delivery and router refresh. A router refresh that fails reloads the whole page, which drops the root's queue and any unsaved drafts; see [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page). To keep the queue across a reload, see [Keep the queue across a reload](#keep-the-queue-across-a-reload). The binding also passes Next.js navigation signals, such as redirects, back to the framework instead of treating them as uncertain delivery.
 
 The factory does not create a shared store. Each call to `useNote({ canon })` mounts an independent root. Use the hook directly when one component owns the feature, as in Getting started. Use `NoteRoot.Provider` when several components need the same state and queue.
 
@@ -279,7 +279,7 @@ An ordinary delivery error, a response that exceeds the root's 10-second wait, o
 
 The resent envelope also keeps its original `createdAt`. The server refuses a new execution of an envelope older than its maximum delivery age (7 days by default). While the server still has a receipt for the mutation, a retry gets the stored outcome at any age. After the server deletes old receipts, a retry gets `undeliverable` with `error.code` `"delivery-expired"`, even if the first attempt committed and only its response was lost. Before you offer to make the change again, load current data and check whether it is already saved.
 
-The same rule applies to envelopes sent when the root unmounts and to any queue that stores envelopes and sends them later, such as one kept in `sessionStorage`. Such a queue must keep each envelope's mutation ID and `createdAt` unchanged. See [Limit delivery age](server-setup.md#limit-delivery-age).
+The same rule applies to envelopes sent when the root unmounts and to mutations a root restores from its stored queue after a reload; see [Keep the queue across a reload](#keep-the-queue-across-a-reload). A queue you store and send yourself must also keep each envelope's mutation ID and `createdAt` unchanged. See [Limit delivery age](server-setup.md#limit-delivery-age).
 
 The 10-second wait does not cancel a Next.js Server Action. An unanswered action can still hold up later Server Actions and transitions. Bound server work as described in [Server setup](server-setup.md#bound-database-and-network-waits).
 
@@ -362,11 +362,66 @@ Place the root high enough to outlive the components that edit its data. Closing
 
 Unmount settles unresolved receipt milestones with `"root-unmounted"`. A receipt whose acceptance already succeeded keeps that accepted result, while its unfinished canonization reports unmount with `outcome: "accepted"`.
 
-Unmount is not cancellation. The root starts a best-effort send of remaining unsent envelopes after outstanding delivery attempts settle, whether they succeed or fail. It sends those envelopes sequentially but does not report their results through the settled receipts. It does not resend sending or uncertain envelopes merely because it unmounted. This is not durable delivery across a closed tab or page reload.
+Unmount is not cancellation. The root starts a best-effort send of remaining unsent envelopes after outstanding delivery attempts settle, whether they succeed or fail. It sends those envelopes sequentially but does not report their results through the settled receipts. It does not resend sending or uncertain envelopes merely because it unmounted. Without `persistence`, this is not durable delivery across a page reload or a closed tab.
+
+With `persistence`, unmount leaves every unsettled mutation in storage, including sending and uncertain ones. The next root that mounts with the same storage in the same tab restores them and delivers them again. See [Keep the queue across a reload](#keep-the-queue-across-a-reload).
 
 That ordering applies only within the unsent group. While mounted, the queue waits behind an uncertain head; after unmount, later queued mutations can be sent without recovering that head's outcome. If the head never reached the server, a later mutation can commit without the earlier one. If an outstanding request never settles, the unsent group remains waiting. Do not rely on unmount delivery to preserve dependencies across an uncertain mutation.
 
 If navigation depends on knowing that a write succeeded, await acceptance before navigating. If it depends on this view receiving the updated data, await canonization while the root is still mounted. Do not infer that a write failed just because its root disappeared.
+
+## Keep the queue across a reload
+
+A root keeps its queue in memory. A page reload, such as the one a failed router refresh causes, drops every mutation the server has not accepted. Pass `persistence` to keep the queue in the tab's `sessionStorage`. Each mounted root needs its own key, so pass a function that picks the key from the root's canon:
+
+```ts
+// lib/notes/root.ts
+"use client"
+
+import { createNextPredictedRoot } from "headcanon/next/client"
+import { sessionStoragePersistence } from "headcanon/react"
+
+import { applyNotesMutation } from "./actions"
+import { notesProtocol } from "./protocol"
+
+export const useNote = createNextPredictedRoot({
+  protocol: notesProtocol,
+  action: applyNotesMutation,
+  persistence: (canon) =>
+    sessionStoragePersistence(`notes-queue:${canon.value.id}`),
+  mutationListeners: {
+    onAcceptance(result, mutation) {
+      if (mutation.restored && !result.ok) {
+        showNotice("A change made before the page reloaded was not saved.")
+      }
+    },
+  },
+})
+```
+
+`showNotice` is an application-owned helper.
+
+Each root calls the function once, when it mounts, with its first canon. Key the root by the record's identity (see [Share one root across components](#share-one-root-across-components)), so the record's ID does not change while the root is mounted. Return `undefined` to keep a root's queue in memory only. A single `QueuePersistence` object, instead of a function, gives every root of the factory the same key; use it only when the factory mounts one root at a time.
+
+The root stores each envelope (mutation ID, protocol, `createdAt`, and invocation) when `mutate` queues it. It removes the envelope when the server accepts the mutation or the mutation fails. Unmount does not remove it, and a mutation queued from an unmount cleanup, such as an autosave, is stored too. Every write finishes before `mutate` returns, so nothing is lost when the page closes right after an edit.
+
+When a root mounts, it restores the stored mutations once, ahead of any new mutation, and delivers them again in order under their original mutation IDs. A `mutate` call that comes first, such as one from a child's mount effect, restores the queue itself and is predicted over the restored mutations. This is safe: the server keeps one receipt per mutation ID, so a mutation that already committed gets its stored outcome and is not applied twice. The restored predictions are replayed over the new page's canon, like any pending mutation. A restored mutation may already have been sent by the earlier page, so a replay refusal hides its prediction but does not withdraw it; the root waits for the server's answer.
+
+Restored mutations count in `status.pending` and `status.delivery`. No `mutate` call holds their receipts, so the factory's `mutationListeners` report them. `onAcceptance` and `onCanonization` receive a second argument, `{ id, restored }`; `restored` is `true` for a restored mutation. `onPrediction` does not run for it.
+
+The root checks every stored envelope before it restores it. It drops an envelope for a different protocol ID, an unknown mutation name, an envelope with missing or extra fields (including a missing `createdAt`), arguments that the mutation's schema refuses or changes (the server admits only arguments in parsed form), and a repeated mutation ID. A stored value that is not valid JSON is dropped completely. A schema that validates asynchronously cannot be checked in time, so its mutations are dropped too. Dropped mutations are not reported.
+
+If storage is missing or refuses a read or write, for example in a private window or when it is full, `mutate` still works and the queue stays in memory. A root that cannot read storage never writes to it either, so whatever it holds stays there for a later mount. Text under the key that is not JSON counts as a stored value the root cannot use, and the root replaces it.
+
+Know the limits:
+
+- **One tab.** `sessionStorage` belongs to one tab, and a closed tab loses it. A duplicated tab gets a copy, so both tabs deliver the same mutations. This is safe: they share mutation IDs, and the server's receipts make the second delivery return the first one's outcome.
+- **One mounted root per key.** Two roots mounted at the same time with the same key restore and deliver the same mutations, and each overwrites the other's queue. Give each mounted root its own key, such as one that includes the record's ID.
+- **No other devices or browsers.** Nothing leaves the browser until it is delivered.
+- **Delivery age.** A restored envelope keeps its original `createdAt`. If it is older than the server's maximum delivery age and the server has no receipt for it, delivery fails with `"undeliverable"` and `error.code` `"delivery-expired"`. See [Limit delivery age](server-setup.md#limit-delivery-age).
+- **JSON arguments.** `sessionStoragePersistence` stores envelopes as JSON. Mutation arguments must already be canonical JSON for the server, so this loses nothing.
+
+To use another store, such as `localStorage` or a store in memory, pass any object with synchronous `load()` and `save(envelopes)` methods. An asynchronous store, such as IndexedDB, is not supported. A store that several tabs share, such as `localStorage`, acts like two roots with one key: each tab overwrites the other's queue.
 
 ## Use an observed root for read-only views
 

@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-import { act, renderHook, waitFor } from "@testing-library/react"
+import { act, render, renderHook, waitFor } from "@testing-library/react"
 import {
   createElement,
   startTransition,
   StrictMode,
+  useEffect,
   useState,
   type ReactNode,
 } from "react"
@@ -14,14 +15,17 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   createPredictedRoot,
+  createPredictedRootContext,
   DELIVERY_WAIT_MS,
   RetryableDeliveryError,
+  sessionStoragePersistence,
   TerminalDeliveryError,
   useSnapshotRefresh,
   type MutationReceipt,
   type MutationStageListeners,
   type PredictedRootOptions,
   type PredictedRootRecoveryListeners,
+  type QueuePersistence,
 } from "."
 import {
   acceptedStamp,
@@ -50,6 +54,10 @@ const counterArgsSchema: StandardSchemaV1<unknown, CounterArgs> = {
     version: 1,
     vendor: "headcanon-test",
     validate(value) {
+      const args = value as Partial<CounterArgs> | null
+      if (typeof args?.amount !== "number") {
+        return { issues: [{ message: "amount must be a number" }] }
+      }
       return { value: value as CounterArgs }
     },
   },
@@ -260,8 +268,9 @@ describe("createPredictedRoot", () => {
       kind: "domain" as const,
       error: { code: "prediction-refused" as const },
     })
-    expect(onAcceptance).toHaveBeenCalledWith(refusal)
-    expect(onCanonization).toHaveBeenCalledWith(refusal)
+    const mutation = { id: receipt.id, restored: false }
+    expect(onAcceptance).toHaveBeenCalledWith(refusal, mutation)
+    expect(onCanonization).toHaveBeenCalledWith(refusal, mutation)
   })
 
   it("uses root listeners unless a mutate call overrides that stage", () => {
@@ -1375,8 +1384,12 @@ describe("createPredictedRoot — terminal and paused delivery", () => {
     const { result, deliveries } = setup()
     const onAcceptance = vi.fn()
     const onCanonization = vi.fn()
+    let receipt!: MutationReceipt<CounterError>
     act(() => {
-      mutate(result, add({ amount: 1 }), { onAcceptance, onCanonization })
+      receipt = mutate(result, add({ amount: 1 }), {
+        onAcceptance,
+        onCanonization,
+      })
     })
 
     const cause = new Error("the server does not know this action")
@@ -1387,8 +1400,12 @@ describe("createPredictedRoot — terminal and paused delivery", () => {
     )
 
     const staleClient = err({ kind: "stale-client" })
-    expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(staleClient)
-    expect(onCanonization).toHaveBeenCalledExactlyOnceWith(staleClient)
+    const mutation = { id: receipt.id, restored: false }
+    expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(staleClient, mutation)
+    expect(onCanonization).toHaveBeenCalledExactlyOnceWith(
+      staleClient,
+      mutation
+    )
     expect(result.current.value).toBe(0)
     expect(result.current.status.delivery).toBe("idle")
   })
@@ -1474,5 +1491,691 @@ describe("createPredictedRoot — terminal and paused delivery", () => {
     } finally {
       window.removeEventListener("error", captureSignal)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A persisted queue survives a page load
+// ---------------------------------------------------------------------------
+
+/** A persistence adapter whose stored value goes through JSON, like Web Storage. */
+function createMemoryPersistence(initial?: unknown) {
+  let stored: unknown = initial
+  const persistence: QueuePersistence = {
+    load: () => stored,
+    save(envelopes) {
+      stored =
+        envelopes.length === 0
+          ? undefined
+          : (JSON.parse(JSON.stringify(envelopes)) as unknown)
+    },
+  }
+
+  return { persistence, stored: () => stored }
+}
+
+interface MountPersistedOptions {
+  readonly canon?: Canon<number>
+  readonly strict?: boolean
+  readonly mutationListeners?: MutationStageListeners<CounterError>
+}
+
+/** Mounts a root as a fresh page would: a new hook, sender, and ledger. */
+function mountPersisted(
+  persistence: PredictedRootOptions<typeof counterProtocol>["persistence"],
+  {
+    canon: initialCanon = canon(0, 0),
+    strict,
+    mutationListeners,
+  }: MountPersistedOptions = {}
+) {
+  const controlled = createControlledSender()
+  const useCounterPredictions = createPredictedRoot({
+    protocol: counterProtocol,
+    send: controlled.send,
+    refresh: useNoRefresh,
+    persistence,
+    mutationListeners,
+  })
+  const wrapper = strict
+    ? ({ children }: { readonly children: ReactNode }) =>
+        createElement(StrictMode, null, children)
+    : undefined
+  const rendered = renderHook(
+    ({ currentCanon }: { currentCanon: Canon<number> }) =>
+      useCounterPredictions({ canon: currentCanon }),
+    { initialProps: { currentCanon: initialCanon }, wrapper }
+  )
+
+  return { ...controlled, ...rendered }
+}
+
+function storedEnvelope(
+  args: CounterArgs,
+  createdAt = Date.UTC(2026, 0, 1)
+): MutationEnvelope<CounterInvocation> {
+  return {
+    protocol: counterProtocol.id,
+    mutationId: globalThis.crypto.randomUUID(),
+    createdAt,
+    invocation: { name: add.name, args } as CounterInvocation,
+  }
+}
+
+function mutationIds(stored: unknown): string[] {
+  return (stored as MutationEnvelope<unknown>[]).map(
+    (envelope) => envelope.mutationId
+  )
+}
+
+/** A provider root over `persistence`, for tests that need real child effects. */
+function createPersistedContext(persistence: QueuePersistence) {
+  const controlled = createControlledSender()
+  const useCounterPredictions = createPredictedRoot({
+    protocol: counterProtocol,
+    send: controlled.send,
+    refresh: useNoRefresh,
+    persistence,
+  })
+  const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+    name: "CounterRoot",
+  })
+
+  return { ...controlled, CounterRoot }
+}
+
+type CounterMutate = ReturnType<
+  ReturnType<typeof createPersistedContext>["CounterRoot"]["useRoot"]
+>["mutate"]
+
+describe("createPredictedRoot — persisted queue", () => {
+  afterEach(() => {
+    globalThis.sessionStorage.clear()
+  })
+
+  it("stores each queued mutation and removes it when it settles", async () => {
+    const { persistence, stored } = createMemoryPersistence()
+    const { result, deliveries } = mountPersisted(persistence)
+    let first!: MutationReceipt<CounterError>
+    let second!: MutationReceipt<CounterError>
+
+    act(() => {
+      first = mutate(result, add({ amount: 1 }))
+      second = mutate(result, add({ amount: 2 }))
+    })
+    expect(stored()).toEqual([deliveries[0]?.envelope, expect.anything()])
+    expect(mutationIds(stored())).toEqual([first.id, second.id])
+
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    await expect(first.accepted).resolves.toEqual(ok(stamp(1)))
+    expect(mutationIds(stored())).toEqual([second.id])
+
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    await act(async () =>
+      deliveries[1]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+    )
+    await expect(second.accepted).resolves.toEqual(err({ kind: "denied" }))
+    expect(stored()).toBeUndefined()
+  })
+
+  it("keeps the stored queue when the root unmounts", async () => {
+    const { persistence, stored } = createMemoryPersistence()
+    const { result, deliveries, unmount } = mountPersisted(persistence)
+    let first!: MutationReceipt<CounterError>
+    let second!: MutationReceipt<CounterError>
+    act(() => {
+      first = mutate(result, add({ amount: 1 }))
+      second = mutate(result, add({ amount: 2 }))
+    })
+
+    unmount()
+    await expect(first.accepted).resolves.toEqual(
+      err({ kind: "root-unmounted", outcome: "unknown" })
+    )
+
+    expect(mutationIds(stored())).toEqual([first.id, second.id])
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+  })
+
+  it("redelivers the stored queue in order after a reload, before new mutations", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    const firstCreatedAt = Date.UTC(2026, 0, 1)
+    vi.setSystemTime(firstCreatedAt)
+    const { persistence } = createMemoryPersistence()
+    const firstPage = mountPersisted(persistence)
+    let first!: MutationReceipt<CounterError>
+    let second!: MutationReceipt<CounterError>
+    act(() => {
+      first = mutate(firstPage.result, add({ amount: 1 }))
+    })
+    vi.setSystemTime(firstCreatedAt + 1000)
+    act(() => {
+      second = mutate(firstPage.result, add({ amount: 2 }))
+    })
+    // A full-page load: nothing in memory survives, and nothing settles.
+    firstPage.unmount()
+    vi.setSystemTime(firstCreatedAt + 60_000)
+
+    const { result, deliveries } = mountPersisted(persistence)
+    act(() => {
+      mutate(result, add({ amount: 3 }))
+    })
+
+    expect(result.current.value).toBe(6)
+    expect(result.current.status.pending).toBe(3)
+    expect(result.current.status.delivery).toBe("sending")
+    expect(deliveries[0]?.envelope).toEqual(firstPage.deliveries[0]?.envelope)
+    expect(deliveries[0]?.envelope).toMatchObject({
+      mutationId: first.id,
+      createdAt: firstCreatedAt,
+    })
+
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    expect(deliveries[1]?.envelope).toMatchObject({
+      mutationId: second.id,
+      createdAt: firstCreatedAt + 1000,
+    })
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
+    await waitFor(() => expect(deliveries).toHaveLength(3))
+    expect(deliveries[2]?.envelope.invocation.args.amount).toBe(3)
+    act(() => deliveries[2]?.resolve(ok(stamp(3))))
+    act(() => firstPage.deliveries[0]?.resolve(ok(stamp(1))))
+  })
+
+  it("restores before a mutate from a child's mount effect, and predicts over it", async () => {
+    // The child's effect runs before the root's. Its mutation refuses at 0,
+    // so it succeeds only when predicted over the restored one.
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence, stored } = createMemoryPersistence([restored])
+    const { send } = createControlledSender()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+      name: "CounterRoot",
+    })
+    let outcome: Result<MutationReceipt<CounterError>, CounterError> | null =
+      null
+    let storedOnReturn: string[] = []
+    function MutateOnMount() {
+      const { mutate: mutateRoot, value } = CounterRoot.useRoot()
+      useEffect(() => {
+        if (outcome) return
+        outcome = mutateRoot(add({ amount: 2, refuseAt: 0 }))
+        storedOnReturn = mutationIds(stored())
+      }, [mutateRoot])
+      return createElement("output", null, value)
+    }
+
+    const view = render(
+      createElement(CounterRoot.Provider, {
+        canon: canon(0, 0),
+        children: createElement(MutateOnMount),
+      })
+    )
+
+    const receipt = acceptedLocally(outcome!)
+    expect(storedOnReturn).toEqual([restored.mutationId, receipt.id])
+    await waitFor(() => expect(send).toHaveBeenCalled())
+    expect(send.mock.calls[0]?.[0].mutationId).toBe(restored.mutationId)
+    expect(mutationIds(stored())).toEqual([restored.mutationId, receipt.id])
+    expect(view.container.textContent).toBe("3")
+  })
+
+  it("gives each root the store its first canon selects", () => {
+    // One factory mounts a root per record; each record has its own queue.
+    const stores = new Map<number, ReturnType<typeof createMemoryPersistence>>()
+    const selectStore = vi.fn((first: Canon<number>) => {
+      const memory = stores.get(first.value) ?? createMemoryPersistence()
+      stores.set(first.value, memory)
+      return memory.persistence
+    })
+    const recordA = mountPersisted(selectStore, { canon: canon(0, 0) })
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(recordA.result, add({ amount: 1 }))
+    })
+    recordA.rerender({ currentCanon: canon(5, 1) })
+
+    const recordB = mountPersisted(selectStore, { canon: canon(100, 0) })
+
+    expect(selectStore).toHaveBeenCalledTimes(2)
+    expect(mutationIds(stores.get(0)?.stored())).toEqual([receipt.id])
+    expect(stores.get(100)?.stored()).toBeUndefined()
+    expect(recordB.result.current.value).toBe(100)
+    expect(recordB.result.current.status.pending).toBe(0)
+    expect(recordB.send).not.toHaveBeenCalled()
+    act(() => recordA.deliveries[0]?.resolve(ok(stamp(1))))
+  })
+
+  it("lets every mutate before the restoring render predict over the restored queue", () => {
+    // Canon is 0 and the restored mutation adds 1. The second call refuses
+    // at 0, so it succeeds only when predicted over the restored mutation.
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence } = createMemoryPersistence([restored])
+    const { CounterRoot } = createPersistedContext(persistence)
+    const outcomes: Result<MutationReceipt<CounterError>, CounterError>[] = []
+    function MutateTwiceOnMount() {
+      const { mutate: mutateRoot, value } = CounterRoot.useRoot()
+      useEffect(() => {
+        if (outcomes.length > 0) return
+        outcomes.push(mutateRoot(add({ amount: 0 })))
+        outcomes.push(mutateRoot(add({ amount: 1, refuseAt: 0 })))
+      }, [mutateRoot])
+      return createElement("output", null, value)
+    }
+
+    const view = render(
+      createElement(CounterRoot.Provider, {
+        canon: canon(0, 0),
+        children: createElement(MutateTwiceOnMount),
+      })
+    )
+
+    expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, true])
+    expect(view.container.textContent).toBe("2")
+  })
+
+  it("stores a mutation queued from a child's unmount cleanup", async () => {
+    const { persistence, stored } = createMemoryPersistence()
+    const { CounterRoot, deliveries } = createPersistedContext(persistence)
+    let latestMutate: CounterMutate | undefined
+    let autosaved: Result<MutationReceipt<CounterError>, CounterError> | null =
+      null
+    function AutosaveOnUnmount() {
+      const { mutate: mutateRoot } = CounterRoot.useRoot()
+      useEffect(() => {
+        latestMutate = mutateRoot
+      })
+      useEffect(
+        () => () => {
+          autosaved ??= latestMutate?.(add({ amount: 5 })) ?? null
+        },
+        []
+      )
+      return null
+    }
+    const view = render(
+      createElement(CounterRoot.Provider, {
+        canon: canon(0, 0),
+        children: createElement(AutosaveOnUnmount),
+      })
+    )
+
+    view.unmount()
+    await act(async () => {})
+
+    const receipt = acceptedLocally(autosaved!)
+    expect(mutationIds(stored())).toEqual([receipt.id])
+    expect(deliveries[0]?.envelope.mutationId).toBe(receipt.id)
+  })
+
+  it("stores a mutation queued from a cleanup during Strict Mode's effect replay", async () => {
+    const { persistence, stored } = createMemoryPersistence()
+    const { CounterRoot } = createPersistedContext(persistence)
+    let latestMutate: CounterMutate | undefined
+    let autosaved: Result<MutationReceipt<CounterError>, CounterError> | null =
+      null
+    let pending = -1
+    function AutosaveOnUnmount() {
+      const { mutate: mutateRoot, status } = CounterRoot.useRoot()
+      useEffect(() => {
+        latestMutate = mutateRoot
+        pending = status.pending
+      })
+      useEffect(
+        () => () => {
+          autosaved ??= latestMutate?.(add({ amount: 5 })) ?? null
+        },
+        []
+      )
+      return null
+    }
+
+    render(
+      createElement(
+        StrictMode,
+        null,
+        createElement(CounterRoot.Provider, {
+          canon: canon(0, 0),
+          children: createElement(AutosaveOnUnmount),
+        })
+      )
+    )
+    await act(async () => {})
+
+    const receipt = acceptedLocally(autosaved!)
+    expect(pending).toBe(1)
+    expect(mutationIds(stored())).toEqual([receipt.id])
+  })
+
+  it("keeps a late outcome of a replaced root out of its replacement's store", async () => {
+    // Root B replaces root A in one commit. A's answer arrives after A
+    // deactivated but before its deferred disposal; it must not write A's
+    // queue over the one B restored.
+    const { persistence, stored } = createMemoryPersistence()
+    const { deliveries, send } = createControlledSender()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const roots = new Map<string, ReturnType<typeof useCounterPredictions>>()
+    function CounterView({ name }: { readonly name: string }) {
+      roots.set(name, useCounterPredictions({ canon: canon(0, 0) }))
+      return null
+    }
+    const view = render(createElement(CounterView, { key: "a", name: "a" }))
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = acceptedLocally(roots.get("a")!.mutate(add({ amount: 1 })))
+    })
+
+    act(() => {
+      deliveries[0]?.resolve(ok(stamp(1)))
+      view.rerender(createElement(CounterView, { key: "b", name: "b" }))
+    })
+    await act(async () => {})
+
+    expect(roots.get("b")?.status.pending).toBe(1)
+    expect(mutationIds(stored())).toEqual([receipt.id])
+  })
+
+  it("replays a restored prediction over the new page's canon", () => {
+    const { persistence } = createMemoryPersistence([
+      storedEnvelope({ amount: 1 }),
+    ])
+
+    const { result } = mountPersisted(persistence, { canon: canon(10, 10) })
+
+    expect(result.current.value).toBe(11)
+  })
+
+  it("delivers a restored mutation that replay refuses instead of withdrawing it", async () => {
+    // The earlier page may have sent it, so the write may already exist. It
+    // waits behind the head, where a never-sent mutation would be withdrawn.
+    const head = storedEnvelope({ amount: 1 })
+    const refused = storedEnvelope({ amount: 1, refuseAt: 11 })
+    const { persistence, stored } = createMemoryPersistence([head, refused])
+    const onAcceptance = vi.fn()
+
+    const { result, deliveries } = mountPersisted(persistence, {
+      canon: canon(10, 10),
+      mutationListeners: { onAcceptance },
+    })
+
+    expect(result.current.value).toBe(11)
+    expect(result.current.conflicts).toEqual([
+      expect.objectContaining({ mutationId: refused.mutationId }),
+    ])
+    expect(result.current.status.pending).toBe(2)
+    expect(mutationIds(stored())).toEqual([head.mutationId, refused.mutationId])
+
+    act(() => deliveries[0]?.resolve(ok(stamp(11))))
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    expect(deliveries[1]?.envelope.mutationId).toBe(refused.mutationId)
+
+    act(() => deliveries[1]?.resolve(ok(stamp(12))))
+    await waitFor(() =>
+      expect(onAcceptance).toHaveBeenCalledWith(ok(stamp(12)), {
+        id: refused.mutationId,
+        restored: true,
+      })
+    )
+  })
+
+  it("reports restored outcomes to the factory's listeners", async () => {
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence } = createMemoryPersistence([restored])
+    const onPrediction = vi.fn()
+    const onAcceptance = vi.fn()
+    const onCanonization = vi.fn()
+    const { deliveries, rerender } = mountPersisted(persistence, {
+      mutationListeners: { onPrediction, onAcceptance, onCanonization },
+    })
+    const mutation = { id: restored.mutationId, restored: true }
+
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    await waitFor(() =>
+      expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(
+        ok(stamp(1)),
+        mutation
+      )
+    )
+    rerender({ currentCanon: canon(1, 1) })
+    await waitFor(() =>
+      expect(onCanonization).toHaveBeenCalledExactlyOnceWith(
+        ok(undefined),
+        mutation
+      )
+    )
+    expect(onPrediction).not.toHaveBeenCalled()
+  })
+
+  it("delivers a restored mutation once under Strict Mode", async () => {
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence } = createMemoryPersistence([restored])
+
+    const { result, send } = mountPersisted(persistence, { strict: true })
+    await act(async () => {})
+
+    expect(send).toHaveBeenCalledExactlyOnceWith(restored)
+    expect(result.current.value).toBe(1)
+    expect(result.current.status.pending).toBe(1)
+  })
+
+  it("drops stored entries the root cannot deliver and keeps the rest", () => {
+    const valid = storedEnvelope({ amount: 1 })
+    const invalid = [
+      { ...storedEnvelope({ amount: 2 }), protocol: "test.other.v1" },
+      {
+        ...storedEnvelope({ amount: 3 }),
+        invocation: { name: "counter.remove", args: { amount: 3 } },
+      },
+      (({ createdAt: _createdAt, ...rest }) => rest)(
+        storedEnvelope({ amount: 4 })
+      ),
+      { ...storedEnvelope({ amount: 5 }), mutationId: "not-a-uuid" },
+      {
+        ...storedEnvelope({ amount: 6 }),
+        invocation: { name: add.name, args: { amount: "6" } },
+      },
+      { ...valid, invocation: { name: add.name, args: { amount: 7 } } },
+      "not an envelope",
+    ]
+    const { persistence, stored } = createMemoryPersistence([valid, ...invalid])
+
+    const { result } = mountPersisted(persistence)
+
+    expect(result.current.value).toBe(1)
+    expect(result.current.status.pending).toBe(1)
+    expect(stored()).toEqual([valid])
+  })
+
+  it("drops stored arguments too deeply nested to check, without throwing", () => {
+    let nested: unknown = []
+    for (let depth = 0; depth < 10_000; depth += 1) nested = [nested]
+    const tooDeep = storedEnvelope({ amount: 1, nested } as CounterArgs)
+    const valid = storedEnvelope({ amount: 2 })
+    const { persistence, stored } = createMemoryPersistence([tooDeep, valid])
+
+    const { result } = mountPersisted(persistence)
+
+    expect(result.current.value).toBe(2)
+    expect(result.current.status.pending).toBe(1)
+    expect(stored()).toEqual([valid])
+  })
+
+  it("drops stored arguments that a coercing or defaulting schema changes", () => {
+    // Authority admits only parsed-form arguments; the predictor must not run
+    // on a value its schema never produced.
+    const coercingArgsSchema: StandardSchemaV1<unknown, CounterArgs> = {
+      "~standard": {
+        version: 1,
+        vendor: "headcanon-test",
+        validate(value) {
+          const amount = (value as { readonly amount?: unknown }).amount
+          if (amount === undefined) return { value: { amount: 1 } }
+          return { value: { amount: Number(amount) } }
+        },
+      },
+    }
+    const addCoerced = defineMutation({
+      name: "counter.add-coerced",
+      args: coercingArgsSchema,
+      predict: (state: number, args): Result<number, CounterError> =>
+        ok(state + args.amount),
+    })
+    const coercingProtocol = defineProtocol({
+      id: "test.coercing.v1",
+      mutations: [addCoerced],
+    })
+    const envelopeFor = (args: unknown) => ({
+      protocol: coercingProtocol.id,
+      mutationId: globalThis.crypto.randomUUID(),
+      createdAt: Date.UTC(2026, 0, 1),
+      invocation: { name: addCoerced.name, args },
+    })
+    const valid = envelopeFor({ amount: 2 })
+    const { persistence, stored } = createMemoryPersistence([
+      envelopeFor({ amount: "5" }),
+      envelopeFor({}),
+      valid,
+    ])
+    const useCoercedPredictions = createPredictedRoot({
+      protocol: coercingProtocol,
+      send: createControlledSender<ReturnType<typeof addCoerced>>().send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+
+    const { result } = renderHook(() =>
+      useCoercedPredictions({ canon: canon(0, 0) })
+    )
+
+    expect(result.current.value).toBe(2)
+    expect(result.current.status.pending).toBe(1)
+    expect(stored()).toEqual([valid])
+  })
+
+  it("restores nothing from a stored value that is not a list", () => {
+    const { persistence, stored } = createMemoryPersistence({ queue: [] })
+
+    const { result } = mountPersisted(persistence)
+
+    expect(result.current.status.pending).toBe(0)
+    expect(stored()).toBeUndefined()
+  })
+
+  it("never writes over a stored queue it could not read", () => {
+    // The read fails once; the store itself still accepts writes. A write
+    // from this root would replace a queue it never saw.
+    const restored = storedEnvelope({ amount: 1 })
+    const memory = createMemoryPersistence([restored])
+    let readFails = true
+    const persistence: QueuePersistence = {
+      load() {
+        if (!readFails) return memory.persistence.load()
+        readFails = false
+        throw new DOMException("blocked", "SecurityError")
+      },
+      save: (envelopes) => memory.persistence.save(envelopes),
+    }
+
+    const firstPage = mountPersisted(persistence)
+    expect(firstPage.result.current.status.pending).toBe(0)
+    expect(memory.stored()).toEqual([restored])
+
+    act(() => {
+      mutate(firstPage.result, add({ amount: 2 }))
+    })
+    expect(firstPage.result.current.value).toBe(2)
+    expect(memory.stored()).toEqual([restored])
+    firstPage.unmount()
+
+    const { result, send } = mountPersisted(persistence)
+    expect(send).toHaveBeenCalledWith(restored)
+    expect(result.current.value).toBe(1)
+  })
+
+  it("keeps working in memory when the store throws", async () => {
+    const persistence: QueuePersistence = {
+      load() {
+        throw new DOMException("blocked", "SecurityError")
+      },
+      save() {
+        throw new DOMException("full", "QuotaExceededError")
+      },
+    }
+    const { result, deliveries } = mountPersisted(persistence)
+    let receipt!: MutationReceipt<CounterError>
+
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+    expect(result.current.value).toBe(1)
+
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    await expect(receipt.accepted).resolves.toEqual(ok(stamp(1)))
+  })
+})
+
+describe("sessionStoragePersistence", () => {
+  afterEach(() => {
+    globalThis.sessionStorage.clear()
+  })
+
+  it("stores the queue as JSON under its key and removes the key when it empties", async () => {
+    const persistence = sessionStoragePersistence("counter-queue")
+    const { result, deliveries } = mountPersisted(persistence)
+    let receipt!: MutationReceipt<CounterError>
+
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+    const stored = globalThis.sessionStorage.getItem("counter-queue")
+    expect(JSON.parse(stored ?? "null")).toEqual([deliveries[0]?.envelope])
+    expect(persistence.load()).toEqual([deliveries[0]?.envelope])
+
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    await expect(receipt.accepted).resolves.toEqual(ok(stamp(1)))
+    expect(globalThis.sessionStorage.getItem("counter-queue")).toBeNull()
+  })
+
+  it("replaces a stored value that is not JSON", () => {
+    // Text that is not JSON is a value the root cannot use, not a failed
+    // read, so the root cleans it up.
+    globalThis.sessionStorage.setItem("counter-queue", "{not json")
+    const persistence = sessionStoragePersistence("counter-queue")
+
+    const { result } = mountPersisted(persistence)
+    expect(globalThis.sessionStorage.getItem("counter-queue")).toBeNull()
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+
+    expect(result.current.value).toBe(1)
+    expect(persistence.load()).toHaveLength(1)
+  })
+
+  it("does not break mutate when sessionStorage refuses a write", () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("full", "QuotaExceededError")
+    })
+    const { result, send } = mountPersisted(
+      sessionStoragePersistence("counter-queue")
+    )
+
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+
+    expect(result.current.value).toBe(1)
+    expect(send).toHaveBeenCalledOnce()
   })
 })

@@ -12,6 +12,7 @@ import {
   type AcceptedStamp,
   type RevisionVector,
 } from "../core/revisions"
+import type { QueueStorage } from "./persistence"
 
 /** Terminal lifecycle failures surfaced by a predicted root's receipts. */
 export type MutationLifecycleError<Error> =
@@ -251,6 +252,11 @@ export interface LedgerEntry<Invocation> {
 interface Ledger<Invocation, Error> {
   readonly entries: readonly LedgerEntry<Invocation>[]
   readonly conflicts: readonly ReplayConflict<Invocation, Error>[]
+  /**
+   * The entries restored from storage, as restore added them. Empty until
+   * then, so a render can tell whether it includes them.
+   */
+  readonly restoredEntries: readonly LedgerEntry<Invocation>[]
 }
 
 /** The facts of one live mutation that never render. */
@@ -302,20 +308,35 @@ export function isCanonized(
  * The one authority for a root's mutation lifecycle: the rendered ledger, the
  * receipts, and the delivery queue. React reads the ledger through
  * `useSyncExternalStore`; every change goes through `advance` (delivery
- * transitions) or `settle` (terminal outcomes).
+ * transitions) or `settle` (terminal outcomes). `storage` keeps a copy of the
+ * unaccepted queue across page loads.
  */
 export function createLedgerStore<Invocation, Error>(
   send: (
     envelope: MutationEnvelope<Invocation>
   ) => Promise<Result<AcceptedStamp, Error>>,
-  rethrowControlFlow: (error: unknown) => void
+  rethrowControlFlow: (error: unknown) => void,
+  storage: QueueStorage<Invocation>
 ) {
-  let ledger: Ledger<Invocation, Error> = { entries: [], conflicts: [] }
+  let ledger: Ledger<Invocation, Error> = {
+    entries: [],
+    conflicts: [],
+    restoredEntries: [],
+  }
   const lifetimes = new Map<string, EntryLifetime<Error>>()
   const listeners = new Set<() => void>()
   /** Settles once every delivery attempt sent so far has been answered. */
   let outstanding: Promise<void> = Promise.resolve()
   let active = false
+  /** Storage has been read; until then a write could erase an older page's queue. */
+  let restored = false
+  /**
+   * The root deactivated. A root that replaces it may already own storage,
+   * so a late outcome here must not write its own queue over that one. A
+   * mutation queued from an unmount cleanup is still stored: it runs before
+   * any replacement restores.
+   */
+  let storageReleased = false
 
   function publish(next: Ledger<Invocation, Error>): void {
     ledger = next
@@ -352,6 +373,49 @@ export function createLedgerStore<Invocation, Error>(
     return true
   }
 
+  /**
+   * Stores every unaccepted envelope in mutation order. An accepted mutation
+   * needs no redelivery, and unmount is not a settlement, so `dispose` never
+   * calls this.
+   */
+  function saveQueue(): void {
+    if (!restored) return
+
+    const unaccepted = ledger.entries.filter(
+      (entry) => entry.delivery.kind !== "accepted"
+    )
+    storage.save(unaccepted.map((entry) => entry.envelope))
+  }
+
+  /** Stores the queue after an outcome, unless the root has released storage. */
+  function saveOutcome(): void {
+    if (!storageReleased) saveQueue()
+  }
+
+  function createLifetime(mayHaveCommitted: boolean): EntryLifetime<Error> {
+    return {
+      accepted: createDeferred(),
+      canonized: createDeferred(),
+      attempt: 0,
+      retryAttempts: 0,
+      mayHaveCommitted,
+      hold: null,
+      waitTimer: null,
+      retryTimer: null,
+    }
+  }
+
+  function receiptFor(
+    mutationId: string,
+    lifetime: EntryLifetime<Error>
+  ): MutationReceipt<Error> {
+    return {
+      id: mutationId,
+      accepted: lifetime.accepted.promise,
+      canonized: lifetime.canonized.promise,
+    }
+  }
+
   function clearTimers(lifetime: EntryLifetime<Error>): void {
     if (lifetime.waitTimer !== null) clearTimeout(lifetime.waitTimer)
     if (lifetime.retryTimer !== null) clearTimeout(lifetime.retryTimer)
@@ -382,6 +446,7 @@ export function createLedgerStore<Invocation, Error>(
         (entry) => entry.envelope.mutationId !== mutationId
       ),
     })
+    saveOutcome()
   }
 
   function receiveOutcome(
@@ -399,6 +464,7 @@ export function createLedgerStore<Invocation, Error>(
       }
       if (outcome.ok) {
         advance(mutationId, { kind: "accepted", stamp: outcome.value })
+        saveOutcome()
         lifetime.accepted.resolve(ok(outcome.value))
       } else {
         settle(mutationId, err({ kind: "domain", error: outcome.error }))
@@ -517,6 +583,9 @@ export function createLedgerStore<Invocation, Error>(
     //
     // A `sending` or `uncertain` entry may already have committed; its
     // receipt, not a second send, is what would resolve it.
+    //
+    // Unmount settles nothing, so storage keeps every unsettled envelope. A
+    // later mount that restores it redelivers it under the same mutation ID.
     const awaiting = ledger.entries.filter((entry) =>
       awaitsDelivery(entry.delivery)
     )
@@ -537,7 +606,7 @@ export function createLedgerStore<Invocation, Error>(
       lifetime.canonized.resolve(unmounted)
     }
     lifetimes.clear()
-    publish({ entries: [], conflicts: ledger.conflicts })
+    publish({ ...ledger, entries: [] })
   }
 
   return {
@@ -559,18 +628,49 @@ export function createLedgerStore<Invocation, Error>(
       return () => listeners.delete(listener)
     },
 
+    /**
+     * Puts the stored queue of an earlier page at the front of the queue, the
+     * first time it is called; later calls return nothing. Storage is not
+     * written before this runs. An earlier page may have sent any stored
+     * envelope, so a replay refusal never withdraws a restored mutation.
+     * @returns The restored mutations' receipts, in mutation order.
+     */
+    restore(): MutationReceipt<Error>[] {
+      if (restored) return []
+      restored = true
+
+      const restoredEntries: LedgerEntry<Invocation>[] = []
+      const receipts: MutationReceipt<Error>[] = []
+
+      for (const envelope of storage.load()) {
+        if (entryFor(envelope.mutationId)) continue
+
+        const lifetime = createLifetime(true)
+        lifetimes.set(envelope.mutationId, lifetime)
+        restoredEntries.push({
+          envelope,
+          delivery: { kind: "queued" },
+          conflicted: false,
+        })
+        receipts.push(receiptFor(envelope.mutationId, lifetime))
+      }
+
+      if (restoredEntries.length > 0) {
+        publish({
+          ...ledger,
+          entries: [...restoredEntries, ...ledger.entries],
+          restoredEntries,
+        })
+      }
+      // Also writes when nothing was restored: entries the root could not
+      // deliver leave storage.
+      saveQueue()
+      return receipts
+    },
+
     /** Records one predicted mutation at the end of the queue. */
     enqueue(envelope: MutationEnvelope<Invocation>): MutationReceipt<Error> {
-      const lifetime: EntryLifetime<Error> = {
-        accepted: createDeferred(),
-        canonized: createDeferred(),
-        attempt: 0,
-        retryAttempts: 0,
-        mayHaveCommitted: false,
-        hold: null,
-        waitTimer: null,
-        retryTimer: null,
-      }
+      const lifetime = createLifetime(false)
       lifetimes.set(envelope.mutationId, lifetime)
       publish({
         ...ledger,
@@ -579,11 +679,8 @@ export function createLedgerStore<Invocation, Error>(
           { envelope, delivery: { kind: "queued" }, conflicted: false },
         ],
       })
-      return {
-        id: envelope.mutationId,
-        accepted: lifetime.accepted.promise,
-        canonized: lifetime.canonized.promise,
-      }
+      saveQueue()
+      return receiptFor(envelope.mutationId, lifetime)
     },
 
     /** Starts one bounded delivery attempt when the queue head is queued. */
@@ -646,6 +743,7 @@ export function createLedgerStore<Invocation, Error>(
         error,
       }
       publish({
+        ...ledger,
         entries: ledger.entries.map((current) =>
           current === entry ? { ...current, conflicted: true } : current
         ),
@@ -669,14 +767,21 @@ export function createLedgerStore<Invocation, Error>(
 
     activate(): void {
       active = true
+      if (!storageReleased) return
+
+      // A Strict Mode effect replay: catch up on any outcome not stored.
+      storageReleased = false
+      saveQueue()
     },
 
     /**
      * Disposes at the next microtask unless reactivated first, so a Strict
-     * Mode effect replay does not end the root.
+     * Mode effect replay does not end the root. Outcomes stop writing storage
+     * at once.
      */
     deactivate(): void {
       active = false
+      storageReleased = true
       queueMicrotask(() => {
         if (!active) dispose()
       })

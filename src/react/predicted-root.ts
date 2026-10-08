@@ -38,6 +38,7 @@ import {
   type MutationReceipt,
   type ReplayConflict,
 } from "./ledger"
+import { createQueueStorage, type QueuePersistence } from "./persistence"
 import {
   useIncorporation,
   type IncorporationStatus,
@@ -65,19 +66,35 @@ export type ErrorOf<Protocol> =
   // lets generic code, such as a sender, return one before `Protocol` is known.
   | MutationRefusalOf<ProtocolMutation<Protocol>>
 
+/** The mutation an acceptance or canonization listener reports. */
+export interface StagedMutation {
+  /** The mutation ID, the same as its receipt's `id`. */
+  readonly id: string
+  /**
+   * `true` when the root restored the mutation from its `persistence` after
+   * a page load. No `mutate` call in this page holds its receipt.
+   */
+  readonly restored: boolean
+}
+
 /** Observers for the three mutation stages represented by a receipt. */
 export interface MutationStageListeners<Error> {
-  /** Called immediately with the local prediction result. */
+  /**
+   * Called immediately with the local prediction result. Not called for a
+   * restored mutation: its prediction was made before the page loaded.
+   */
   readonly onPrediction?: (
     result: Result<MutationReceipt<Error>, Error>
   ) => void
   /** Called when the authority accepts or refuses the mutation. */
   readonly onAcceptance?: (
-    result: Result<AcceptedStamp, MutationLifecycleError<Error>>
+    result: Result<AcceptedStamp, MutationLifecycleError<Error>>,
+    mutation: StagedMutation
   ) => void
   /** Called when acceptance is incorporated into canon, or can no longer be. */
   readonly onCanonization?: (
-    result: Result<void, MutationLifecycleError<Error>>
+    result: Result<void, MutationLifecycleError<Error>>,
+    mutation: StagedMutation
   ) => void
 }
 
@@ -161,6 +178,11 @@ export type ProtocolPredictedRoot<Protocol extends AnyProtocolDefinition> =
     >
   }
 
+/** One store for every root, or a store chosen per root from its first canon. */
+type PersistenceOption<State> =
+  | QueuePersistence
+  | ((canon: Canon<State>) => QueuePersistence | undefined)
+
 /** Protocol, delivery, refresh, and invalidation dependencies for a root factory. */
 export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
   /** The protocol whose mutations the root predicts and delivers. */
@@ -189,8 +211,30 @@ export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
    * `status.invalidations` is `disabled`.
    */
   readonly invalidations?: InvalidationAdapter
-  /** Default stage observers used when a mutate call does not override a stage. */
+  /**
+   * Default stage observers used when a mutate call does not override a
+   * stage. They also observe every mutation restored from `persistence`.
+   */
   readonly mutationListeners?: MutationStageListeners<ErrorOf<Protocol>>
+  /**
+   * Keeps the unsettled queue across a page load, such as
+   * `sessionStoragePersistence(key)`. The root stores each mutation when it
+   * is queued and removes it when it is accepted or fails. On mount, the root
+   * restores the stored mutations ahead of new ones and delivers them again
+   * under their original mutation IDs. Without it, the queue lives only in
+   * memory.
+   *
+   * Each mounted root needs its own store. When one factory mounts a root
+   * per record, pass a function: each root calls it once, with its first
+   * canon, and keeps the result. Return `undefined` to keep that root's
+   * queue in memory.
+   * @example
+   * ```ts
+   * persistence: (canon) =>
+   *   sessionStoragePersistence(`notes-queue:${canon.value.id}`)
+   * ```
+   */
+  readonly persistence?: PersistenceOption<StateOf<Protocol>>
   /** Default root-recovery observers used when a mounted root does not override a condition. */
   readonly recoveryListeners?: PredictedRootRecoveryListeners<
     ProtocolInvocation<Protocol>,
@@ -299,6 +343,32 @@ function freezeEnvelope<Invocation>(
     createdAt,
     invocation: structuredClone(invocation),
   })
+}
+
+/** The store one root uses: the option itself, or its answer for `canon`. */
+function persistenceFor<State>(
+  option: PersistenceOption<State> | undefined,
+  canon: Canon<State>
+): QueuePersistence | undefined {
+  return typeof option === "function" ? option(canon) : option
+}
+
+/** Calls the acceptance and canonization listeners when `receipt` settles. */
+function observeStages<Error>(
+  receipt: MutationReceipt<Error>,
+  stages: MutationStageListeners<Error>,
+  restored: boolean
+): void {
+  const mutation: StagedMutation = { id: receipt.id, restored }
+  const { onAcceptance, onCanonization } = stages
+
+  if (onAcceptance) {
+    void receipt.accepted.then((result) => onAcceptance(result, mutation))
+  }
+
+  if (onCanonization) {
+    void receipt.canonized.then((result) => onCanonization(result, mutation))
+  }
 }
 
 /**
@@ -424,7 +494,14 @@ export function createPredictedRootHook<
 
   return function usePredictedRoot({ canon, recoveryListeners }) {
     const [store] = useState(() =>
-      createLedgerStore<Invocation, Error>(options.send, rethrowControlFlow)
+      createLedgerStore<Invocation, Error>(
+        options.send,
+        rethrowControlFlow,
+        createQueueStorage(
+          persistenceFor(options.persistence, canon),
+          options.protocol
+        )
+      )
     )
     const ledger = useSyncExternalStore(
       store.subscribe,
@@ -447,10 +524,20 @@ export function createPredictedRootHook<
     )
     const listeners = withDefaults(recoveryListeners, options.recoveryListeners)
 
+    // Restores in an effect or in `mutate`, never during render, so the
+    // hydration render matches the server's. `mutate` restores too because a
+    // child's mount effect runs before this root's.
+    const restoreQueue = useCallback((): void => {
+      for (const receipt of store.restore()) {
+        observeStages(receipt, options.mutationListeners ?? {}, true)
+      }
+    }, [store])
+
     useEffect(() => {
+      restoreQueue()
       store.activate()
       return store.deactivate
-    }, [store])
+    }, [restoreQueue, store])
 
     // Reconcile this render's projection, then deliver. Refusals first, so a
     // jossed envelope that never left is retracted before it could be sent.
@@ -472,6 +559,18 @@ export function createPredictedRootHook<
         invocation: Invocation,
         stageOverrides?: MutationStageListeners<Error>
       ): Result<MutationReceipt<Error>, Error> => {
+        restoreQueue()
+        // Until a render includes the restored entries, every call predicts
+        // over them and this render's entries, so calls in one event still
+        // check against one value.
+        const unrenderedRestore =
+          ledger.restoredEntries.length === 0
+            ? store.getSnapshot().restoredEntries
+            : []
+        const current =
+          unrenderedRestore.length === 0
+            ? projection.value
+            : project(canon, [...unrenderedRestore, ...ledger.entries]).value
         const stages = withDefaults(stageOverrides, options.mutationListeners)
         const envelope = freezeEnvelope(
           options.protocol.id,
@@ -479,7 +578,7 @@ export function createPredictedRootHook<
           Date.now(),
           invocation
         )
-        const predicted = predict(projection.value, envelope)
+        const predicted = predict(current, envelope)
         if (!predicted.ok) {
           const result = err<Error>(predicted.error)
           stages.onPrediction?.(result)
@@ -487,17 +586,12 @@ export function createPredictedRootHook<
         }
 
         const receipt = store.enqueue(envelope)
-        if (stages.onAcceptance) {
-          void receipt.accepted.then(stages.onAcceptance)
-        }
-        if (stages.onCanonization) {
-          void receipt.canonized.then(stages.onCanonization)
-        }
+        observeStages(receipt, stages, false)
         const result = ok(receipt)
         stages.onPrediction?.(result)
         return result
       },
-      [projection.value, store]
+      [canon, ledger, projection.value, restoreQueue, store]
     )
 
     const head = queueHead(ledger.entries)
@@ -534,7 +628,8 @@ function rethrowNoControlFlow(): void {}
  * returned hook mounts an independent root; share one root with a subtree
  * through `createPredictedRootContext`. While a delivery attempt is
  * unanswered, the root holds a React Action open for at most
- * `DELIVERY_WAIT_MS`. Unmounting the root settles every pending receipt.
+ * `DELIVERY_WAIT_MS`. Unmounting the root settles every pending receipt; with
+ * `persistence`, a later mount delivers the unsettled mutations again.
  *
  * @param options Protocol, delivery, refresh, invalidation, and listener configuration.
  * @returns A hook exposing predicted state, mutation receipts, retry controls, and status.
