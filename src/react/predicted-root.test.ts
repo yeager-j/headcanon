@@ -225,6 +225,22 @@ describe("createPredictedRoot", () => {
     expect(stages).toEqual(["prediction", "acceptance", "canonization"])
   })
 
+  it("canonizes an acceptance with an empty stamp at once", async () => {
+    const { result, deliveries } = setup()
+    const unchanged = acceptedStamp({ revisions: {} })
+    if (!unchanged.ok) throw new Error("Invalid empty test stamp")
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+    act(() => deliveries[0]?.resolve(ok(unchanged.value)))
+
+    await expect(receipt.canonized).resolves.toEqual(ok(undefined))
+    await waitFor(() => expect(result.current.status.pending).toBe(0))
+    expect(result.current.value).toBe(0)
+  })
+
   it("reports a prediction refusal without opening later stages", () => {
     const { result } = setup()
     const onPrediction = vi.fn()

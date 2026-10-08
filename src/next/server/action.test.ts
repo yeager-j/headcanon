@@ -954,3 +954,99 @@ describe("Next mutation action", () => {
     ).toThrow("Incomplete mutation bindings: missing [next.increment]")
   })
 })
+
+describe("Next mutation action for a mutation with no refusal cases", () => {
+  const touch = defineMutation({
+    name: "next.touch",
+    args: incrementSchema,
+    predict: (state: number) => ok(state),
+  })
+  const touchProtocol = defineProtocol({
+    id: "test.next-server.touch.v1",
+    mutations: [touch],
+  })
+  const touchEnvelope = {
+    protocol: touchProtocol.id,
+    mutationId: "5b3f2a61-4c7e-4d8a-9f0b-2e6c1d7a8b90",
+    createdAt: Date.now(),
+    invocation: touch({ amount: 1 }),
+  }
+
+  function touchAction(
+    authority: CounterAuthority,
+    execute: MutationCommand<
+      typeof touch,
+      string,
+      CounterPreflight,
+      CounterTx,
+      undefined,
+      undefined
+    >["execute"]
+  ) {
+    const binder = createMutationBinder({ actor: () => "actor", authority })
+    return createNextMutationAction({
+      protocol: touchProtocol,
+      binder,
+      commands: [
+        binder.bind(touch, {
+          screen: () => allowScreening(),
+          admit: () => allowAdmission(),
+          execute,
+        }),
+      ],
+    })
+  }
+
+  function createAuthority() {
+    return createInMemoryMutationAuthority<number, string, unknown>({
+      initialState: 0,
+      scope: (actor) => actor,
+    })
+  }
+
+  it("fails closed when a stored refusal reaches it", async () => {
+    const authority: CounterAuthority = {
+      preflight: { read: () => 0 },
+      async execute(request) {
+        request.parseRefusal?.({ code: "refused" })
+        throw new Error("a refusal was admitted for a mutation without one")
+      },
+    }
+
+    await expect(
+      touchAction(authority, () => acceptMutation({ unchanged: true }))(
+        touchEnvelope
+      )
+    ).rejects.toThrow("Invalid stored mutation refusal")
+  })
+
+  it("throws for an acceptance with an empty stamp and records no receipt", async () => {
+    const authority = createAuthority()
+    const execute = touchAction(authority, ({ tx }) => {
+      tx.write(tx.read() + 1)
+      return acceptMutation()
+    })
+
+    await expect(execute(touchEnvelope)).rejects.toThrow(
+      "Mutation next.touch accepted with an empty stamp"
+    )
+    expect(authority.read()).toBe(0)
+    expect(authority.receiptCount()).toBe(0)
+    expect(nextCache.updateTag).not.toHaveBeenCalled()
+  })
+
+  it("accepts an explicit no-change acceptance with an empty stamp", async () => {
+    const authority = createAuthority()
+    const execute = touchAction(authority, () =>
+      acceptMutation({ unchanged: true })
+    )
+
+    const first = await execute(touchEnvelope)
+    const duplicate = await execute(touchEnvelope)
+
+    expect(first).toEqual(ok({ kind: "accepted", stamp: { revisions: {} } }))
+    expect(duplicate).toEqual(first)
+    expect(authority.receiptCount()).toBe(1)
+    expect(nextCache.updateTag).not.toHaveBeenCalled()
+  })
+})

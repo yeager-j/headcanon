@@ -10,6 +10,8 @@ import {
   executePreparedMutation,
   prepareMutationRequest,
   throwMutationContention,
+  type MutationAcceptance,
+  type MutationAttemptFailure,
   type MutationAuthorityAdapter,
   type MutationDeliveryAgeError,
   type MutationExecutorError,
@@ -133,6 +135,7 @@ const CONTRACT_AXES = Object.keys(
 ) as readonly MutationAuthorityContractAxis[]
 const CONTRACT_BEHAVIORS = [
   "accept",
+  "accept-unchanged",
   "refuse",
   "throw",
   "mutate-args-when-zero",
@@ -287,13 +290,20 @@ async function createDriver<Transaction, Preflight>(
         authority: fixture.authority,
         parseRefusal:
           options.parseRefusal === false ? undefined : parseContractRefusal,
-        async run(tx, stamp, parsedArgs) {
+        async run(
+          tx,
+          stamp,
+          parsedArgs
+        ): Promise<
+          | MutationAcceptance
+          | MutationAttemptFailure<MutationAuthorityContractRefusal>
+        > {
           attempts.set(mutationId, (attempts.get(mutationId) ?? 0) + 1)
           const args = parsedArgs as ContractArgs
           const current = await fixture.load(tx)
           const primary = current.axes.primary.value
           if (args.maximumPrimary !== null && primary > args.maximumPrimary) {
-            return err({ kind: "refused", error: { code: "precondition" } })
+            return { kind: "refused", error: { code: "precondition" } }
           }
 
           await fixture.appendEffect(tx, args.effect)
@@ -322,12 +332,12 @@ async function createDriver<Transaction, Preflight>(
             throw new Error("authority contract exception")
           }
           if (args.behavior === "refuse") {
-            return err({
-              kind: "refused",
-              error: { code: "refused-after-write" },
-            })
+            return { kind: "refused", error: { code: "refused-after-write" } }
           }
-          return ok(undefined)
+          if (args.behavior === "accept-unchanged") {
+            return { kind: "accepted", unchanged: true }
+          }
+          return { kind: "accepted" }
         },
       })
     },
@@ -755,6 +765,44 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
         requireAccepted(await contract.execute(envelope))
         expect(await contract.hasReceipt(envelope.mutationId)).toBe(true)
         expect((await contract.read()).effects).toEqual(["retry-same-id"])
+      },
+    },
+    {
+      name: "fails loudly when a command accepts without recording an axis",
+      async run() {
+        const contract = await createDriver(harness)
+        const envelope = contractEnvelope(
+          23,
+          contractArgs({ axes: [], effect: "unstamped" })
+        )
+
+        await expect(contract.execute(envelope)).rejects.toThrow(
+          `Mutation ${CONTRACT_MUTATION} accepted with an empty stamp`
+        )
+        expect(await contract.read()).toEqual(initial)
+        expect(await contract.hasReceipt(envelope.mutationId)).toBe(false)
+      },
+    },
+    {
+      name: "records and replays an explicit no-change acceptance with an empty stamp",
+      async run() {
+        const contract = await createDriver(harness)
+        const envelope = contractEnvelope(
+          24,
+          contractArgs({
+            axes: [],
+            behavior: "accept-unchanged",
+            effect: "unchanged",
+          })
+        )
+
+        const first = requireAccepted(await contract.execute(envelope))
+        const duplicate = requireAccepted(await contract.execute(envelope))
+
+        expect(first.revisions).toEqual({})
+        expect(duplicate).toEqual(first)
+        expect(contract.attemptCount(envelope.mutationId)).toBe(1)
+        expect(await contract.hasReceipt(envelope.mutationId)).toBe(true)
       },
     },
     {

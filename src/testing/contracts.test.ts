@@ -1,4 +1,4 @@
-import { err } from "serializable-result"
+import { err, ok } from "serializable-result"
 import { describe, expect, it } from "vitest"
 
 import {
@@ -203,6 +203,38 @@ const authorityMutants: ReadonlyArray<{
       }),
     caughtBy:
       "reruns load and handler after one CAS loss without retaining attempt effects",
+  },
+  {
+    flaw: "records a thrown attempt as an acceptance",
+    breaks: (fixture) =>
+      withAuthority(fixture, {
+        execute: (request, run) =>
+          fixture.authority.execute(request, async (tx, stamp) => {
+            try {
+              return await run(tx, stamp)
+            } catch {
+              return ok(undefined)
+            }
+          }),
+      }),
+    caughtBy: "fails loudly when a command accepts without recording an axis",
+  },
+  {
+    flaw: "reports an acceptance with an empty stamp as a denial",
+    breaks: (fixture) =>
+      withAuthority(fixture, {
+        execute: async (request, run) => {
+          const outcome = await fixture.authority.execute(request, run)
+          const emptyAcceptance =
+            outcome.ok &&
+            outcome.value.kind === "accepted" &&
+            Object.keys(outcome.value.stamp.revisions).length === 0
+
+          return emptyAcceptance ? ok({ kind: "denied" }) : outcome
+        },
+      }),
+    caughtBy:
+      "records and replays an explicit no-change acceptance with an empty stamp",
   },
   {
     flaw: "screens through the in-flight attempt's uncommitted state",

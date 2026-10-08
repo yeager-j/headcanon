@@ -1,4 +1,7 @@
-import type { MutationAttemptFailure } from "../core/authority"
+import type {
+  MutationAcceptance,
+  MutationAttemptFailure,
+} from "../core/authority"
 
 /**
  * A command's `screen` result: allowed, carrying the value `finalizeAccepted`
@@ -23,7 +26,7 @@ export type MutationAdmission<Evidence> =
  * A refusal or denial is the attempt failure the authority records as is.
  */
 export type MutationCommandDecision<Refusal> =
-  | { readonly kind: "accepted" }
+  | MutationAcceptance
   | MutationAttemptFailure<Refusal>
 
 /**
@@ -87,11 +90,22 @@ export function denyMutation(): { readonly kind: "denied" } {
   return Object.freeze({ kind: "denied" })
 }
 
-/** Returns the terminal accepted decision for a command attempt.
+/**
+ * Returns the terminal accepted decision for a command attempt. Call
+ * `stamp.record` for each axis the attempt advances first. Pass
+ * `{ unchanged: true }` when the command accepts and changes nothing, so its
+ * stamp is empty and the client ends the prediction at once.
+ * @param options `{ unchanged: true }` for an acceptance that records no axis.
  * @returns An accepted command decision.
+ * @example
+ * if (note.title === args.title) return acceptMutation({ unchanged: true })
  */
-export function acceptMutation(): { readonly kind: "accepted" } {
-  return Object.freeze({ kind: "accepted" })
+export function acceptMutation(options?: {
+  readonly unchanged: true
+}): MutationAcceptance {
+  return options?.unchanged === true
+    ? Object.freeze({ kind: "accepted", unchanged: true })
+    : Object.freeze({ kind: "accepted" })
 }
 
 /** Returns a structured refusal that is safe to record and replay.

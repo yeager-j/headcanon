@@ -94,6 +94,15 @@ export type MutationAttemptFailure<Refusal> =
   | { readonly kind: "refused"; readonly error: Refusal }
   | { readonly kind: "denied" }
 
+/**
+ * How a command attempt accepts. `unchanged: true` declares that the attempt
+ * advanced no axis, so its stamp is empty on purpose.
+ */
+export interface MutationAcceptance {
+  readonly kind: "accepted"
+  readonly unchanged?: true
+}
+
 /** A terminal outcome which is safe to record and reproduce on redelivery. */
 export type MutationTerminalOutcome<Refusal> =
   | { readonly kind: "accepted"; readonly stamp: AcceptedStamp }
@@ -694,6 +703,57 @@ export async function prepareMutationRequest<
 }
 
 /**
+ * Checks an accepted attempt's stamp against how it accepted. An acceptance
+ * that records no axis would end the client's prediction before refreshed
+ * data arrives, so it must say `unchanged` on purpose.
+ * @throws Error when the stamp is empty and the acceptance is not `unchanged`, or the stamp is not empty and it is.
+ */
+function checkAcceptedStamp(
+  mutation: string,
+  acceptance: MutationAcceptance,
+  recordedAnyAxis: boolean
+): void {
+  const unchanged = acceptance.unchanged === true
+
+  if (unchanged && recordedAnyAxis) {
+    throw new Error(
+      `Mutation ${mutation} accepted as unchanged but recorded a revision. Return acceptMutation() when it advances an axis.`
+    )
+  }
+
+  if (!unchanged && !recordedAnyAxis) {
+    throw new Error(
+      `Mutation ${mutation} accepted with an empty stamp. Call stamp.record(axis, revision) for each axis it advances, or return acceptMutation({ unchanged: true }) when it changes nothing.`
+    )
+  }
+}
+
+/**
+ * Runs one command attempt and turns its decision into the adapter's attempt
+ * result. An acceptance whose stamp does not match it throws inside the
+ * attempt, so the adapter rolls the attempt back and records no receipt.
+ */
+async function runCheckedAttempt<Refusal>(
+  mutation: string,
+  stamp: StampAccumulator,
+  run: (
+    stamp: StampAccumulator
+  ) => Promise<MutationAcceptance | MutationAttemptFailure<Refusal>>
+): Promise<Result<void, MutationAttemptFailure<Refusal>>> {
+  let recordedAnyAxis = false
+  const decision = await run({
+    record(axis, revision) {
+      stamp.record(axis, revision)
+      recordedAnyAxis = true
+    },
+  })
+  if (decision.kind !== "accepted") return err(decision)
+
+  checkAcceptedStamp(mutation, decision, recordedAnyAxis)
+  return ok(undefined)
+}
+
+/**
  * Executes one prepared request through receipt authority.
  *
  * The adapter owns receipt deduplication, collision detection, transaction
@@ -702,10 +762,13 @@ export async function prepareMutationRequest<
  * must be safe to rerun against fresh transaction state. A returned refusal or
  * denial becomes the terminal receipt outcome. A thrown
  * {@link MutationContentionError} reruns the attempt; contention that outlasts
- * the adapter's attempts is an expected error for the caller to retry.
+ * the adapter's attempts is an expected error for the caller to retry. An
+ * acceptance must record at least one axis, or be `unchanged` and record
+ * none; otherwise the attempt throws and no receipt is recorded.
  *
  * @param options Prepared identity, trusted actor, authority adapter, refusal parser, and application runner.
  * @returns A promise for the terminal outcome or a typed executor/authority failure.
+ * @throws Error when an acceptance's stamp does not match it, and what `run` or the adapter throws.
  */
 export function executePreparedMutation<
   Transaction,
@@ -726,18 +789,22 @@ export function executePreparedMutation<
     tx: Transaction,
     stamp: StampAccumulator,
     args: unknown
-  ) => Promise<Result<void, MutationAttemptFailure<Refusal>>>
+  ) => Promise<MutationAcceptance | MutationAttemptFailure<Refusal>>
 }): Promise<Result<MutationTerminalOutcome<Refusal>, MutationExecutorError>> {
+  const { prepared } = options
+
   return options.authority.execute(
     {
       actor: options.actor,
-      mutationId: options.prepared.mutationId,
-      createdAt: options.prepared.createdAt,
-      protocol: options.prepared.protocol,
-      canonical: options.prepared.canonical,
+      mutationId: prepared.mutationId,
+      createdAt: prepared.createdAt,
+      protocol: prepared.protocol,
+      canonical: prepared.canonical,
       parseRefusal: options.parseRefusal,
     },
     (tx, stamp) =>
-      options.run(tx, stamp, structuredClone(options.prepared.args))
+      runCheckedAttempt(prepared.mutation, stamp, (checkedStamp) =>
+        options.run(tx, checkedStamp, structuredClone(prepared.args))
+      )
   )
 }
