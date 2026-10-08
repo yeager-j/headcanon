@@ -27,7 +27,7 @@ export type MutationLifecycleError<Error> =
    * passed on to the framework.
    */
   | { readonly kind: "delivery-cancelled" }
-  /** The authority's answer is final but is not a domain refusal. */
+  /** Delivery has a final answer that is not a domain refusal. */
   | TerminalDeliveryFailure
   /** The root unmounted before the mutation settled. */
   | {
@@ -90,6 +90,9 @@ export class RetryableDeliveryError extends Error {
  * executor refusal of the envelope itself (malformed envelope, arguments that
  * do not parse, a non-canonical invocation, or a reused mutation ID): the
  * authority did nothing, and the same envelope can never succeed.
+ * `stale-client` means the server does not know the endpoint this client
+ * called, because the client's code is older than the deployed build: nothing
+ * was written, and only a reload of the page can deliver the mutation.
  */
 export type TerminalDeliveryFailure =
   | { readonly kind: "denied" }
@@ -100,9 +103,10 @@ export type TerminalDeliveryFailure =
         { readonly code: "contention" }
       >
     }
+  | { readonly kind: "stale-client" }
 
 /**
- * The `send` adapter throws this when the authority's answer is final but is
+ * The `send` adapter throws this when delivery has a final answer that is
  * neither an accepted stamp nor a domain refusal. The root settles both
  * receipt milestones with the failure, drops the prediction, and moves on to
  * the next queued mutation. It never retries: redelivering the same envelope
@@ -112,14 +116,26 @@ export class TerminalDeliveryError extends Error {
   /** The final answer; both receipt milestones settle with it. */
   readonly failure: TerminalDeliveryFailure
 
-  constructor(failure: TerminalDeliveryFailure) {
-    super(
-      failure.kind === "denied"
-        ? "the mutation authority denied the mutation"
-        : `the mutation executor refused the envelope: ${failure.error.code}`
-    )
+  /**
+   * @param failure The final answer.
+   * @param options `cause` keeps the error that revealed the failure, for
+   * logging. The receipt carries only `failure`.
+   */
+  constructor(failure: TerminalDeliveryFailure, options?: ErrorOptions) {
+    super(describeTerminalFailure(failure), options)
     this.name = "TerminalDeliveryError"
     this.failure = failure
+  }
+}
+
+function describeTerminalFailure(failure: TerminalDeliveryFailure): string {
+  switch (failure.kind) {
+    case "denied":
+      return "the mutation authority denied the mutation"
+    case "undeliverable":
+      return `the mutation executor refused the envelope: ${failure.error.code}`
+    case "stale-client":
+      return "the server does not recognize this client's delivery endpoint"
   }
 }
 

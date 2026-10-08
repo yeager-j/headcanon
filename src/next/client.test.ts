@@ -2,6 +2,7 @@
 
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { act, renderHook, waitFor } from "@testing-library/react"
+import { UnrecognizedActionError } from "next/dist/client/components/unrecognized-action-error"
 import { forbidden, notFound, redirect, unauthorized } from "next/navigation"
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest"
@@ -15,9 +16,10 @@ import {
   type Canon,
   type MutationEnvelope,
 } from ".."
-import type { PredictedRootOptions } from "../react"
+import { TerminalDeliveryError, type PredictedRootOptions } from "../react"
 import { createInMemoryInvalidationAdapter } from "../testing"
 import {
+  createNextMutationSender,
   createNextObservedRoot,
   createNextPredictedRoot,
   ROUTER_ACCEPTANCE_GRACE_MS,
@@ -128,6 +130,13 @@ function captureWindowSignal(signal: unknown) {
   window.addEventListener("error", listener)
   onTestFinished(() => window.removeEventListener("error", listener))
   return propagated
+}
+
+/** The error Next's router throws when the server does not know an action ID. */
+function unrecognizedAction(): UnrecognizedActionError {
+  return new UnrecognizedActionError(
+    'Server Action "stale-id" was not found on the server.'
+  )
 }
 
 /** Mounts a root over `action` and records one mutation. */
@@ -320,6 +329,73 @@ describe("Next action golden path", () => {
       expect(action).toHaveBeenCalledOnce()
     }
   )
+
+  it("settles an action the deployed build does not know as stale-client", async () => {
+    const action = vi.fn<GuardedAction>(async () => {
+      throw unrecognizedAction()
+    })
+    const { receipt, result } = mountAction(action)
+
+    const staleClient = err({ kind: "stale-client" } as const)
+    await expect(receipt.accepted).resolves.toEqual(staleClient)
+    await expect(receipt.canonized).resolves.toEqual(staleClient)
+    expect(result.current.value).toBe(0)
+    expect(result.current.status.delivery).toBe("idle")
+    expect(result.current.status.pending).toBe(0)
+    expect(action).toHaveBeenCalledOnce()
+  })
+
+  it("sends each queued mutation after a stale-client failure, once", async () => {
+    const action = vi.fn<GuardedAction>(async () => {
+      throw unrecognizedAction()
+    })
+    const { receipt: first, result } = mountAction(action)
+    let second: ReturnType<typeof result.current.mutate> | undefined
+    act(() => {
+      second = result.current.mutate(guardedAdd({ amount: 2 }))
+    })
+    if (!second?.ok) throw new Error("Next action prediction refused")
+
+    const staleClient = err({ kind: "stale-client" } as const)
+    await expect(first.accepted).resolves.toEqual(staleClient)
+    await expect(second.value.accepted).resolves.toEqual(staleClient)
+    await waitFor(() => expect(result.current.status.pending).toBe(0))
+    expect(result.current.value).toBe(0)
+    expect(result.current.status.delivery).toBe("idle")
+    expect(action).toHaveBeenCalledTimes(2)
+  })
+
+  it("keeps any other thrown action error uncertain", async () => {
+    const action = vi.fn<GuardedAction>(async () => {
+      throw new TypeError("Failed to fetch")
+    })
+    const { result } = mountAction(action)
+
+    await waitFor(() => {
+      expect(result.current.status.delivery).toBe("uncertain")
+    })
+    expect(result.current.status.pending).toBe(1)
+    expect(action).toHaveBeenCalledOnce()
+  })
+
+  it("keeps Next's unrecognized-action error as the stale-client cause", async () => {
+    const unrecognized = unrecognizedAction()
+    const send = createNextMutationSender<typeof actionProtocol>(async () => {
+      throw unrecognized
+    })
+
+    const thrown = await send({
+      protocol: actionProtocol.id,
+      mutationId: "stale-client-cause",
+      invocation: guardedAdd({ amount: 1 }),
+    }).catch((error: unknown) => error)
+
+    expect(thrown).toBeInstanceOf(TerminalDeliveryError)
+    expect(thrown).toMatchObject({
+      failure: { kind: "stale-client" },
+      cause: unrecognized,
+    })
+  })
 
   it("redelivers the same envelope after exhausted authority contention", async () => {
     const stamp = accepted()
