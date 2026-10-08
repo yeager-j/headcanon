@@ -512,9 +512,12 @@ export function createLedgerStore<Invocation, Error>(
     return lifetime?.attempt === attempt ? lifetime.hold : null
   }
 
-  /** No root observes the ledger and no mutation is left to deliver. */
+  /**
+   * No root observes the ledger and it holds no mutation. An accepted one
+   * keeps it listed: a later root must render it until its canon covers it.
+   */
   function releaseIfIdle(): void {
-    if (observer !== null || queueHead(ledger.entries)) return
+    if (observer !== null || ledger.entries.length > 0) return
     registration.release()
   }
 

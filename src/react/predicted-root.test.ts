@@ -3136,6 +3136,40 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     expect(send).toHaveBeenCalledOnce()
   })
 
+  it("keeps a mutation accepted after unmount for a later root until its canon covers it", async () => {
+    const { persistence } = createMemoryPersistence()
+    const onAcceptance = vi.fn()
+    const onCanonization = vi.fn()
+    const { mount, deliveries } = createPersistedFactory(persistence, {
+      onAcceptance,
+      onCanonization,
+    })
+    const firstVisit = mount()
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(firstVisit.result, add({ amount: 1 }))
+    })
+    firstVisit.unmount()
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    onAcceptance.mockClear()
+    onCanonization.mockClear()
+
+    const { result, rerender } = mount(canon(0, 0))
+    await act(async () => {})
+    const restored = { id: receipt.id, restored: true }
+    expect(result.current.value).toBe(1)
+    expect(result.current.status.pending).toBe(1)
+    expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(ok(stamp(1)), restored)
+
+    rerender({ currentCanon: canon(1, 1) })
+    await act(async () => {})
+    expect(result.current.status.pending).toBe(0)
+    expect(onCanonization).toHaveBeenCalledExactlyOnceWith(
+      ok(undefined),
+      restored
+    )
+  })
+
   it("does not pass a background delivery's control flow to React", async () => {
     const signal = new Error("framework control flow")
     const propagated = vi.fn()
