@@ -370,11 +370,11 @@ Place the root high enough to outlive the components that edit its data. Closing
 
 Unmount settles unresolved receipt milestones with `"root-unmounted"`. A receipt whose acceptance already succeeded keeps that accepted result, while its unfinished canonization reports unmount with `outcome: "accepted"`.
 
-Unmount is not cancellation. The root starts a best-effort send of remaining unsent envelopes after outstanding delivery attempts settle, whether they succeed or fail. It sends those envelopes sequentially but does not report their results through the settled receipts. It does not resend sending or uncertain envelopes merely because it unmounted. Without `persistence`, this is not durable delivery across a page reload or a closed tab.
-
-With `persistence`, unmount leaves every unsettled mutation in storage, including sending and uncertain ones. The next root that mounts with the same storage in the same tab restores them and delivers them again. See [Keep the queue across a reload](#keep-the-queue-across-a-reload).
+Unmount is not cancellation. Without `persistence`, the root starts a best-effort send of remaining unsent envelopes after outstanding delivery attempts settle, whether they succeed or fail. It sends those envelopes sequentially but does not report their results through the settled receipts. It does not resend sending or uncertain envelopes merely because it unmounted. This is not durable delivery across a page reload or a closed tab.
 
 That ordering applies only within the unsent group. While mounted, the queue waits behind an uncertain head; after unmount, later queued mutations can be sent without recovering that head's outcome. If the head never reached the server, a later mutation can commit without the earlier one. If an outstanding request never settles, the unsent group remains waiting. Do not rely on unmount delivery to preserve dependencies across an uncertain mutation.
+
+With `persistence`, unmount sends nothing. Every unsettled mutation stays in storage, including sending and uncertain ones. The next root that mounts with the same storage in the same tab restores them and delivers them in order, so a later mutation never commits before an earlier one that did not reach the server. A mutation queued at unmount, such as an autosave, therefore waits until that root mounts again in the tab. A root that cannot read its storage keeps its queue in memory, so it sends at unmount like a root without `persistence`. See [Keep the queue across a reload](#keep-the-queue-across-a-reload).
 
 If navigation depends on knowing that a write succeeded, await acceptance before navigating. If it depends on this view receiving the updated data, await canonization while the root is still mounted. Do not infer that a write failed just because its root disappeared.
 
@@ -411,7 +411,7 @@ export const useNote = createNextPredictedRoot({
 
 Each root calls the function once, when it mounts, with its first canon. Key the root by the record's identity (see [Share one root across components](#share-one-root-across-components)), so the record's ID does not change while the root is mounted. Return `undefined` to keep a root's queue in memory only. A single `QueuePersistence` object, instead of a function, gives every root of the factory the same key; use it only when the factory mounts one root at a time.
 
-The root stores each envelope (mutation ID, protocol, `createdAt`, and invocation) when `mutate` queues it. It removes the envelope when the server accepts the mutation or the mutation fails. Unmount does not remove it, and a mutation queued from an unmount cleanup, such as an autosave, is stored too. Every write finishes before `mutate` returns, so nothing is lost when the page closes right after an edit.
+The root stores each envelope (mutation ID, protocol, `createdAt`, and invocation) when `mutate` queues it. It removes the envelope when the server accepts the mutation or the mutation fails. Unmount does not remove or send it, and a mutation queued from an unmount cleanup, such as an autosave, is stored too. Every write finishes before `mutate` returns, so nothing is lost when the page closes right after an edit.
 
 When a root mounts, it restores the stored mutations once, ahead of any new mutation, and delivers them again in order under their original mutation IDs. A `mutate` call that comes first, such as one from a child's mount effect, restores the queue itself and is predicted over the restored mutations. This is safe: the server keeps one receipt per mutation ID, so a mutation that already committed gets its stored outcome and is not applied twice. The restored predictions are replayed over the new page's canon, like any pending mutation. A restored mutation may already have been sent by the earlier page, so a replay refusal hides its prediction but does not withdraw it; the root waits for the server's answer.
 
@@ -423,6 +423,7 @@ If storage is missing or refuses a read or write, for example in a private windo
 
 Know the limits:
 
+- **Delivery after unmount waits for a remount.** A root with `persistence` sends nothing when it unmounts, so its queue stays in order. Mutations still in storage are delivered only when a root with the same key mounts again in the tab. See [Choose the root's lifetime](#choose-the-roots-lifetime).
 - **One tab.** `sessionStorage` belongs to one tab, and a closed tab loses it. A duplicated tab gets a copy, so both tabs deliver the same mutations. This is safe: they share mutation IDs, and the server's receipts make the second delivery return the first one's outcome.
 - **One mounted root per key.** Two roots mounted at the same time with the same key restore and deliver the same mutations, and each overwrites the other's queue. Give each mounted root its own key, such as one that includes the record's ID.
 - **No other devices or browsers.** Nothing leaves the browser until it is delivered.

@@ -84,12 +84,18 @@ export interface QueueStorage<Invocation> {
   /** The stored envelopes the root can deliver, in mutation order. */
   load(): readonly MutationEnvelope<Invocation>[]
   save(envelopes: readonly MutationEnvelope<Invocation>[]): void
+  /**
+   * A later mount can restore this root's queue: the root has `persistence`
+   * and could read it. False for a queue that lives only in memory.
+   */
+  keepsQueue(): boolean
 }
 
 /** Storage for a root without `persistence`: the queue lives in memory. */
 const MEMORY_QUEUE_STORAGE: QueueStorage<never> = {
   load: () => [],
   save: () => undefined,
+  keepsQueue: () => false,
 }
 
 /**
@@ -127,6 +133,7 @@ export function createQueueStorage<Invocation>(
         // Storage is best effort; the queue in memory is still complete.
       }
     },
+    keepsQueue: () => !readFailed,
   }
 }
 

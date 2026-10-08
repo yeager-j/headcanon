@@ -221,8 +221,10 @@ export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
    * `sessionStoragePersistence(key)`. The root stores each mutation when it
    * is queued and removes it when it is accepted or fails. On mount, the root
    * restores the stored mutations ahead of new ones and delivers them again
-   * under their original mutation IDs. Without it, the queue lives only in
-   * memory.
+   * under their original mutation IDs. Unmount sends none of the stored
+   * mutations, so a later mutation never commits before an earlier one.
+   * Without it, the queue lives only in memory, and unmount sends the
+   * mutations that were never sent.
    *
    * Each mounted root needs its own store. When one factory mounts a root
    * per record, pass a function: each root calls it once, with its first

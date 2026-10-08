@@ -1652,6 +1652,51 @@ describe("createPredictedRoot — persisted queue", () => {
     act(() => deliveries[0]?.resolve(ok(stamp(1))))
   })
 
+  it("delivers an uncertain head before the mutation behind it after the root leaves and returns", async () => {
+    // The first addition fails before it reaches the server, so it may never
+    // have committed. Sending the second one on unmount would commit it
+    // before the next mount redelivers the first.
+    const { persistence } = createMemoryPersistence()
+    const committed: number[] = []
+    const committedIds = new Set<string>()
+    const answer = async (delivery: ControlledDelivery | undefined) => {
+      if (!delivery) return
+      const { mutationId, invocation } = delivery.envelope
+      // Receipts make a second delivery of one mutation ID return its outcome.
+      if (!committedIds.has(mutationId)) {
+        committedIds.add(mutationId)
+        committed.push(invocation.args.amount)
+      }
+      await act(async () => delivery.resolve(ok(stamp(committed.length))))
+    }
+
+    const firstVisit = mountPersisted(persistence)
+    act(() => {
+      mutate(firstVisit.result, add({ amount: 1 }))
+    })
+    await act(async () =>
+      firstVisit.deliveries[0]?.reject(new Error("connection lost"))
+    )
+    expect(firstVisit.result.current.status.delivery).toBe("uncertain")
+    act(() => {
+      mutate(firstVisit.result, add({ amount: 2 }))
+    })
+
+    firstVisit.unmount()
+    await act(async () => {})
+    for (const delivery of firstVisit.deliveries.slice(1)) {
+      await answer(delivery)
+    }
+
+    const { deliveries } = mountPersisted(persistence)
+    await answer(deliveries[0])
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    await answer(deliveries[1])
+
+    expect(committed).toEqual([1, 2])
+    expect(firstVisit.deliveries).toHaveLength(1)
+  })
+
   it("redelivers the stored queue in order after a reload, before new mutations", async () => {
     vi.useFakeTimers({ toFake: ["Date"] })
     const firstCreatedAt = Date.UTC(2026, 0, 1)
@@ -1795,12 +1840,11 @@ describe("createPredictedRoot — persisted queue", () => {
     expect(view.container.textContent).toBe("2")
   })
 
-  it("stores a mutation queued from a child's unmount cleanup", async () => {
+  it("stores mutations queued from a child's unmount cleanup and delivers them on the next mount", async () => {
     const { persistence, stored } = createMemoryPersistence()
-    const { CounterRoot, deliveries } = createPersistedContext(persistence)
+    const { CounterRoot, send } = createPersistedContext(persistence)
     let latestMutate: CounterMutate | undefined
-    let autosaved: Result<MutationReceipt<CounterError>, CounterError> | null =
-      null
+    const autosaved: Result<MutationReceipt<CounterError>, CounterError>[] = []
     function AutosaveOnUnmount() {
       const { mutate: mutateRoot } = CounterRoot.useRoot()
       useEffect(() => {
@@ -1808,7 +1852,9 @@ describe("createPredictedRoot — persisted queue", () => {
       })
       useEffect(
         () => () => {
-          autosaved ??= latestMutate?.(add({ amount: 5 })) ?? null
+          if (autosaved.length > 0 || !latestMutate) return
+          autosaved.push(latestMutate(add({ amount: 5 })))
+          autosaved.push(latestMutate(add({ amount: 6 })))
         },
         []
       )
@@ -1824,9 +1870,17 @@ describe("createPredictedRoot — persisted queue", () => {
     view.unmount()
     await act(async () => {})
 
-    const receipt = acceptedLocally(autosaved!)
-    expect(mutationIds(stored())).toEqual([receipt.id])
-    expect(deliveries[0]?.envelope.mutationId).toBe(receipt.id)
+    const [first, second] = autosaved.map(acceptedLocally)
+    expect(mutationIds(stored())).toEqual([first?.id, second?.id])
+    // The next mount delivers the stored queue; this one sends nothing.
+    expect(send).not.toHaveBeenCalled()
+
+    const { deliveries } = mountPersisted(persistence)
+    expect(deliveries[0]?.envelope.mutationId).toBe(first?.id)
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    expect(deliveries[1]?.envelope.mutationId).toBe(second?.id)
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
   })
 
   it("stores a mutation queued from a cleanup during Strict Mode's effect replay", async () => {
@@ -2116,6 +2170,28 @@ describe("createPredictedRoot — persisted queue", () => {
     const { result, send } = mountPersisted(persistence)
     expect(send).toHaveBeenCalledWith(restored)
     expect(result.current.value).toBe(1)
+  })
+
+  it("sends unsent mutations on unmount when it could not read its store", async () => {
+    // Its queue lives only in memory, so no later mount can deliver it.
+    const persistence: QueuePersistence = {
+      load() {
+        throw new DOMException("blocked", "SecurityError")
+      },
+      save: () => undefined,
+    }
+    const { result, deliveries, unmount } = mountPersisted(persistence)
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+      mutate(result, add({ amount: 2 }))
+    })
+
+    unmount()
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    expect(deliveries[1]?.envelope.invocation.args.amount).toBe(2)
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
   })
 
   it("keeps working in memory when the store throws", async () => {
