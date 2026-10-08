@@ -95,6 +95,9 @@ type ActionInvalidations =
  * envelope returns an executor error before the binder's actor callback or any
  * command runs. It runs `screen` before it claims a receipt, and runs `admit`
  * and `execute` inside the authority's transaction attempts, which may repeat.
+ * When no receipt exists and the envelope's `createdAt` is outside the
+ * authority's delivery window, it returns `delivery-expired` or
+ * `delivery-from-future` after `screen`, without admitting or recording it.
  * `screen` and `finalizeAccepted` each receive their own copy of the parsed
  * arguments; `admit` and `execute` share one fresh copy per attempt. The
  * authority owns receipt deduplication and contention; commands own

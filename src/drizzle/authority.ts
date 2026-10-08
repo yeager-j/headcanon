@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm"
+import { and, asc, eq, lt, sql } from "drizzle-orm"
 import {
   type PgDatabase,
   type PgQueryResultHKT,
@@ -8,10 +8,14 @@ import type { ExtractTablesWithRelations } from "drizzle-orm/relations"
 import { err, ok, type Result } from "serializable-result"
 
 import {
+  checkDeliveryAge,
   contentionRetry,
   createStampAccumulator,
+  DEFAULT_RECEIPT_CLEANUP_MARGIN_MS,
+  deliveryAgePolicy,
   prepareTerminalOutcome,
   receiptKey,
+  receiptRetentionMs,
   replayReceipt,
   storedReceipt,
   type MutationAttemptFailure,
@@ -72,7 +76,74 @@ export interface DrizzleMutationAuthorityOptions<
    * `matchesPostgresError`.
    */
   readonly isContentionError?: (error: unknown) => boolean
+  /**
+   * Oldest `createdAt` a new execution accepts, in milliseconds before the
+   * database clock. A positive safe integer; defaults to 7 days. Keep it
+   * fixed for the receipt table once receipt cleanup runs.
+   */
+  readonly maxDeliveryAgeMs?: number
+  /**
+   * How far `createdAt` may be ahead of the database clock, in milliseconds.
+   * A non-negative safe integer; defaults to 1 hour. Keep it fixed for the
+   * receipt table once receipt cleanup runs.
+   */
+  readonly clockSkewToleranceMs?: number
 }
+
+/** Options for `DrizzleMutationAuthority.deleteExpiredReceipts`. */
+export interface DeleteExpiredReceiptsOptions {
+  /**
+   * Retention beyond the delivery window, in milliseconds, for database clock
+   * adjustments. A non-negative safe integer; defaults to 1 hour.
+   */
+  readonly marginMs?: number
+  /** Most receipts one call deletes. A positive safe integer; defaults to 1000. */
+  readonly limit?: number
+}
+
+/**
+ * The mutation authority `createDrizzleMutationAuthority` returns: a
+ * {@link MutationAuthorityAdapter} that can also delete the receipts its own
+ * delivery window no longer needs.
+ */
+export interface DrizzleMutationAuthority<
+  QueryResult extends PgQueryResultHKT,
+  Schema extends Record<string, unknown>,
+  Actor,
+  Refusal,
+> extends MutationAuthorityAdapter<
+  DrizzleMutationTransaction<QueryResult, Schema>,
+  Actor,
+  Refusal,
+  PgDatabase<QueryResult, Schema>
+> {
+  /**
+   * Deletes up to `limit` receipts, oldest first, recorded longer ago than
+   * `maxDeliveryAgeMs + clockSkewToleranceMs + marginMs` on the database
+   * clock. No redelivery that keeps its envelope's `createdAt` can execute
+   * again after its receipt is deleted. Receipts that a delivery has locked
+   * are skipped and left for a later call.
+   *
+   * Every server and cleanup job that uses the receipt table must share one
+   * delivery window. Do not call it while a server without the delivery
+   * check can still accept deliveries.
+   * @returns The number of receipts deleted. Fewer than `limit` means the
+   * table had no more unlocked expired receipts at that moment.
+   * @throws Error when `marginMs` is not a non-negative safe integer or `limit` is not a positive safe integer.
+   * @example
+   * ```ts
+   * // A scheduled job: delete in batches until a batch comes back short.
+   * let deleted: number
+   * do {
+   *   deleted = await notesAuthority.deleteExpiredReceipts({ limit: 1000 })
+   * } while (deleted === 1000)
+   * ```
+   */
+  deleteExpiredReceipts(options?: DeleteExpiredReceiptsOptions): Promise<number>
+}
+
+/** Receipts one `deleteExpiredReceipts` call deletes when no `limit` is given. */
+const DEFAULT_RECEIPT_CLEANUP_LIMIT = 1000
 
 /** Thrown inside the attempt savepoint so Drizzle rolls back a refused or denied command's writes. */
 class AttemptRollback<Refusal> extends Error {
@@ -136,6 +207,28 @@ async function findReceipt<
   return recorded
 }
 
+/**
+ * Reads the database clock in whole epoch milliseconds. `clock_timestamp()`
+ * is the time of this statement; `now()` would be the transaction start,
+ * before the advisory-lock wait.
+ */
+async function readDatabaseClockMs<
+  QueryResult extends PgQueryResultHKT,
+  Schema extends Record<string, unknown>,
+>(tx: DrizzleMutationTransaction<QueryResult, Schema>): Promise<number> {
+  const [clock] = await tx
+    .select({
+      nowMs:
+        sql<number>`(extract(epoch from date_trunc('milliseconds', clock_timestamp())) * 1000)::float8`.mapWith(
+          Number
+        ),
+    })
+    .from(sql`(select 1) as headcanon_clock`)
+  if (!clock) throw new Error("The database returned no clock reading")
+
+  return clock.nowMs
+}
+
 async function insertReceipt<
   QueryResult extends PgQueryResultHKT,
   Schema extends Record<string, unknown>,
@@ -143,22 +236,66 @@ async function insertReceipt<
   tx: DrizzleMutationTransaction<QueryResult, Schema>,
   actorScope: string,
   mutationId: string,
+  admittedAtMs: number,
   receipt: StoredReceipt
 ): Promise<void> {
   await tx.insert(headcanonMutationReceipts).values({
     ...receipt,
     actorScope,
     mutationId,
+    createdAt: new Date(admittedAtMs),
   })
+}
+
+/**
+ * Deletes up to `limit` receipts recorded more than `retentionMs` before the
+ * database clock, oldest first, skipping rows another transaction has locked.
+ * Internal: `deleteExpiredReceipts` calls it on the database; tests call it
+ * inside a held transaction.
+ * @returns The number of receipts deleted.
+ */
+export async function deleteReceiptsOlderThan<
+  QueryResult extends PgQueryResultHKT,
+  Schema extends Record<string, unknown>,
+>(
+  executor: PgDatabase<QueryResult, Schema>,
+  retentionMs: number,
+  limit: number
+): Promise<number> {
+  const receipts = headcanonMutationReceipts
+  const expired = executor
+    .select({
+      actorScope: receipts.actorScope,
+      mutationId: receipts.mutationId,
+    })
+    .from(receipts)
+    .where(
+      lt(
+        receipts.createdAt,
+        sql`date_trunc('milliseconds', now()) - ${retentionMs}::float8 * interval '1 millisecond'`
+      )
+    )
+    .orderBy(asc(receipts.createdAt))
+    .limit(limit)
+    .for("update", { skipLocked: true })
+
+  const deleted = await executor
+    .delete(receipts)
+    .where(sql`(${receipts.actorScope}, ${receipts.mutationId}) in ${expired}`)
+    .returning({ mutationId: receipts.mutationId })
+
+  return deleted.length
 }
 
 /**
  * Creates the Postgres {@link MutationAuthorityAdapter} for a Drizzle
  * database. It requires an interactive transaction client.
  *
- * Receipts, replay, and contention reruns follow the
+ * Receipts, replay, the delivery window, and contention reruns follow the
  * {@link MutationAuthorityAdapter} rules. A transaction-scoped advisory lock
  * on the actor scope and mutation ID serializes executions of one mutation.
+ * The delivery window uses the database clock, read after the receipt
+ * lookup, and each receipt's `created_at` is that reading.
  * PostgreSQL serialization failure, deadlock, and lock-not-available errors,
  * and errors that `isContentionError` marks, count as contention. A refused or
  * denied command's writes roll back and its outcome is recorded. Any other
@@ -170,9 +307,9 @@ async function insertReceipt<
  * `headcanon` when the guard fails. The adapter does not decide actor
  * identity, authorization, or domain rules.
  *
- * @param options The database, actor scope, and retry policy.
- * @returns A mutation authority whose `preflight` executor is `options.db`.
- * @throws Error when `maxAttempts` is not a positive integer.
+ * @param options The database, actor scope, retry policy, and delivery window.
+ * @returns A mutation authority whose `preflight` executor is `options.db`, with receipt cleanup.
+ * @throws Error when `maxAttempts`, `maxDeliveryAgeMs`, or `clockSkewToleranceMs` is invalid.
  */
 export function createDrizzleMutationAuthority<
   QueryResult extends PgQueryResultHKT,
@@ -181,12 +318,8 @@ export function createDrizzleMutationAuthority<
   Refusal,
 >(
   options: DrizzleMutationAuthorityOptions<QueryResult, Schema, Actor>
-): MutationAuthorityAdapter<
-  DrizzleMutationTransaction<QueryResult, Schema>,
-  Actor,
-  Refusal,
-  PgDatabase<QueryResult, Schema>
-> {
+): DrizzleMutationAuthority<QueryResult, Schema, Actor, Refusal> {
+  const deliveryAge = deliveryAgePolicy(options)
   const retry = contentionRetry({
     maxAttempts: options.maxAttempts,
     isStoreContention: (error) =>
@@ -215,6 +348,16 @@ export function createDrizzleMutationAuthority<
             )
             if (recorded) return replayReceipt(recorded, request)
 
+            // Read after the lookup completes, so a receipt that cleanup
+            // deleted meanwhile is judged at a time no earlier than the delete.
+            const admittedAtMs = await readDatabaseClockMs(tx)
+            const admitted = checkDeliveryAge(
+              deliveryAge,
+              request,
+              admittedAtMs
+            )
+            if (!admitted.ok) return admitted
+
             const stamp = createStampAccumulator()
             const attempted = await runAttemptInSavepoint(tx, run, stamp)
             const { stored, terminal } = prepareTerminalOutcome(
@@ -226,6 +369,7 @@ export function createDrizzleMutationAuthority<
               tx,
               actorScope,
               request.mutationId,
+              admittedAtMs,
               storedReceipt(request, stored)
             )
 
@@ -237,6 +381,18 @@ export function createDrizzleMutationAuthority<
           { isolationLevel: "read committed" }
         )
       )
+    },
+    async deleteExpiredReceipts(cleanup = {}) {
+      const retentionMs = receiptRetentionMs(
+        deliveryAge,
+        cleanup.marginMs ?? DEFAULT_RECEIPT_CLEANUP_MARGIN_MS
+      )
+      const limit = cleanup.limit ?? DEFAULT_RECEIPT_CLEANUP_LIMIT
+      if (!Number.isSafeInteger(limit) || limit < 1) {
+        throw new Error("limit must be a positive safe integer")
+      }
+
+      return deleteReceiptsOlderThan(options.db, retentionMs, limit)
     },
   }
 }

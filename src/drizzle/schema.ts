@@ -20,8 +20,8 @@ export type StoredMutationTerminalOutcome = StoredTerminalOutcome
 /**
  * Durable authority outcomes keyed by trusted actor scope and mutation UUID.
  * The adapter writes each receipt once and never updates it. `created_at` is
- * indexed so an application can prune receipts older than any redelivery it
- * still accepts.
+ * the database clock reading that admitted the mutation; it is indexed for
+ * `deleteExpiredReceipts` on the Drizzle authority.
  */
 export const headcanonMutationReceipts = pgTable(
   "headcanon_mutation_receipts",

@@ -4,11 +4,14 @@ import { describe, expect, it } from "vitest"
 
 import { hasExactKeys, isPlainRecord } from "../../core/admission"
 import {
+  DEFAULT_CLOCK_SKEW_TOLERANCE_MS,
+  DEFAULT_MAX_DELIVERY_AGE_MS,
   DEFAULT_MUTATION_MAX_ATTEMPTS,
   executePreparedMutation,
   prepareMutationRequest,
   throwMutationContention,
   type MutationAuthorityAdapter,
+  type MutationDeliveryAgeError,
   type MutationExecutorError,
   type MutationTerminalOutcome,
 } from "../../core/authority"
@@ -69,8 +72,9 @@ export type MutationAuthorityContractRefusal = {
  */
 export interface MutationAuthorityContractFixture<Transaction, Preflight> {
   /**
-   * The adapter under test, with its default attempt ceiling. The contract
-   * executes every mutation as one string actor.
+   * The adapter under test, with its default attempt ceiling and default
+   * delivery window. The contract executes every mutation as one string
+   * actor.
    */
   readonly authority: MutationAuthorityAdapter<
     Transaction,
@@ -200,10 +204,15 @@ function parseContractRefusal(
   throw new Error("Invalid authority contract refusal")
 }
 
-function contractEnvelope(sequence: number, args: ContractArgs) {
+function contractEnvelope(
+  sequence: number,
+  args: ContractArgs,
+  createdAt = Date.now()
+) {
   return {
     protocol: CONTRACT_PROTOCOL,
     mutationId: `00000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`,
+    createdAt,
     invocation: { name: CONTRACT_MUTATION, args },
   }
 }
@@ -331,6 +340,110 @@ async function createDriver<Transaction, Preflight>(
     hasReceipt: (mutationId) => fixture.hasReceipt(mutationId),
     attemptCount: (mutationId) => attempts.get(mutationId) ?? 0,
   }
+}
+
+const HOUR_MS = 3_600_000
+
+/**
+ * The two ways an envelope falls outside the default delivery window. Each is
+ * an hour past its bound, so a database clock a few seconds off the test
+ * clock cannot move it back inside.
+ */
+const OUT_OF_WINDOW: ReadonlyArray<{
+  readonly delivery: string
+  readonly redelivery: string
+  readonly code: MutationDeliveryAgeError["code"]
+  readonly firstSequence: number
+  readonly createdAt: () => number
+}> = [
+  {
+    delivery: "an expired delivery",
+    redelivery: "an expired redelivery",
+    code: "delivery-expired",
+    firstSequence: 17,
+    createdAt: () => Date.now() - DEFAULT_MAX_DELIVERY_AGE_MS - HOUR_MS,
+  },
+  {
+    delivery: "a future-dated delivery",
+    redelivery: "a future-dated redelivery",
+    code: "delivery-from-future",
+    firstSequence: 20,
+    createdAt: () => Date.now() + DEFAULT_CLOCK_SKEW_TOLERANCE_MS + HOUR_MS,
+  },
+]
+
+function deliveryWindowCases<Transaction, Preflight>(
+  harness: MutationAuthorityContractHarness<Transaction, Preflight>
+): readonly ContractCase[] {
+  return OUT_OF_WINDOW.flatMap((outside) => [
+    {
+      name: `refuses ${outside.delivery} without running or recording it`,
+      async run() {
+        const contract = await createDriver(harness)
+        const envelope = contractEnvelope(
+          outside.firstSequence,
+          contractArgs({ effect: `new-${outside.code}` }),
+          outside.createdAt()
+        )
+
+        expect(await contract.execute(envelope)).toEqual(
+          err({ code: outside.code, mutationId: envelope.mutationId })
+        )
+        expect(contract.attemptCount(envelope.mutationId)).toBe(0)
+        expect(await contract.receiptCount()).toBe(0)
+        expect(await contract.read()).toEqual(
+          MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE
+        )
+      },
+    },
+    {
+      name: `replays a recorded outcome to ${outside.redelivery}`,
+      async run() {
+        const contract = await createDriver(harness)
+        const envelope = contractEnvelope(
+          outside.firstSequence + 1,
+          contractArgs({ effect: `replayed-${outside.code}` })
+        )
+
+        const first = await contract.execute(envelope)
+        const redelivery = await contract.execute({
+          ...envelope,
+          createdAt: outside.createdAt(),
+        })
+
+        expect(redelivery).toEqual(first)
+        expect(contract.attemptCount(envelope.mutationId)).toBe(1)
+        expect((await contract.read()).effects).toEqual([
+          `replayed-${outside.code}`,
+        ])
+      },
+    },
+    {
+      name: `rejects ${outside.redelivery} with another invocation as a reused ID`,
+      async run() {
+        const contract = await createDriver(harness)
+        const envelope = contractEnvelope(
+          outside.firstSequence + 2,
+          contractArgs({ effect: `reused-${outside.code}` })
+        )
+
+        requireAccepted(await contract.execute(envelope))
+        const collision = await contract.execute({
+          ...envelope,
+          createdAt: outside.createdAt(),
+          invocation: {
+            ...envelope.invocation,
+            args: { ...envelope.invocation.args, amount: 2 },
+          },
+        })
+
+        expect(collision).toEqual(
+          err({ code: "mutation-id-reused", mutationId: envelope.mutationId })
+        )
+        expect(contract.attemptCount(envelope.mutationId)).toBe(1)
+      },
+    },
+  ])
 }
 
 function requireTerminal(
@@ -686,6 +799,7 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
         expect(await contract.receiptCount()).toBe(1)
       },
     },
+    ...deliveryWindowCases(harness),
   ]
 }
 

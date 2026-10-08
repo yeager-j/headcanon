@@ -456,6 +456,7 @@ describe("Next mutation action", () => {
   const envelope = {
     protocol: protocol.id,
     mutationId: "83da9d18-9796-44b6-8bc1-066d9ca24fbb",
+    createdAt: Date.now(),
     invocation: increment({ amount: 1 }),
   }
 
@@ -492,6 +493,24 @@ describe("Next mutation action", () => {
       action(authority, command({ denyScreen: true }))(envelope)
     ).resolves.toEqual(ok({ kind: "denied" }))
 
+    expect(authority.receiptCount()).toBe(0)
+  })
+
+  it("screens an expired envelope, then returns delivery-expired without admitting or recording it", async () => {
+    const authority = createAuthority()
+    const lifecycle: string[] = []
+    const expired = {
+      ...envelope,
+      createdAt: Date.now() - 8 * 24 * 60 * 60 * 1000,
+    }
+
+    await expect(
+      action(authority, command({ lifecycle }))(expired)
+    ).resolves.toEqual(
+      err({ code: "delivery-expired", mutationId: envelope.mutationId })
+    )
+
+    expect(lifecycle).toEqual(["screen:0"])
     expect(authority.receiptCount()).toBe(0)
   })
 

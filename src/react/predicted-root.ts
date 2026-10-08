@@ -290,11 +290,13 @@ interface Projection<State, Error> {
 function freezeEnvelope<Invocation>(
   protocol: string,
   mutationId: string,
+  createdAt: number,
   invocation: Invocation
 ): MutationEnvelope<Invocation> {
   return Object.freeze({
     protocol,
     mutationId,
+    createdAt,
     invocation: structuredClone(invocation),
   })
 }
@@ -474,6 +476,7 @@ export function createPredictedRootHook<
         const envelope = freezeEnvelope(
           options.protocol.id,
           globalThis.crypto.randomUUID(),
+          Date.now(),
           invocation
         )
         const predicted = predict(projection.value, envelope)

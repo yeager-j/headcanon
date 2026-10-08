@@ -1,8 +1,10 @@
 import { err, ok } from "serializable-result"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { createInMemoryMutationAuthority } from "."
 import {
+  checkDeliveryAge,
+  deliveryAgePolicy,
   throwMutationContention,
   type MutationAuthorityRequest,
 } from "../core/authority"
@@ -26,6 +28,7 @@ function request(sequence: number): MutationAuthorityRequest<string, Refusal> {
   return {
     actor: "actor",
     mutationId: `20000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`,
+    createdAt: Date.now(),
     protocol: "test.in-memory.v1",
     canonical: {
       json,
@@ -36,7 +39,72 @@ function request(sequence: number): MutationAuthorityRequest<string, Refusal> {
   }
 }
 
-function counterAuthority(options: { readonly maxAttempts?: number } = {}) {
+const MINUTE_MS = 60_000
+const HOUR_MS = 60 * MINUTE_MS
+
+/** A window small enough to place envelopes a minute either side of its bounds. */
+const HOUR_WINDOW = Object.freeze({
+  maxDeliveryAgeMs: HOUR_MS,
+  clockSkewToleranceMs: 10 * MINUTE_MS,
+})
+
+type CounterAuthority = ReturnType<typeof counterAuthority>
+
+/** Executes envelopes a minute inside and outside each bound of HOUR_WINDOW. */
+async function hourWindowOutcomes(authority: CounterAuthority) {
+  const now = Date.now()
+  const createdAts = [
+    now - HOUR_MS + MINUTE_MS,
+    now - HOUR_MS - MINUTE_MS,
+    now + 10 * MINUTE_MS - MINUTE_MS,
+    now + 10 * MINUTE_MS + MINUTE_MS,
+  ]
+
+  return Promise.all(
+    createdAts.map(async (createdAt, index) => {
+      const outcome = await authority.execute(
+        { ...request(20 + index), createdAt },
+        async () => ok(undefined)
+      )
+      return outcome.ok ? outcome.value.kind : outcome.error.code
+    })
+  )
+}
+
+/**
+ * The first attempt moves the clock two minutes, past the end of HOUR_WINDOW
+ * for an envelope one minute from expiry, then loses a race.
+ */
+async function expireDuringContendedAttempt(
+  execute: CounterAuthority["execute"]
+) {
+  vi.useFakeTimers({ toFake: ["Date"] })
+  const envelope = {
+    ...request(30),
+    createdAt: Date.now() - HOUR_MS + MINUTE_MS,
+  }
+  let attempts = 0
+
+  const outcome = await execute(envelope, async (tx) => {
+    attempts += 1
+    tx.write(tx.read() + 1)
+    if (attempts === 1) {
+      vi.setSystemTime(Date.now() + 2 * MINUTE_MS)
+      throwMutationContention()
+    }
+    return ok(undefined)
+  })
+
+  return { outcome, attempts, mutationId: envelope.mutationId }
+}
+
+function counterAuthority(
+  options: {
+    readonly maxAttempts?: number
+    readonly maxDeliveryAgeMs?: number
+    readonly clockSkewToleranceMs?: number
+  } = {}
+) {
   return createInMemoryMutationAuthority<number, string, Refusal>({
     initialState: 0,
     scope: (actor) => actor,
@@ -45,6 +113,61 @@ function counterAuthority(options: { readonly maxAttempts?: number } = {}) {
 }
 
 describe("in-memory mutation authority", () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("applies a configured delivery window", async () => {
+    expect(await hourWindowOutcomes(counterAuthority(HOUR_WINDOW))).toEqual([
+      "accepted",
+      "delivery-expired",
+      "accepted",
+      "delivery-from-future",
+    ])
+  })
+
+  it("admits the same envelopes under the default window, so the window test depends on the options", async () => {
+    expect(await hourWindowOutcomes(counterAuthority())).toEqual([
+      "accepted",
+      "accepted",
+      "accepted",
+      "accepted",
+    ])
+  })
+
+  it("checks the delivery window again before each contention attempt", async () => {
+    const authority = counterAuthority(HOUR_WINDOW)
+
+    const { outcome, attempts, mutationId } =
+      await expireDuringContendedAttempt(authority.execute)
+
+    expect(outcome).toEqual(err({ code: "delivery-expired", mutationId }))
+    expect(attempts).toBe(1)
+    expect(authority.read()).toBe(0)
+    expect(authority.hasReceipt("actor", mutationId)).toBe(false)
+  })
+
+  it("runs the second attempt when the window is checked once per delivery, so the retry test can fail", async () => {
+    const authority = counterAuthority(HOUR_WINDOW)
+    const policy = deliveryAgePolicy(HOUR_WINDOW)
+    const checkedOncePerDelivery: CounterAuthority["execute"] = async (
+      request,
+      run
+    ) => {
+      const admitted = checkDeliveryAge(policy, request, Date.now())
+      if (!admitted.ok) return admitted
+
+      return authority.execute({ ...request, createdAt: Date.now() }, run)
+    }
+
+    const { outcome, attempts } = await expireDuringContendedAttempt(
+      checkedOncePerDelivery
+    )
+
+    expect(outcome).toMatchObject({ ok: true, value: { kind: "accepted" } })
+    expect(attempts).toBe(2)
+  })
+
   it("reruns a command that throws contention, as production adapters do", async () => {
     const authority = counterAuthority()
     let attempts = 0

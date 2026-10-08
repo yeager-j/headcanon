@@ -255,15 +255,80 @@ Set database lock and statement timeouts, plus deadlines for any external calls,
 
 The client's delivery timeout marks the result as uncertain; it does not cancel the running Server Action. An unanswered Next.js action can hold up other actions and transitions. Bounded server work lets the client receive an answer or retry once the failed call has ended.
 
-## Keep receipts available for retries
+## Limit delivery age
+
+Each envelope carries `createdAt`, the time the client created the mutation, in epoch milliseconds on the client's clock. A retry, a delivery at unmount, and a later redelivery all keep the original value.
+
+When no receipt exists for the mutation ID, the authority compares `createdAt` with its own clock before every attempt. The Drizzle adapter uses the database clock. It refuses the delivery when `createdAt` is:
+
+| Condition                                             | Error code             | Default limit |
+| ----------------------------------------------------- | ---------------------- | ------------- |
+| Older than `maxDeliveryAgeMs`                         | `delivery-expired`     | 7 days        |
+| More than `clockSkewToleranceMs` ahead of server time | `delivery-from-future` | 1 hour        |
+
+A refused delivery runs no command and records no receipt. Screening still runs first. If a receipt already exists, the authority replays it, or returns `mutation-id-reused`, whatever the envelope's age. An old tab that retries a save that already committed learns that it was accepted.
+
+Set the limits on the authority:
+
+```ts
+const notesAuthority = createDrizzleMutationAuthority({
+  db,
+  scope: (actor: { userId: string }) => actor.userId,
+  maxDeliveryAgeMs: 7 * 24 * 60 * 60 * 1000,
+  clockSkewToleranceMs: 60 * 60 * 1000,
+})
+```
+
+Choose a maximum age longer than the longest time a user can leave a tab with an unsaved change and then retry it. Age counts from `mutate`, not from the first send, so mutations queued behind an uncertain one keep aging while they wait.
+
+A client whose clock is wrong by more than these limits cannot save: a slow clock gets `delivery-expired`, and a fast clock gets `delivery-from-future`. Headcanon does not correct client clocks and never changes an envelope's `createdAt`.
+
+> **Breaking change in 0.1.0.** `createdAt` is a required envelope field. The server rejects an envelope without it as `invalid-envelope` with reason `unexpected-fields`. Reload old clients after you deploy. Code that builds envelopes itself, such as tests or a custom sender, must add `createdAt: Date.now()`. A custom authority adapter must apply the delivery window; see [Verify custom adapters](testing.md#verify-custom-adapters).
+
+## Delete old receipts
 
 Receipts are part of the write guarantee. The adapter stores them in the same database transaction as accepted application changes and replays recorded refusals and denials too, after screening allows the delivery.
 
 A retry must keep the same mutation ID, protocol, and arguments. Reusing an ID with a different invocation returns `mutation-id-reused`. The client root preserves the original envelope when retrying uncertain delivery.
 
-Headcanon does not expire receipts automatically. The table has an indexed `created_at` column to support application-owned cleanup. Only remove receipts after your application can reject every older delivery that might refer to them. Headcanon has no built-in maximum delivery age; deleting a receipt alone allows that mutation ID to execute again.
+`deleteExpiredReceipts()` deletes receipts that no honest redelivery can use. It deletes a receipt once it is older than `maxDeliveryAgeMs + clockSkewToleranceMs + marginMs` on the database clock. After that, every redelivery that keeps its original `createdAt` gets `delivery-expired`. `marginMs` defaults to 1 hour and covers database clock adjustments, such as a failover to a server whose clock differs.
 
-Keep stored refusal values readable across deployments for as long as their deliveries remain supported. Replayed refusals are checked against the current mutation's refusal schema; incompatible or malformed stored outcomes throw instead of executing the mutation again.
+Run it from a scheduled job. Each call deletes at most `limit` receipts (default 1000), oldest first, through the `created_at` index:
+
+```ts
+// app/api/cron/receipts/route.ts
+import { notesAuthority } from "@/lib/notes/binder"
+
+export async function GET() {
+  let deleted: number
+  do {
+    deleted = await notesAuthority.deleteExpiredReceipts({ limit: 1000 })
+  } while (deleted === 1000)
+
+  return Response.json({ ok: true })
+}
+```
+
+Export the authority from the binder module to use it there, and protect the route as your platform recommends for scheduled jobs. Several jobs or servers may run cleanup at the same time. A call skips receipts that a delivery has locked, so a short batch does not prove that no expired receipt remains; the next run deletes them.
+
+Cleanup is safe only while the delivery window stays the same:
+
+- Every authority that uses the receipt table, on every server and in every deployment, must use the same `maxDeliveryAgeMs` and `clockSkewToleranceMs` once cleanup runs. Several authorities with the same window may share the table.
+- Do not run cleanup while any server without the delivery-age check can still accept deliveries.
+- To change the window by more than `marginMs`, follow the matching transition:
+
+| Change                            | Transition                                                                                                                       |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Lower `maxDeliveryAgeMs`          | Stop cleanup until every server runs the new value.                                                                              |
+| Raise `clockSkewToleranceMs`      | Stop cleanup until every server runs the new value.                                                                              |
+| Raise `maxDeliveryAgeMs` by Δ     | Stop cleanup. Wait Δ after the last cleanup run ends. Then deploy, and start cleanup again when every server runs the new value. |
+| Lower `clockSkewToleranceMs` by Δ | From the start of the rollout until `maxDeliveryAgeMs` + the old tolerance + `marginMs` after it ends, add Δ to `marginMs`.      |
+
+Without these steps, cleanup can delete a receipt that a server with the new window still needs. For example, a receipt deleted under a 1-day age lets a 7-day age execute the same envelope again.
+
+A delivery-age refusal proves only that this delivery wrote nothing. After cleanup deletes a receipt, a mutation that committed but whose response was lost also gets `delivery-expired`. See [Handle terminal failures](react.md#handle-terminal-failures).
+
+Keep stored refusal values readable across deployments for as long as their receipts exist. Replayed refusals are checked against the current mutation's refusal schema; incompatible or malformed stored outcomes throw instead of executing the mutation again.
 
 ## Further reading
 

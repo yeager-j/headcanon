@@ -312,6 +312,8 @@ describe("Next action golden path", () => {
     { code: "invalid-envelope", reason: "invalid-protocol" },
     { code: "invalid-arguments", mutation: "next.guarded-add", issues: [] },
     { code: "mutation-id-reused", mutationId: "reused" },
+    { code: "delivery-expired", mutationId: "expired" },
+    { code: "delivery-from-future", mutationId: "future" },
   ] as const)(
     "settles the executor's $code refusal as undeliverable, without retry",
     async (executorError) => {
@@ -387,6 +389,7 @@ describe("Next action golden path", () => {
     const thrown = await send({
       protocol: actionProtocol.id,
       mutationId: "stale-client-cause",
+      createdAt: Date.now(),
       invocation: guardedAdd({ amount: 1 }),
     }).catch((error: unknown) => error)
 

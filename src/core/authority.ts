@@ -27,6 +27,12 @@ import {
 export interface MutationEnvelope<Invocation> {
   readonly protocol: string
   readonly mutationId: string
+  /**
+   * When the client created the mutation, in epoch milliseconds on the
+   * client's clock. Every redelivery of the mutation keeps it. The authority
+   * refuses a new execution outside its delivery window.
+   */
+  readonly createdAt: number
   readonly invocation: Invocation
 }
 
@@ -114,15 +120,28 @@ export type ProtocolIdentity<ProtocolId extends string> = {
   readonly [protocolIdentity]?: ProtocolId
 }
 
+/**
+ * The authority refused a new execution because the envelope's `createdAt`
+ * is outside its delivery window: older than the maximum delivery age, or
+ * further ahead of the authority's clock than its skew tolerance. Nothing
+ * was recorded.
+ */
+export type MutationDeliveryAgeError =
+  | { readonly code: "delivery-expired"; readonly mutationId: string }
+  | { readonly code: "delivery-from-future"; readonly mutationId: string }
+
 /** Expected authority failures that prevent a terminal receipt outcome. */
 export type MutationAuthorityAdapterError =
   | { readonly code: "mutation-id-reused"; readonly mutationId: string }
   | { readonly code: "contention"; readonly mutationId: string }
+  | MutationDeliveryAgeError
 
 /** Trusted context and canonical identity supplied to a mutation authority adapter. */
 export interface MutationAuthorityRequest<Actor, Refusal = unknown> {
   readonly actor: Actor
   readonly mutationId: string
+  /** The envelope's `createdAt`: client epoch milliseconds. */
+  readonly createdAt: number
   readonly protocol: string
   readonly canonical: CanonicalInvocation
   /**
@@ -161,10 +180,17 @@ export interface MutationAuthorityAdapter<
    *
    * If a receipt is already recorded under the key, returns its outcome when
    * the request's canonical identity matches, or `mutation-id-reused` when it
-   * does not. Otherwise calls `run` once per attempt, each time with a fresh
-   * transaction and a fresh {@link createStampAccumulator} accumulator,
-   * records the terminal outcome, and returns it. Returns `contention` when
-   * every attempt the adapter allows ends in contention.
+   * does not, whatever the request's `createdAt`. Otherwise, before every
+   * attempt, reads the adapter's clock and checks the request with
+   * {@link checkDeliveryAge}; a refusal returns at once, without calling `run`
+   * and without recording a receipt. Each admitted attempt calls `run` with a
+   * fresh transaction and a fresh {@link createStampAccumulator} accumulator.
+   * The adapter records the terminal outcome, timestamped with the clock
+   * reading that admitted the attempt, and returns it. Returns `contention`
+   * when every attempt the adapter allows ends in contention.
+   *
+   * Receipt cleanup must read the same clock: a receipt may be deleted only
+   * once {@link receiptRetentionMs} has passed since that timestamp.
    * @throws What `run` throws, other than contention; and an Error when a refusal must be recorded or replayed and the request has no `parseRefusal`.
    */
   execute(
@@ -250,6 +276,109 @@ export function contentionRetry(options: {
       }
     }
   }
+}
+
+/** Maximum delivery age an authority uses when none is configured: 7 days. */
+export const DEFAULT_MAX_DELIVERY_AGE_MS = 604_800_000
+
+/** Clock skew tolerance an authority uses when none is configured: 1 hour. */
+export const DEFAULT_CLOCK_SKEW_TOLERANCE_MS = 3_600_000
+
+/** Extra receipt retention that cleanup adds when none is given: 1 hour. */
+export const DEFAULT_RECEIPT_CLEANUP_MARGIN_MS = 3_600_000
+
+/**
+ * The delivery window of one authority. A new execution is admitted only
+ * when the envelope's `createdAt` is no older than `maxDeliveryAgeMs` and no
+ * further ahead than `clockSkewToleranceMs` on the authority's clock. Keep
+ * both values fixed for a receipt table once receipt cleanup runs.
+ */
+export interface DeliveryAgePolicy {
+  readonly maxDeliveryAgeMs: number
+  readonly clockSkewToleranceMs: number
+}
+
+/**
+ * Builds an adapter's delivery window. The window is validated once, when the
+ * adapter is created.
+ * @param options The maximum age and skew tolerance in milliseconds; each defaults when omitted.
+ * @returns A frozen policy.
+ * @throws Error when `maxDeliveryAgeMs` is not a positive safe integer, or `clockSkewToleranceMs` is not a non-negative safe integer.
+ */
+export function deliveryAgePolicy(options: {
+  readonly maxDeliveryAgeMs?: number
+  readonly clockSkewToleranceMs?: number
+}): DeliveryAgePolicy {
+  const maxDeliveryAgeMs =
+    options.maxDeliveryAgeMs ?? DEFAULT_MAX_DELIVERY_AGE_MS
+  const clockSkewToleranceMs =
+    options.clockSkewToleranceMs ?? DEFAULT_CLOCK_SKEW_TOLERANCE_MS
+
+  if (!Number.isSafeInteger(maxDeliveryAgeMs) || maxDeliveryAgeMs < 1) {
+    throw new Error("maxDeliveryAgeMs must be a positive safe integer")
+  }
+
+  if (!isNonNegativeSafeInteger(clockSkewToleranceMs)) {
+    throw new Error("clockSkewToleranceMs must be a non-negative safe integer")
+  }
+
+  return Object.freeze({ maxDeliveryAgeMs, clockSkewToleranceMs })
+}
+
+/**
+ * Decides whether a request with no recorded receipt may execute now.
+ * @param policy The adapter's delivery window.
+ * @param request The request's mutation ID and `createdAt`.
+ * @param now The adapter's clock, in epoch milliseconds.
+ * @returns Nothing when `createdAt` is within the window; otherwise `delivery-expired` or `delivery-from-future`.
+ */
+export function checkDeliveryAge(
+  policy: DeliveryAgePolicy,
+  request: { readonly mutationId: string; readonly createdAt: number },
+  now: number
+): Result<void, MutationDeliveryAgeError> {
+  const { mutationId, createdAt } = request
+
+  if (createdAt < now - policy.maxDeliveryAgeMs) {
+    return err({ code: "delivery-expired", mutationId })
+  }
+
+  if (createdAt > now + policy.clockSkewToleranceMs) {
+    return err({ code: "delivery-from-future", mutationId })
+  }
+
+  return ok(undefined)
+}
+
+/**
+ * How long a receipt must stay recorded before cleanup may delete it: after
+ * this time, no redelivery with the envelope's original `createdAt` can pass
+ * {@link checkDeliveryAge}. Measure it from the receipt's timestamp on the
+ * same clock that checked the delivery.
+ * @param policy The delivery window every server sharing the receipt table uses.
+ * @param marginMs Extra retention for clock adjustments.
+ * @returns `maxDeliveryAgeMs + clockSkewToleranceMs + marginMs`.
+ * @throws Error when `marginMs` is not a non-negative safe integer, or the sum is not a safe integer.
+ */
+export function receiptRetentionMs(
+  policy: DeliveryAgePolicy,
+  marginMs: number
+): number {
+  if (!isNonNegativeSafeInteger(marginMs)) {
+    throw new Error("marginMs must be a non-negative safe integer")
+  }
+
+  const retentionMs =
+    policy.maxDeliveryAgeMs + policy.clockSkewToleranceMs + marginMs
+  if (!Number.isSafeInteger(retentionMs)) {
+    throw new Error("Receipt retention must be a safe integer")
+  }
+
+  return retentionMs
+}
+
+function isNonNegativeSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0
 }
 
 /**
@@ -391,6 +520,7 @@ export type MutationExecutorError =
         | "unexpected-fields"
         | "invalid-protocol"
         | "invalid-mutation-id"
+        | "invalid-created-at"
         | "invalid-invocation"
         | "unknown-mutation"
     }
@@ -407,6 +537,7 @@ export type MutationExecutorError =
 
 interface ParsedEnvelope {
   readonly mutationId: string
+  readonly createdAt: number
   readonly definition: AnyMutationDefinition
   readonly args: unknown
 }
@@ -414,6 +545,8 @@ interface ParsedEnvelope {
 /** A strictly parsed, canonical request which has not touched receipt authority. */
 export interface PreparedMutationRequest {
   readonly mutationId: string
+  /** The envelope's `createdAt`: client epoch milliseconds. */
+  readonly createdAt: number
   readonly protocol: string
   readonly mutation: string
   readonly args: unknown
@@ -430,7 +563,9 @@ function parseEnvelope(
   if (!isPlainRecord(value)) {
     return err({ code: "invalid-envelope", reason: "not-plain-object" })
   }
-  if (!hasExactKeys(value, ["protocol", "mutationId", "invocation"])) {
+  if (
+    !hasExactKeys(value, ["protocol", "mutationId", "createdAt", "invocation"])
+  ) {
     return err({ code: "invalid-envelope", reason: "unexpected-fields" })
   }
   if (value.protocol !== protocol.id) {
@@ -441,6 +576,12 @@ function parseEnvelope(
     !UUID_PATTERN.test(value.mutationId)
   ) {
     return err({ code: "invalid-envelope", reason: "invalid-mutation-id" })
+  }
+  if (
+    typeof value.createdAt !== "number" ||
+    !isNonNegativeSafeInteger(value.createdAt)
+  ) {
+    return err({ code: "invalid-envelope", reason: "invalid-created-at" })
   }
   if (!isPlainRecord(value.invocation)) {
     return err({ code: "invalid-envelope", reason: "invalid-invocation" })
@@ -455,6 +596,7 @@ function parseEnvelope(
 
   return ok({
     mutationId: value.mutationId,
+    createdAt: value.createdAt,
     definition,
     args: value.invocation.args,
   })
@@ -470,7 +612,7 @@ const UNPARSED_ARGUMENTS_ISSUE: StandardSchemaV1.Issue = Object.freeze({
  * Strictly parses and canonicalizes an envelope without claiming a receipt.
  *
  * This is the server-side trust-boundary step: it checks the exact envelope
- * shape and protocol, validates the mutation name, parses arguments with the
+ * shape (including a non-negative integer `createdAt`) and protocol, validates the mutation name, parses arguments with the
  * registered Standard Schema, and derives canonical receipt identity. Clients
  * send arguments in parsed form (the value they predicted with), so arguments
  * the schema changes are refused as `invalid-arguments`; otherwise the
@@ -522,6 +664,7 @@ export async function prepareMutationRequest<
 
   return ok({
     mutationId: parsedEnvelope.value.mutationId,
+    createdAt: parsedEnvelope.value.createdAt,
     protocol: protocol.id,
     mutation: definition.name,
     args: prepared.value.invocation.args,
@@ -568,6 +711,7 @@ export function executePreparedMutation<
     {
       actor: options.actor,
       mutationId: options.prepared.mutationId,
+      createdAt: options.prepared.createdAt,
       protocol: options.prepared.protocol,
       canonical: options.prepared.canonical,
       parseRefusal: options.parseRefusal,
