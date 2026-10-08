@@ -743,6 +743,32 @@ describe("createPredictedRoot", () => {
     await waitFor(() => expect(send).toHaveBeenCalledTimes(3))
   })
 
+  it("waits for the server outcome when replay refuses a retried uncertain envelope", async () => {
+    // Retry re-queues the envelope, but the lost attempt may have committed:
+    // canon that holds the change must not withdraw it as replay-refused.
+    const { result, deliveries, rerender, send } = setup()
+    let receipt: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1, refuseAt: 10 }))
+    })
+    act(() => deliveries[0]?.reject(new Error("response lost")))
+    await waitFor(() =>
+      expect(result.current.status.delivery).toBe("uncertain")
+    )
+
+    act(() => {
+      result.current.retryDelivery()
+      rerender({ currentCanon: canon(10, 10) })
+    })
+    expect(result.current.conflicts).toHaveLength(1)
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2))
+    expect(deliveries[1]?.envelope).toBe(deliveries[0]?.envelope)
+
+    act(() => deliveries[1]?.resolve(ok(stamp(10))))
+    await expect(receipt!.accepted).resolves.toEqual(ok(stamp(10)))
+    await expect(receipt!.canonized).resolves.toEqual(ok(undefined))
+  })
+
   it("settles unresolved receipts and releases Actions on unmount", async () => {
     const { result, deliveries, unmount } = setup()
     const inFlight = mutate(result, add({ amount: 1 }))
@@ -955,6 +981,48 @@ describe("createPredictedRoot — retryable delivery", () => {
     await act(async () => {})
     expect(send).toHaveBeenCalledTimes(2 + DELIVERY_RETRY_DELAYS_MS.length)
     expect(result.current.status.delivery).toBe("idle")
+  })
+
+  it("withdraws a replay-refused retry after only known-clean misses", async () => {
+    // Every attempt answered that no receipt exists, so Retry re-queues an
+    // envelope that cannot have committed.
+    vi.useFakeTimers()
+    const send = vi.fn(
+      async (_envelope: MutationEnvelope<CounterInvocation>) => {
+        throw new RetryableDeliveryError("contention")
+      }
+    )
+    const usePredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+    })
+    const { result, rerender } = renderHook(
+      ({ currentCanon }: { currentCanon: Canon<number> }) =>
+        usePredictions({ canon: currentCanon }),
+      { initialProps: { currentCanon: canon(0, 0) } }
+    )
+    let receipt: MutationReceipt<CounterError>
+
+    act(() => {
+      receipt = mutate(result, add({ amount: 1, refuseAt: 10 }))
+    })
+    await act(async () => {})
+    for (const delay of DELIVERY_RETRY_DELAYS_MS) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delay)
+      })
+    }
+    expect(result.current.status.delivery).toBe("uncertain")
+
+    act(() => {
+      result.current.retryDelivery()
+      rerender({ currentCanon: canon(10, 10) })
+    })
+    await expect(receipt!.accepted).resolves.toEqual(
+      err({ kind: "replay-refused", error: { code: "prediction-refused" } })
+    )
+    expect(send).toHaveBeenCalledTimes(1 + DELIVERY_RETRY_DELAYS_MS.length)
   })
 })
 
