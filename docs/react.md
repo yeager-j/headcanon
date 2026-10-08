@@ -144,6 +144,8 @@ export function RenameForm() {
           setMessage("The server refused this title.")
         } else if (result.error.kind === "denied") {
           setMessage("You do not have permission to make this change.")
+        } else if (result.error.kind === "stale-client") {
+          setMessage("This page is out of date. Refresh to update it.")
         } else if (result.error.kind === "delivery-cancelled") {
           setMessage(
             "Confirmation was interrupted. The change may have been saved."
@@ -336,9 +338,12 @@ Local prediction failures are returned directly by `mutate`. After a receipt exi
 | `"domain"`             | The server returned the mutation's public refusal, available as `error`.                                                                                                              |
 | `"denied"`             | The server denied access without exposing a reason.                                                                                                                                   |
 | `"undeliverable"`      | The server rejected the envelope, arguments, or a reused mutation ID; `error` contains the executor failure.                                                                          |
+| `"stale-client"`       | The server does not know the Server Action this page called, because the page's code is older than the deployed build. The write was never made, and a retry cannot help.             |
 | `"replay-refused"`     | Replay refused a prediction that could still be withdrawn; `error` contains the predictor's refusal.                                                                                  |
 | `"delivery-cancelled"` | The Next binding passed framework control flow, such as a redirect, back to Next.js. This does not prove the write was rolled back: `finalizeAccepted` can redirect after the commit. |
 | `"root-unmounted"`     | The root stopped observing the mutation. `outcome` is `"accepted"` if acceptance was known, otherwise `"unknown"`.                                                                    |
+
+Show a "Refresh to update" prompt for `"stale-client"`. Only a page reload loads the new build. Each mutation that is still queued is also sent and also fails with `"stale-client"`, one at a time, so the root does not stop. Next.js can keep an action's ID across builds, so an old page can still save some changes after a deploy. Headcanon reports `"stale-client"` only when the server does not know the action's ID.
 
 Delivery uncertainty is a root status, not a terminal failure. A stalled refresh also leaves canonization pending while the root remains mounted.
 
@@ -396,7 +401,7 @@ Its `value` is confirmed canon only. It exposes `status` and `retryRefresh`, but
 | `refresh`       | A React hook returning a `RefreshAdapter`. For snapshot data, call `useSnapshotRefresh(refetch)` inside this hook.               |
 | `invalidations` | Optional adapter that notifies the root about newer revisions or subscription gaps.                                              |
 
-Use `RetryableDeliveryError` only when the authority confirms it stored no terminal receipt, and `TerminalDeliveryError` for a known terminal delivery failure. The Next binding already translates generated-action outcomes into these categories.
+Use `RetryableDeliveryError` only when the authority confirms it stored no terminal receipt, and `TerminalDeliveryError` for a known terminal delivery failure. Throw `new TerminalDeliveryError({ kind: "stale-client" }, { cause })` when the server does not know the endpoint this client called. The Next binding already translates generated-action outcomes, and Next's unknown-action error, into these categories.
 
 A snapshot refetch must update the canon passed to the root; returning fetched data alone does not install it. Keep the refetch function stable. Promise-returning refreshes complete when their promise settles, while a void refresh waits for changed canon to arrive. See [Loading data](loading-data.md) for coverage and refresh requirements.
 

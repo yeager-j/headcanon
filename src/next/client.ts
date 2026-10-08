@@ -1,6 +1,10 @@
 "use client"
 
-import { unstable_rethrow, useRouter } from "next/navigation"
+import {
+  unstable_isUnrecognizedActionError,
+  unstable_rethrow,
+  useRouter,
+} from "next/navigation"
 import { useMemo } from "react"
 import { err, ok, type Result } from "serializable-result"
 
@@ -163,6 +167,15 @@ export function createNextObservedRoot(options: NextObservedRootOptions = {}) {
  * (the envelope, its arguments, or its mutation ID was refused), throws
  * {@link TerminalDeliveryError}: the answer is final and a retry would get it
  * again.
+ *
+ * When the server does not know the action's ID, because a new build was
+ * deployed after this page loaded, the sender throws a `stale-client`
+ * {@link TerminalDeliveryError}. Its `cause` is Next's
+ * `UnrecognizedActionError`. Nothing was written, and only a page reload can
+ * deliver the mutation. Next can keep an action's ID across builds, so a page
+ * older than the deployed build can still deliver some mutations. Every other
+ * throw from the action, framework control flow included, propagates
+ * unchanged.
  * @param action Generated Server Action for one protocol.
  * @returns A sender adapter returning accepted stamps or typed refusals.
  */
@@ -176,7 +189,7 @@ export function createNextMutationSender<
   Result<AcceptedStamp, MutationRefusalOf<ProtocolMutation<Protocol>>>
 > {
   return async (envelope) => {
-    const outcome = await action(envelope)
+    const outcome = await callKnownAction(action, envelope)
     if (!outcome.ok) {
       if (outcome.error.code === "contention") {
         throw new RetryableDeliveryError("mutation authority contention")
@@ -195,6 +208,19 @@ export function createNextMutationSender<
       case "denied":
         throw new TerminalDeliveryError({ kind: "denied" })
     }
+  }
+}
+
+/** Calls `action`, and reports an action the deployed build does not know as a stale client. */
+async function callKnownAction<Protocol extends AnyProtocolDefinition>(
+  action: NextMutationAction<Protocol>,
+  envelope: MutationEnvelope<ProtocolInvocation<Protocol>>
+): ReturnType<NextMutationAction<Protocol>> {
+  try {
+    return await action(envelope)
+  } catch (error) {
+    if (!unstable_isUnrecognizedActionError(error)) throw error
+    throw new TerminalDeliveryError({ kind: "stale-client" }, { cause: error })
   }
 }
 

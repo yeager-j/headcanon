@@ -1323,6 +1323,28 @@ describe("createPredictedRoot — terminal and paused delivery", () => {
     expect(deliveries[1]?.envelope.mutationId).toBe(next.id)
   })
 
+  it("reports a stale-client failure to both stage listeners", async () => {
+    const { result, deliveries } = setup()
+    const onAcceptance = vi.fn()
+    const onCanonization = vi.fn()
+    act(() => {
+      mutate(result, add({ amount: 1 }), { onAcceptance, onCanonization })
+    })
+
+    const cause = new Error("the server does not know this action")
+    await act(async () =>
+      deliveries[0]?.reject(
+        new TerminalDeliveryError({ kind: "stale-client" }, { cause })
+      )
+    )
+
+    const staleClient = err({ kind: "stale-client" })
+    expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(staleClient)
+    expect(onCanonization).toHaveBeenCalledExactlyOnceWith(staleClient)
+    expect(result.current.value).toBe(0)
+    expect(result.current.status.delivery).toBe("idle")
+  })
+
   it("queues intent recorded while the head is uncertain behind that head", async () => {
     const { result, deliveries, send } = setup()
     act(() => {
