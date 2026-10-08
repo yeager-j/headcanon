@@ -304,7 +304,7 @@ export async function deleteReceiptsOlderThan<
  *
  * Every attempt runs at READ COMMITTED, whatever the database default. Guard
  * writes with compare-and-set and call `throwMutationContention()` from
- * `headcanon` when the guard fails. The adapter does not decide actor
+ * `headcanon/server` when the guard fails. The adapter does not decide actor
  * identity, authorization, or domain rules.
  *
  * @param options The database, actor scope, retry policy, and delivery window.

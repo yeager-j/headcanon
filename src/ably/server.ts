@@ -1,4 +1,7 @@
-import type { InvalidationPublisher } from "../core/invalidation"
+import type {
+  InvalidationPublicationFailureReporter,
+  InvalidationPublisher,
+} from "../core/invalidation"
 import { revisionEntries, type AxisId, type Revision } from "../core/revisions"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
@@ -133,21 +136,25 @@ function batchFailures(
  * Every request runs to completion. If Ably rejects a request or reports an
  * error for a channel, the returned promise rejects with
  * {@link AblyInvalidationPublicationError} listing exactly the axes that were
- * not published; the others were. The publisher does not authorize viewers,
- * persist receipts, or retry; those concerns belong to the application or
- * authority boundary and the finalization failure reporter.
+ * not published; the others were. Finalization reports that rejection, or a
+ * timeout, to `onFailure`. The publisher does not authorize viewers, persist
+ * receipts, or retry; those concerns belong to the application or authority
+ * boundary.
  *
- * @param options Ably REST client and deployment namespace.
+ * @param options Ably REST client, deployment namespace, and failure reporter.
  * @returns An invalidation publisher for accepted stamps.
  * @throws Error at construction when `namespace` is invalid (see `ablyChannelNamespace`).
  */
 export function createAblyInvalidationPublisher(options: {
   readonly rest: AblyRestClient
   readonly namespace: string
+  /** Receives each publication that rejected or timed out. */
+  readonly onFailure: InvalidationPublicationFailureReporter
 }): InvalidationPublisher {
   const namespace = ablyChannelNamespace(options.namespace)
 
   return {
+    onFailure: options.onFailure,
     async publish(eventId, stamp) {
       const publications: AxisPublication[] = await Promise.all(
         revisionEntries(stamp.revisions).map(async ([axis, revision]) => ({

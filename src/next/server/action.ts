@@ -10,10 +10,7 @@ import {
   type MutationTerminalOutcome,
   type ProtocolIdentity,
 } from "../../core/authority"
-import type {
-  InvalidationPublicationFailureReporter,
-  InvalidationPublisher,
-} from "../../core/invalidation"
+import type { InvalidationPublisher } from "../../core/invalidation"
 import type {
   AnyProtocolDefinition,
   MutationRefusalOf,
@@ -27,7 +24,8 @@ import {
   type MutationCommand,
   type MutationWithRefusal,
   type ValidBindings,
-} from "./binder"
+} from "../../server/binder"
+import { parseMutationRefusal } from "../../server/refusal"
 import { finalizeStamp } from "./revalidation"
 
 /**
@@ -50,32 +48,6 @@ type RuntimeBinding<Actor, Preflight, Transaction, Refusal> = MutationBinding<
     unknown
   >
 >
-
-function parseMutationRefusal<Refusal>(
-  schema: StandardSchemaV1,
-  value: unknown
-): Refusal {
-  const parsed = schema["~standard"].validate(value)
-  if ("then" in parsed) {
-    throw new Error("Mutation refusal codecs must validate synchronously")
-  }
-  if (parsed.issues) throw new Error("Invalid stored mutation refusal")
-  return parsed.value as Refusal
-}
-
-/**
- * A generated action's realtime publication: a publisher with its failure
- * reporter, or neither when the application has no realtime transport.
- */
-type ActionInvalidations =
-  | {
-      readonly invalidations: InvalidationPublisher
-      readonly reportInvalidationFailure: InvalidationPublicationFailureReporter
-    }
-  | {
-      readonly invalidations?: undefined
-      readonly reportInvalidationFailure?: undefined
-    }
 
 /**
  * Creates one Server Action from a binder and an exhaustive, definition-keyed
@@ -116,12 +88,12 @@ type ActionInvalidations =
  * expires, refreshes, and publishes, because the commit exists, and then
  * rethrows; a redelivery recovers the stored receipt and reruns the
  * projection, so accepted finalization is at-least-once. Publication failures
- * go only to the supplied reporter and do not turn an accepted mutation into a
- * rejection. Omit both `invalidations` and `reportInvalidationFailure` when
- * the application has no realtime transport: the action then only expires
- * tags and refreshes, and the router carries canon back.
+ * go only to the publisher's `onFailure` reporter and do not turn an accepted
+ * mutation into a rejection. Omit `invalidations` when the application has no
+ * realtime transport: the action then only expires tags and refreshes, and
+ * the router carries canon back.
  *
- * @param options Protocol, binder, exhaustive commands made by that binder, and optionally an invalidation publisher with its failure reporter.
+ * @param options Protocol, binder, exhaustive commands made by that binder, and optionally an invalidation publisher.
  * @returns A protocol-branded Server Action returning terminal outcomes (`accepted`, `refused`, or `denied`) or typed executor failures.
  * @throws Error at creation when a binding is duplicated, uses another definition, was made by another binder, or the list is incomplete.
  * @throws Trusted actor or command callbacks may throw unexpected application/framework failures.
@@ -132,14 +104,14 @@ export function createNextMutationAction<
   Actor,
   Preflight,
   const Commands extends readonly AnyMutationBinding[],
->(
-  options: {
-    readonly protocol: Protocol
-    readonly binder: MutationBinder<Transaction, Actor, Preflight>
-    readonly commands: Commands &
-      ValidBindings<Protocol, Commands, Actor, Preflight, Transaction>
-  } & ActionInvalidations
-) {
+>(options: {
+  readonly protocol: Protocol
+  readonly binder: MutationBinder<Transaction, Actor, Preflight>
+  readonly commands: Commands &
+    ValidBindings<Protocol, Commands, Actor, Preflight, Transaction>
+  /** Publishes accepted stamps to other clients; omit it without realtime. */
+  readonly invalidations?: InvalidationPublisher
+}) {
   type Refusal = MutationRefusalOf<BoundMutation<Commands>>
   type Terminal = MutationTerminalOutcome<Refusal>
 
@@ -222,17 +194,7 @@ export function createNextMutationAction<
         screened: screening.screened,
       })
     } finally {
-      await finalizeStamp(
-        stamp,
-        updateTag,
-        refresh,
-        options.invalidations === undefined
-          ? undefined
-          : {
-              invalidations: options.invalidations,
-              reportFailure: options.reportInvalidationFailure,
-            }
-      )
+      await finalizeStamp(stamp, updateTag, refresh, options.invalidations)
     }
     return outcome
   }

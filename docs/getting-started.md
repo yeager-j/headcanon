@@ -107,7 +107,7 @@ import "server-only"
 import { requireActor } from "@/lib/auth"
 import { db } from "@/lib/db"
 import { createDrizzleMutationAuthority } from "headcanon/drizzle"
-import { createMutationBinder } from "headcanon/next/server"
+import { createMutationBinder } from "headcanon/server"
 
 const authority = createDrizzleMutationAuthority({
   db,
@@ -134,15 +134,15 @@ Bind the mutation to a command that checks ownership, validates the title, and s
 
 import { notes } from "@/lib/db/schema"
 import { and, eq } from "drizzle-orm"
-import { throwMutationContention } from "headcanon"
+import { createNextMutationAction } from "headcanon/next/server"
 import {
   acceptMutation,
-  allowMutation,
-  allowMutationScreening,
-  createNextMutationAction,
+  allowAdmission,
+  allowScreening,
   denyMutation,
   refuseMutation,
-} from "headcanon/next/server"
+  throwMutationContention,
+} from "headcanon/server"
 
 import { notesBinder } from "./binder"
 import { isValidTitle, noteAxis, notesProtocol, renameNote } from "./protocol"
@@ -160,7 +160,7 @@ export const applyNotesMutation = createNextMutationAction({
             and(eq(notes.id, args.noteId), eq(notes.ownerId, actor.userId))
           )
 
-        return note ? allowMutationScreening(null) : denyMutation()
+        return note ? allowScreening() : denyMutation()
       },
 
       admit: async ({ tx, actor, args }) => {
@@ -171,7 +171,7 @@ export const applyNotesMutation = createNextMutationAction({
             and(eq(notes.id, args.noteId), eq(notes.ownerId, actor.userId))
           )
 
-        return note ? allowMutation(note) : denyMutation()
+        return note ? allowAdmission(note) : denyMutation()
       },
 
       execute: async ({ tx, actor, args, evidence, stamp }) => {

@@ -35,7 +35,8 @@ with the same options instead of guessing.
 | ------------- | -------------------------------------------------------------------------------- |
 | `src/core`    | The protocol model and authority. No React or Next: it is the `headcanon` graph. |
 | `src/react`   | The predicted root (hook, context, ledger), the observed root, and refresh.      |
-| `src/next`    | The Next bindings. `server/` splits revalidation, the binder, and the action.    |
+| `src/server`  | The binder and command outcomes. No React or Next: it is `headcanon/server`.     |
+| `src/next`    | The Next bindings. `server/` splits revalidation and the action.                 |
 | `src/ably`    | The Ably invalidation transport.                                                 |
 | `src/drizzle` | The Postgres authority and its receipt table.                                    |
 | `src/testing` | Test doubles; the contract suites are in `suites/`.                              |

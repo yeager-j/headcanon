@@ -65,8 +65,7 @@ export type NoteState = {
 export const renameNote = defineMutation({
   name: "notes.rename",
   args: z.object({ title: z.string().min(1) }),
-  predict: (state: NoteState, args) =>
-    ok({ ...state, title: args.title }),
+  predict: (state: NoteState, args) => ok({ ...state, title: args.title }),
 })
 
 export const notesProtocol = defineProtocol({
@@ -79,8 +78,9 @@ Keep this module safe to import in the browser. Database code and authentication
 
 ### 2. Connect the server
 
-Use `createMutationBinder` and `createNextMutationAction` from
-`headcanon/next/server` to connect the protocol to your application.
+Use `createMutationBinder` from `headcanon/server` and
+`createNextMutationAction` from `headcanon/next/server` to connect the protocol
+to your application.
 
 Your server setup must:
 
@@ -125,9 +125,7 @@ export function Note({ canon }: { canon: Canon<NoteState> }) {
   return (
     <section>
       <h1>{value.title}</h1>
-      <button
-        onClick={() => mutate(renameNote({ title: "Chapter Two" }))}
-      >
+      <button onClick={() => mutate(renameNote({ title: "Chapter Two" }))}>
         Rename
       </button>
     </section>

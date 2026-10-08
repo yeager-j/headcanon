@@ -243,6 +243,7 @@ function ablyContractHarness(): InvalidationContractHarness {
         publisher: createAblyInvalidationPublisher({
           rest: service.rest,
           namespace: "contract",
+          onFailure: vi.fn(),
         }),
         published: () => service.published,
         settled: settle,

@@ -25,7 +25,7 @@ npm install --save-dev vitest @testing-library/react jsdom
 
 Configure your test runner to resolve the same `@/` alias as your application. The examples import `@/lib/notes/protocol` from Getting started, which already uses Zod and `serializable-result`.
 
-Tests that import `headcanon/next/server` or `headcanon/next/client`, directly or through your command and root modules, also need Vitest to process Headcanon instead of loading it as an external package:
+Command modules import `headcanon/server`, which loads no Next.js code, so a test of a command module needs no extra configuration. Tests that import `headcanon/next/server` or `headcanon/next/client`, directly or through your action and root modules, also need Vitest to process Headcanon instead of loading it as an external package:
 
 ```ts
 // vitest.config.ts
@@ -114,9 +114,11 @@ Check the returned outcome, committed rows, revisions, and receipts together:
 | A new envelope is dated too far in the future            | `delivery-from-future` after screening; no receipt and no write.                                                                                                                             |
 | A concurrent write wins and the guarded write detects it | Admission and execution retry with fresh state and a fresh stamp, up to `maxAttempts`. Exhaustion returns `contention` without a receipt. A race the command does not detect is not retried. |
 
-Also check that `finalizeAccepted` is safe to repeat. Publication failure must leave an accepted write accepted and call your failure reporter. See [Server setup](server-setup.md) for the distinction between terminal outcomes and executor errors.
+Also check that `finalizeAccepted` is safe to repeat. Publication failure must leave an accepted write accepted and call your publisher's `onFailure`. See [Server setup](server-setup.md) for the distinction between terminal outcomes and executor errors.
 
-Calling a generated action in a unit test requires a substitute for Next's request-bound cache functions. With Headcanon inlined as shown above, mock them in the test file:
+A test that calls a command's `screen`, `admit`, or `execute` directly, or binds commands to an in-memory authority, imports only `headcanon/server` and needs no mocks.
+
+Calling a generated action in a unit test requires a substitute for Next's request-bound cache functions. With Headcanon inlined as shown above, mock them in the action test file:
 
 ```ts
 // lib/notes/actions.test.ts — add alongside your action tests
@@ -137,7 +139,7 @@ Provide your normal test session through the binder's actor callback too. These 
 ```ts
 // test/notes-authority.ts
 import type { NoteState } from "@/lib/notes/protocol"
-import { createMutationBinder } from "headcanon/next/server"
+import { createMutationBinder } from "headcanon/server"
 import { createInMemoryMutationAuthority } from "headcanon/testing"
 
 type StoredNote = NoteState & { ownerId: string; revision: number }

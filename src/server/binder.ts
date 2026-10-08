@@ -1,10 +1,9 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 
 import type {
-  MutationAttemptFailure,
   MutationAuthorityAdapter,
   StampAccumulator,
-} from "../../core/authority"
+} from "../core/authority"
 import {
   findMutation,
   type AnyMutationDefinition,
@@ -12,8 +11,13 @@ import {
   type MutationContext,
   type MutationRefusalOf,
   type ProtocolMutation,
-} from "../../core/protocol"
-import type { AcceptedStamp } from "../../core/revisions"
+} from "../core/protocol"
+import type { AcceptedStamp } from "../core/revisions"
+import type {
+  MutationAdmission,
+  MutationCommandDecision,
+  MutationScreening,
+} from "./outcomes"
 
 export type MutationWithRefusal = AnyMutationDefinition & {
   readonly refusal: StandardSchemaV1
@@ -24,80 +28,6 @@ type MutationArgs<Mutation extends AnyMutationDefinition> = Mutation extends (
 ) => unknown
   ? Args
   : never
-
-/**
- * A command's `screen` result: allowed, carrying the value `finalizeAccepted`
- * receives as `screened`, or denied. Build it with
- * {@link allowMutationScreening} or {@link denyMutation}.
- */
-export type MutationScreening<Screened> =
-  | { readonly kind: "allowed"; readonly screened: Screened }
-  | { readonly kind: "denied" }
-
-/**
- * A command's `admit` result for one transaction attempt: allowed, carrying
- * trusted evidence for `execute`, or denied. Build it with
- * {@link allowMutation} or {@link denyMutation}.
- */
-export type MutationAdmission<Evidence> =
-  | { readonly kind: "allowed"; readonly evidence: Evidence }
-  | { readonly kind: "denied" }
-
-/**
- * The application command's terminal decision inside one authority attempt.
- * A refusal or denial is the attempt failure the authority records as is.
- */
-export type MutationCommandDecision<Refusal> =
-  | { readonly kind: "accepted" }
-  | MutationAttemptFailure<Refusal>
-
-/** Marks transactional admission as allowed and carries its trusted evidence.
- * @param evidence Trusted evidence produced during admission.
- * @returns An allowed admission decision.
- */
-export function allowMutation<Evidence>(
-  evidence: Evidence
-): MutationAdmission<Evidence> {
-  return Object.freeze({ kind: "allowed", evidence })
-}
-
-/**
- * Marks preflight screening as allowed and carries the value
- * `finalizeAccepted` receives as `screened`.
- * @param screened Value retained for accepted finalization.
- * @returns An allowed screening decision.
- */
-export function allowMutationScreening<Screened>(
-  screened: Screened
-): MutationScreening<Screened> {
-  return Object.freeze({ kind: "allowed", screened })
-}
-
-/**
- * Denies the mutation from `screen`, `admit`, or `execute`. The generated
- * action returns `ok({ kind: "denied" })` with no reason, unlike a refusal.
- * @returns A denied decision.
- */
-export function denyMutation(): { readonly kind: "denied" } {
-  return Object.freeze({ kind: "denied" })
-}
-
-/** Returns the terminal accepted decision for a command attempt.
- * @returns An accepted command decision.
- */
-export function acceptMutation(): { readonly kind: "accepted" } {
-  return Object.freeze({ kind: "accepted" })
-}
-
-/** Returns a structured refusal that is safe to record and replay.
- * @param error Public refusal value.
- * @returns A refused command decision.
- */
-export function refuseMutation<Refusal>(
-  error: Refusal
-): MutationCommandDecision<Refusal> {
-  return Object.freeze({ kind: "refused", error })
-}
 
 /** One app-owned command bound to a client-safe mutation definition. */
 export interface MutationCommand<
@@ -110,8 +40,8 @@ export interface MutationCommand<
 > {
   /**
    * Runs once per delivery, outside any transaction and before the authority
-   * claims a receipt. Return {@link allowMutationScreening} or
-   * {@link denyMutation}; a denial claims no receipt.
+   * claims a receipt. Return `allowScreening` or `denyMutation`;
+   * a denial claims no receipt.
    */
   readonly screen: (context: {
     /** The authority's preflight executor, which reads committed state only. */
@@ -122,7 +52,7 @@ export interface MutationCommand<
   /**
    * Runs at the start of each transaction attempt, so it runs again after
    * contention; read and write only through `tx`. Return
-   * {@link allowMutation} or {@link denyMutation}; a denial is recorded and
+   * `allowAdmission` or `denyMutation`; a denial is recorded and
    * replays on redelivery.
    */
   readonly admit: (context: {
@@ -133,7 +63,7 @@ export interface MutationCommand<
   /**
    * Runs after `admit` in the same attempt. Write domain rows through `tx`,
    * record each axis the attempt advances on `stamp`, and return
-   * {@link acceptMutation}, {@link refuseMutation}, or {@link denyMutation}.
+   * `acceptMutation`, `refuseMutation`, or `denyMutation`.
    */
   readonly execute: (
     context: {

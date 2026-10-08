@@ -533,6 +533,11 @@ export interface InvalidationPublisher {
    * not fail the accepted mutation.
    */
   publish(eventId: string, stamp: AcceptedStamp): void | Promise<void>
+  /**
+   * Receives each publication that rejected or timed out. A throw from it is
+   * ignored.
+   */
+  readonly onFailure: InvalidationPublicationFailureReporter
 }
 
 /** Diagnostic record for an invalidation publication that did not complete. */
@@ -545,7 +550,8 @@ export interface InvalidationPublicationFailure {
 }
 
 /**
- * Application-owned sink for publication rejection and timeout diagnostics.
+ * Application-owned sink for publication rejection and timeout diagnostics,
+ * given to the publisher as its `onFailure`.
  * @param failure Failure record including the accepted stamp and event ID.
  * @returns Nothing; reporter failures are ignored by finalization.
  */

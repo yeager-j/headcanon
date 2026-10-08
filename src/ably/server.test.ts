@@ -52,13 +52,30 @@ describe("Ably invalidation publisher", () => {
       createAblyInvalidationPublisher({
         rest: restClient(),
         namespace: "preview:",
+        onFailure: vi.fn(),
       })
     ).toThrow("Invalid Ably axis-channel namespace")
   })
 
+  it("owns the failure reporter it was given", () => {
+    const onFailure = vi.fn()
+
+    expect(
+      createAblyInvalidationPublisher({
+        rest: restClient(),
+        namespace,
+        onFailure,
+      }).onFailure
+    ).toBe(onFailure)
+  })
+
   it("batch-publishes one named singleton event per stamped axis", async () => {
     const rest = restClient()
-    const publisher = createAblyInvalidationPublisher({ rest, namespace })
+    const publisher = createAblyInvalidationPublisher({
+      rest,
+      namespace,
+      onFailure: vi.fn(),
+    })
 
     await publisher.publish("shared-event", stamp({ [axisA]: 2, [axisB]: 4 }))
 
@@ -86,7 +103,11 @@ describe("Ably invalidation publisher", () => {
 
   it("splits more than 100 axes across requests", async () => {
     const rest = restClient()
-    const publisher = createAblyInvalidationPublisher({ rest, namespace })
+    const publisher = createAblyInvalidationPublisher({
+      rest,
+      namespace,
+      onFailure: vi.fn(),
+    })
     const revisions = Object.fromEntries(
       Array.from({ length: 128 }, (_, index) => [`axis/${index}`, index])
     )
@@ -103,6 +124,7 @@ describe("Ably invalidation publisher", () => {
     const publisher = createAblyInvalidationPublisher({
       rest: restClient(new Set([refused])),
       namespace,
+      onFailure: vi.fn(),
     })
 
     const publication = publisher.publish(
@@ -135,7 +157,11 @@ describe("Ably invalidation publisher", () => {
         return accepted.batchPublish(specs)
       }),
     }
-    const publisher = createAblyInvalidationPublisher({ rest, namespace })
+    const publisher = createAblyInvalidationPublisher({
+      rest,
+      namespace,
+      onFailure: vi.fn(),
+    })
     const revisions = Object.fromEntries(
       Array.from({ length: 101 }, (_, index) => [`axis/${index}`, index])
     )
