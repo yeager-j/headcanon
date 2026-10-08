@@ -3102,6 +3102,40 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     expect(roots.get("b")?.status.pending).toBe(0)
   })
 
+  it("holds a remounted root's Action open for a held mutate's delivery", async () => {
+    const { persistence } = createMemoryPersistence()
+    const { deliveries, send } = createControlledSender()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const firstVisit = renderHook(() =>
+      useCounterPredictions({ canon: canon(0, 0) })
+    )
+    const heldMutate = firstVisit.result.current.mutate
+    firstVisit.unmount()
+    await act(async () => {})
+    act(() => {
+      acceptedLocally(heldMutate(add({ amount: 1 })))
+    })
+
+    const { result } = renderHook(() => {
+      const root = useCounterPredictions({ canon: canon(0, 0) })
+      const [unrelated, setUnrelated] = useState(0)
+      return { root, unrelated, setUnrelated }
+    })
+    await act(async () => {
+      startTransition(() => result.current.setUnrelated(1))
+    })
+    expect(result.current.unrelated).toBe(0)
+
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    expect(result.current.unrelated).toBe(1)
+    expect(send).toHaveBeenCalledOnce()
+  })
+
   it("does not pass a background delivery's control flow to React", async () => {
     const signal = new Error("framework control flow")
     const propagated = vi.fn()
@@ -3226,6 +3260,52 @@ describe("createPredictedRoot — Activity with a child's mutate", () => {
     await act(async () => deliveries[1]?.resolve(ok(stamp(2))))
 
     await expect(receipts[1]?.accepted).resolves.toEqual(ok(stamp(2)))
+  })
+})
+
+describe("createPredictedRoot — Activity and a later root", () => {
+  it("keeps a revealed root's queue for a later root with its key", async () => {
+    // Hiding the idle root took its queue out of the factory's queues.
+    const { persistence, flaky } = createFlakyPersistence()
+    const { deliveries, send } = createControlledSender()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const roots = new Map<string, ReturnType<typeof useCounterPredictions>>()
+    function CounterView({ name }: { readonly name: string }) {
+      roots.set(name, useCounterPredictions({ canon: canon(0, 0) }))
+      return null
+    }
+    const shown = (mode: "visible" | "hidden") =>
+      createElement(Activity, {
+        mode,
+        children: createElement(CounterView, { name: "first" }),
+      })
+    const view = render(shown("visible"))
+    view.rerender(shown("hidden"))
+    await act(async () => {})
+    view.rerender(shown("visible"))
+    await act(async () => {})
+
+    flaky.failWrites = true
+    act(() => {
+      acceptedLocally(roots.get("first")!.mutate(add({ amount: 1 })))
+    })
+    await act(async () => {})
+    view.rerender(createElement(CounterView, { name: "second" }))
+    await act(async () => {})
+    act(() => {
+      acceptedLocally(roots.get("second")!.mutate(add({ amount: 2 })))
+    })
+    await act(async () => {})
+    expect(send).toHaveBeenCalledOnce()
+
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    expect(deliveries[1]?.envelope.invocation.args.amount).toBe(2)
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
   })
 })
 

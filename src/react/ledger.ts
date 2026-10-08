@@ -854,7 +854,11 @@ export function createLedgerStore<Invocation, Error>(
     for (const entry of ledger.entries) {
       const mutationId = entry.envelope.mutationId
       const lifetime = lifetimes.get(mutationId)
-      if (!lifetime || lifetime.claimed) continue
+      if (!lifetime) continue
+      if (entry.delivery.kind === "sending" && lifetime.waitTimer !== null) {
+        holdAttempt(lifetime)
+      }
+      if (lifetime.claimed) continue
 
       lifetime.claimed = true
       if (lifetime.milestones.canonized.settled) {
@@ -862,9 +866,6 @@ export function createLedgerStore<Invocation, Error>(
       }
       if (entry.delivery.kind === "accepted") {
         lifetime.milestones.accepted.resolve(ok(entry.delivery.stamp))
-      }
-      if (entry.delivery.kind === "sending" && lifetime.waitTimer !== null) {
-        holdAttempt(lifetime)
       }
       receipts.push(receiptFor(mutationId, lifetime))
     }
@@ -988,9 +989,15 @@ export function createLedgerStore<Invocation, Error>(
       }
     },
 
-    /** Starts delivery for the observing root. */
+    /**
+     * Starts delivery for the observing root, and lists a persisted queue
+     * again: an idle queue leaves its factory's queues when React Activity
+     * hides its root, and a later root with its key must find it.
+     */
     activate(token: object): void {
-      if (observer?.token === token) observer.active = true
+      if (observer?.token !== token) return
+      observer.active = true
+      registration.register()
     },
 
     /**
