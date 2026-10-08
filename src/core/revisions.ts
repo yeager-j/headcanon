@@ -1,6 +1,7 @@
 import { err, ok, type Result } from "serializable-result"
 
 import { hasExactKeys, isPlainRecord } from "./admission"
+import { isWellFormedUnicode } from "./unicode"
 
 declare const axisIdBrand: unique symbol
 declare const revisionBrand: unique symbol
@@ -92,30 +93,37 @@ export type AcceptedStampValidationError =
     }
 
 /**
- * The one rule for a valid axis address: any non-empty string.
+ * The one rule for a valid axis address: a non-empty, well-formed string.
  *
  * Construction ({@link axisId}, {@link revisionVector}) and the realtime
  * invalidation parser share it, so every axis the protocol admits can also be
- * notified.
+ * notified. A lone surrogate is rejected because UTF-8 replaces it with
+ * U+FFFD, so two distinct axes would share one channel name and cache tag.
  * @param value Candidate axis address.
- * @returns Whether the value is a non-empty string.
+ * @returns Whether the value is a non-empty string with no lone surrogate.
  */
 export function isAxisAddress(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0
+  return (
+    typeof value === "string" && value.length > 0 && isWellFormedUnicode(value)
+  )
 }
 
 /**
  * Brands an application-owned, globally stable axis address.
  *
  * The application remains responsible for its axis namespace and stability.
- * Beyond being non-empty, this constructor deliberately imposes no grammar.
+ * Beyond being non-empty and well-formed Unicode, this constructor
+ * deliberately imposes no grammar.
  * @param value Globally stable application-owned axis address.
  * @returns The same string carrying the `AxisId` compile-time brand.
- * @throws Error when the address is empty, a programmer error.
+ * @throws Error when the address is empty or contains a lone surrogate, a
+ * programmer error.
  */
 export function axisId(value: string): AxisId {
   if (!isAxisAddress(value)) {
-    throw new Error("An axis address must be a non-empty string")
+    throw new Error(
+      "An axis address must be a non-empty string with no lone surrogate"
+    )
   }
   return value as AxisId
 }

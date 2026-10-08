@@ -1,7 +1,7 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { err, ok, type Result } from "serializable-result"
 
-import { axisId, type AxisId } from "./revisions"
+import { axisId, isAxisAddress, type AxisId } from "./revisions"
 
 const AXIS_SEPARATOR = "/"
 
@@ -22,7 +22,8 @@ type KeyOfShape<Shape extends KeyShape> = {
  *
  * - `segment-count`: the axis has more or fewer key segments than the family.
  * - `empty-segment`: a key segment is empty.
- * - `key-rejected`: the key schema rejected a segment, or would change it.
+ * - `key-rejected`: the key schema rejected a segment, or would change it, or
+ *   a segment contains a lone surrogate.
  */
 export type AxisKeyError = {
   readonly code: "invalid-axis-key"
@@ -65,16 +66,17 @@ interface KeyCodec<Key> {
  * Defines a family of axes that share a name, such as `notes`.
  *
  * An axis is the family name followed by each key segment, separated by `/`.
- * Key segments are never escaped: each must be non-empty, contain no `/`, and
- * pass its schema unchanged. Schemas must validate synchronously; `of` and
+ * Key segments are never escaped: each must be non-empty, contain no `/` and
+ * no lone surrogate, and pass its schema unchanged. Schemas must validate synchronously; `of` and
  * `parse` throw otherwise. Pass one schema for a single key, or an object of
  * schemas for named segments, such as a tenant and a record. Give each family
  * a unique name: two families with one name share their axes.
- * @param family A non-empty name that does not contain `/`.
+ * @param family A non-empty name that contains no `/` and no lone surrogate.
  * @param key The key schema, or an object of segment schemas in axis order.
  * @returns The family, which builds axes with `of` and reads them with `parse`.
- * @throws Error when the family name is empty or contains `/`, or the object
- * of segment schemas is empty or has a symbol-named segment.
+ * @throws Error when the family name is empty or contains `/` or a lone
+ * surrogate, or the object of segment schemas is empty or has a symbol-named
+ * segment.
  * @example
  * const noteAxis = defineAxis("notes", z.uuid())
  * noteAxis.of(noteId) // "notes/<noteId>"
@@ -98,9 +100,9 @@ export function defineAxis(
   family: string,
   key: KeySegmentSchema | KeyShape
 ): AxisFamily<unknown> {
-  if (family.length === 0 || family.includes(AXIS_SEPARATOR)) {
+  if (!isAxisAddress(family) || family.includes(AXIS_SEPARATOR)) {
     throw new Error(
-      `An axis family name must be non-empty and must not contain "${AXIS_SEPARATOR}"`
+      `An axis family name must be non-empty and must not contain "${AXIS_SEPARATOR}" or a lone surrogate`
     )
   }
 
@@ -195,7 +197,11 @@ function segmentsProblem(
 
   const accepted = segments.every((segment, index) => {
     const schema = schemas[index]
-    return schema !== undefined && acceptsUnchanged(schema, segment)
+    return (
+      schema !== undefined &&
+      isAxisAddress(segment) &&
+      acceptsUnchanged(schema, segment)
+    )
   })
   return accepted ? undefined : "key-rejected"
 }

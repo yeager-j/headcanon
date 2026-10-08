@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 
-import { axisId } from "../core/revisions"
+import { axisId, type AxisId } from "../core/revisions"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
@@ -18,6 +18,15 @@ describe("Ably axis channels", () => {
       ablyAxisChannelName(ablyChannelNamespace("preview-671"), axis)
     ).resolves.toBe(`preview-671:headcanon:axis:v1:${digest}`)
     expect(ABLY_AXIS_INVALIDATION_EVENT).toBe("headcanon.axis-invalidation.v1")
+  })
+
+  it("refuses to derive a channel for a lone-surrogate axis", async () => {
+    // An unbranded string reaches here only through a cast. UTF-8 would map
+    // it to the channel of "items/\uFFFD", so the hash refuses it.
+    const namespace = ablyChannelNamespace("production")
+    await expect(
+      ablyAxisChannelName(namespace, "items/\uD800" as AxisId)
+    ).rejects.toThrow("lone surrogate")
   })
 
   it("enumerates exact subscribe-only capabilities deterministically", () => {
