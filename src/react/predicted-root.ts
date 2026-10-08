@@ -8,6 +8,7 @@ import {
   useEffect,
   useEffectEvent,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react"
@@ -34,8 +35,10 @@ import {
   isCanonized,
   queueHead,
   type LedgerEntry,
+  type LedgerStore,
   type MutationLifecycleError,
   type MutationReceipt,
+  type QueueRegistration,
   type ReplayConflict,
 } from "./ledger"
 import { createQueueStorage, type QueuePersistence } from "./persistence"
@@ -71,8 +74,9 @@ export interface StagedMutation {
   /** The mutation ID, the same as its receipt's `id`. */
   readonly id: string
   /**
-   * `true` when the root restored the mutation from its `persistence` after
-   * a page load. No `mutate` call in this page holds its receipt.
+   * `true` when no `mutate` call of this root holds the mutation's receipt:
+   * the root restored it from its `persistence` after a page load, or took
+   * it over from an earlier root of the same queue.
    */
   readonly restored: boolean
 }
@@ -81,7 +85,7 @@ export interface StagedMutation {
 export interface MutationStageListeners<Error> {
   /**
    * Called immediately with the local prediction result. Not called for a
-   * restored mutation: its prediction was made before the page loaded.
+   * restored mutation: another page or root made its prediction.
    */
   readonly onPrediction?: (
     result: Result<MutationReceipt<Error>, Error>
@@ -221,12 +225,15 @@ export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
    * `sessionStoragePersistence(key)`. The root stores each mutation when it
    * is queued and removes it when it is accepted or fails. On mount, the root
    * restores the stored mutations ahead of new ones and delivers them again
-   * under their original mutation IDs. While the store holds an unaccepted
-   * mutation, unmount sends nothing, so a later mutation never commits
-   * before an earlier one. Without it, the queue lives only in memory, and
-   * unmount sends the mutations that were never sent.
+   * under their original mutation IDs.
    *
-   * Each mounted root needs its own store. When one factory mounts a root
+   * The queue outlives its root: after unmount, delivery continues in order
+   * and stops at an uncertain mutation. A root of this factory that mounts
+   * with the same key continues the same queue. Without `persistence`, the
+   * queue lives only in memory, and unmount sends the mutations that were
+   * never sent.
+   *
+   * Each mounted root needs its own key, and a key belongs to one factory. When one factory mounts a root
    * per record, pass a function: each root calls it once, with its first
    * canon, and keeps the result. Return `undefined` to keep that root's
    * queue in memory.
@@ -345,6 +352,12 @@ function freezeEnvelope<Invocation>(
     createdAt,
     invocation: structuredClone(invocation),
   })
+}
+
+/** A queue in memory ends with its root, so no later root looks it up. */
+const UNREGISTERED_QUEUE: QueueRegistration = {
+  register: () => undefined,
+  release: () => undefined,
 }
 
 /** The store one root uses: the option itself, or its answer for `canon`. */
@@ -494,17 +507,62 @@ export function createPredictedRootHook<
     return { value, refusals }
   }
 
-  return function usePredictedRoot({ canon, recoveryListeners }) {
-    const [store] = useState(() =>
-      createLedgerStore<Invocation, Error>(
+  /** This factory's persisted queues by key, while they outlive a root. */
+  const queues = new Map<string, LedgerStore<Invocation, Error>>()
+
+  /**
+   * The ledger of the queue `canon` selects: the one an earlier root of this
+   * factory left delivering under the same key, or a new one. A new ledger
+   * joins `queues` as it is created, so a `mutate` that outlived an earlier
+   * root of the key finds it. A server render adds nothing: no later root
+   * of that request could continue it.
+   */
+  const ledgerFor = (canon: Canon<State>): LedgerStore<Invocation, Error> => {
+    const persistence = persistenceFor(options.persistence, canon)
+    const storage = createQueueStorage<Invocation>(
+      persistence,
+      options.protocol
+    )
+    if (!persistence) {
+      return createLedgerStore(
         options.send,
         rethrowControlFlow,
-        createQueueStorage(
-          persistenceFor(options.persistence, canon),
-          options.protocol
-        )
+        storage,
+        UNREGISTERED_QUEUE
       )
+    }
+
+    const { key } = persistence
+    const continued = queues.get(key)
+    if (continued) return continued
+
+    const store: LedgerStore<Invocation, Error> = createLedgerStore(
+      options.send,
+      rethrowControlFlow,
+      storage,
+      {
+        register() {
+          if (!queues.has(key)) queues.set(key, store)
+        },
+        release() {
+          if (queues.get(key) === store) queues.delete(key)
+        },
+      }
     )
+    if (typeof window !== "undefined") queues.set(key, store)
+    return store
+  }
+
+  /** The ledger now delivering `store`'s queue: a later root may have replaced it. */
+  const continuedLedger = (
+    store: LedgerStore<Invocation, Error>
+  ): LedgerStore<Invocation, Error> =>
+    (store.key !== undefined && queues.get(store.key)) || store
+
+  return function usePredictedRoot({ canon, recoveryListeners }) {
+    const [store] = useState(() => ledgerFor(canon))
+    // Identifies this root to the ledger, which may outlive it.
+    const [observerToken] = useState(() => ({}))
     const ledger = useSyncExternalStore(
       store.subscribe,
       store.getSnapshot,
@@ -530,16 +588,24 @@ export function createPredictedRootHook<
     // hydration render matches the server's. `mutate` restores too because a
     // child's mount effect runs before this root's.
     const restoreQueue = useCallback((): void => {
-      for (const receipt of store.restore()) {
+      for (const receipt of store.restore(observerToken)) {
         observeStages(receipt, options.mutationListeners ?? {}, true)
       }
-    }, [store])
+    }, [observerToken, store])
 
+    // Set from the effect's cleanup until its next setup: unmount, or React
+    // Activity hiding the root. A `mutate` held past it, such as a debounced
+    // save, no longer restores: it must not make the root observe again.
+    const observationDeactivated = useRef(false)
     useEffect(() => {
+      observationDeactivated.current = false
       restoreQueue()
-      store.activate()
-      return store.deactivate
-    }, [restoreQueue, store])
+      store.activate(observerToken)
+      return () => {
+        observationDeactivated.current = true
+        store.deactivate(observerToken)
+      }
+    }, [observerToken, restoreQueue, store])
 
     // Reconcile this render's projection, then deliver. Refusals first, so a
     // jossed envelope that never left is retracted before it could be sent.
@@ -553,15 +619,15 @@ export function createPredictedRootHook<
         if (conflict) surfaceConflict(conflict)
       }
       store.canonize(canon.revisions)
-      store.deliverHead()
-    }, [canon, projection, store])
+      store.deliverHead(ledger.entries)
+    }, [canon, ledger.entries, projection, store])
 
     const mutate = useCallback(
       (
         invocation: Invocation,
         stageOverrides?: MutationStageListeners<Error>
       ): Result<MutationReceipt<Error>, Error> => {
-        restoreQueue()
+        if (!observationDeactivated.current) restoreQueue()
         // Until a render includes the restored entries, every call predicts
         // over them and this render's entries, so calls in one event still
         // check against one value.
@@ -587,7 +653,10 @@ export function createPredictedRootHook<
           return result
         }
 
-        const receipt = store.enqueue(envelope)
+        const queue = observationDeactivated.current
+          ? continuedLedger(store)
+          : store
+        const receipt = queue.enqueue(envelope)
         observeStages(receipt, stages, false)
         const result = ok(receipt)
         stages.onPrediction?.(result)
@@ -631,7 +700,8 @@ function rethrowNoControlFlow(): void {}
  * through `createPredictedRootContext`. While a delivery attempt is
  * unanswered, the root holds a React Action open for at most
  * `DELIVERY_WAIT_MS`. Unmounting the root settles every pending receipt; with
- * `persistence`, a later mount delivers the unsettled mutations again.
+ * `persistence`, delivery continues after unmount, and a page load delivers
+ * the stored mutations again.
  *
  * @param options Protocol, delivery, refresh, invalidation, and listener configuration.
  * @returns A hook exposing predicted state, mutation receipts, retry controls, and status.

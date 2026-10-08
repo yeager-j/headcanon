@@ -268,12 +268,23 @@ interface Ledger<Invocation, Error> {
   readonly restoredEntries: readonly LedgerEntry<Invocation>[]
 }
 
-/** The facts of one live mutation that never render. */
-interface EntryLifetime<Error> {
+/** The receipt milestones the current observer holds for one mutation. */
+interface Milestones<Error> {
   readonly accepted: Deferred<
     Result<AcceptedStamp, MutationLifecycleError<Error>>
   >
   readonly canonized: Deferred<Result<void, MutationLifecycleError<Error>>>
+}
+
+/** The facts of one live mutation that never render. */
+interface EntryLifetime<Error> {
+  /** Replaced when a root takes over the queue: each root holds its own receipts. */
+  milestones: Milestones<Error>
+  /**
+   * A root or a `mutate` caller holds the receipt for `milestones`. A
+   * mutation restored before any root observed is unclaimed until one does.
+   */
+  claimed: boolean
   /** Numbers delivery attempts, so a late answer knows whether it is current. */
   attempt: number
   /** Automatic redeliveries consumed after {@link RetryableDeliveryError}s. */
@@ -289,11 +300,23 @@ interface EntryLifetime<Error> {
    * — so canon carrying this mutation cannot commit before its acceptance is
    * in the ledger. The hold is released when the attempt is answered or after
    * {@link DELIVERY_WAIT_MS}, whichever comes first: a held Action also
-   * freezes every unrelated transition and navigation.
+   * freezes every unrelated transition and navigation. Only a mounted root
+   * holds one.
    */
   hold: Deferred<void> | null
   waitTimer: ReturnType<typeof setTimeout> | null
   retryTimer: ReturnType<typeof setTimeout> | null
+}
+
+/**
+ * The root that renders a ledger and holds its receipts. A root keeps one
+ * token for its lifetime, so a Strict Mode effect replay is the same
+ * observer and a replacement root is a new one.
+ */
+interface Observer {
+  readonly token: object
+  /** Between the root's deactivation and its deferred end. */
+  active: boolean
 }
 
 export function queueHead<Invocation>(
@@ -313,36 +336,45 @@ export function isCanonized(
   )
 }
 
+function createMilestones<Error>(): Milestones<Error> {
+  return { accepted: createDeferred(), canonized: createDeferred() }
+}
+
+/** The ledger store of one queue. */
+export type LedgerStore<Invocation, Error> = ReturnType<
+  typeof createLedgerStore<Invocation, Error>
+>
+
 /**
- * A later mount would restore a mutation that `entries` has not seen
- * accepted. A restorable ID with no entry counts: the root may have dropped
- * a mutation the authority never stored.
+ * How a persisted queue's ledger joins its factory's queues by key, so a
+ * root that mounts with the same key takes it over.
  */
-function restoresUnaccepted(
-  restorableIds: ReadonlySet<string>,
-  entries: readonly LedgerEntry<unknown>[]
-): boolean {
-  const accepted = new Set(
-    entries
-      .filter((entry) => entry.delivery.kind === "accepted")
-      .map((entry) => entry.envelope.mutationId)
-  )
-  return [...restorableIds].some((mutationId) => !accepted.has(mutationId))
+export interface QueueRegistration {
+  /** Lists the ledger under its key, unless another ledger holds the key. */
+  register(): void
+  /** Removes the ledger from its key, if it holds the key. */
+  release(): void
 }
 
 /**
- * The one authority for a root's mutation lifecycle: the rendered ledger, the
- * receipts, and the delivery queue. React reads the ledger through
+ * The one authority for a queue's mutation lifecycle: the rendered ledger,
+ * the receipts, and the delivery queue. React reads the ledger through
  * `useSyncExternalStore`; every change goes through `advance` (delivery
  * transitions) or `settle` (terminal outcomes). `storage` keeps a copy of the
  * unaccepted queue across page loads.
+ *
+ * Delivery and observation have different lifetimes. A root observes the
+ * ledger while it is mounted. A persisted queue outlives it: when the root
+ * unmounts, the ledger keeps delivering on its own, and a root that mounts
+ * with the same key takes over the same ledger through `registration`.
  */
 export function createLedgerStore<Invocation, Error>(
   send: (
     envelope: MutationEnvelope<Invocation>
   ) => Promise<Result<AcceptedStamp, Error>>,
   rethrowControlFlow: (error: unknown) => void,
-  storage: QueueStorage<Invocation>
+  storage: QueueStorage<Invocation>,
+  registration: QueueRegistration
 ) {
   let ledger: Ledger<Invocation, Error> = {
     entries: [],
@@ -353,16 +385,18 @@ export function createLedgerStore<Invocation, Error>(
   const listeners = new Set<() => void>()
   /** Settles once every delivery attempt sent so far has been answered. */
   let outstanding: Promise<void> = Promise.resolve()
-  let active = false
   /** Storage has been read; until then a write could erase an older page's queue. */
   let restored = false
+  /** `null` when no root observes the ledger. */
+  let observer: Observer | null = null
   /**
-   * The root deactivated. A root that replaces it may already own storage,
-   * so a late outcome here must not write its own queue over that one. A
-   * mutation queued from an unmount cleanup is still stored: it runs before
-   * any replacement restores.
+   * Mutations the ledger ended with no receipt at the authority (every
+   * failure but a domain refusal) that storage may still hold. A later mount
+   * could restore and commit one after a mutation sent now.
    */
-  let storageReleased = false
+  const endedUnreceipted = new Set<string>()
+  /** A persisted queue outlives its root and keeps delivering. */
+  const outlivesRoot = storage.key !== undefined
 
   function publish(next: Ledger<Invocation, Error>): void {
     ledger = next
@@ -401,8 +435,8 @@ export function createLedgerStore<Invocation, Error>(
 
   /**
    * Stores every unaccepted envelope in mutation order. An accepted mutation
-   * needs no redelivery, and unmount is not a settlement, so `dispose` never
-   * calls this.
+   * needs no redelivery, and unmount is not a settlement, so the end of an
+   * observation never calls this.
    */
   function saveQueue(): void {
     if (!restored) return
@@ -413,15 +447,28 @@ export function createLedgerStore<Invocation, Error>(
     storage.save(unaccepted.map((entry) => entry.envelope))
   }
 
-  /** Stores the queue after an outcome, unless the root has released storage. */
-  function saveOutcome(): void {
-    if (!storageReleased) saveQueue()
+  /**
+   * Writes the queue again and forgets each ended mutation that storage no
+   * longer holds. The write that removed one may have failed while storage
+   * was full.
+   */
+  function forgetUnstoredEndedMutations(): void {
+    if (endedUnreceipted.size === 0) return
+
+    saveQueue()
+    const restorable = storage.restorableIds()
+    for (const mutationId of endedUnreceipted) {
+      if (!restorable.has(mutationId)) endedUnreceipted.delete(mutationId)
+    }
   }
 
-  function createLifetime(mayHaveCommitted: boolean): EntryLifetime<Error> {
+  function createLifetime(
+    mayHaveCommitted: boolean,
+    claimed: boolean
+  ): EntryLifetime<Error> {
     return {
-      accepted: createDeferred(),
-      canonized: createDeferred(),
+      milestones: createMilestones(),
+      claimed,
       attempt: 0,
       retryAttempts: 0,
       mayHaveCommitted,
@@ -437,8 +484,8 @@ export function createLedgerStore<Invocation, Error>(
   ): MutationReceipt<Error> {
     return {
       id: mutationId,
-      accepted: lifetime.accepted.promise,
-      canonized: lifetime.canonized.promise,
+      accepted: lifetime.milestones.accepted.promise,
+      canonized: lifetime.milestones.canonized.promise,
     }
   }
 
@@ -447,6 +494,38 @@ export function createLedgerStore<Invocation, Error>(
     if (lifetime.retryTimer !== null) clearTimeout(lifetime.retryTimer)
     lifetime.waitTimer = null
     lifetime.retryTimer = null
+  }
+
+  /** Opens a React Action for the current attempt of `lifetime`. */
+  function holdAttempt(lifetime: EntryLifetime<Error>): Deferred<void> {
+    const hold = createDeferred<void>()
+    lifetime.hold = hold
+    startTransition(() => hold.promise)
+    return hold
+  }
+
+  /** The Action of `attempt`, while it is still the current attempt. */
+  function currentHold(
+    lifetime: EntryLifetime<Error> | undefined,
+    attempt: number
+  ): Deferred<void> | null {
+    return lifetime?.attempt === attempt ? lifetime.hold : null
+  }
+
+  /**
+   * No root observes the ledger and it holds no mutation. An accepted one
+   * keeps it listed: a later root must render it until its canon covers it.
+   */
+  function releaseIfIdle(): void {
+    if (observer !== null || ledger.entries.length > 0) return
+    registration.release()
+  }
+
+  /** Without an observer, nothing else drives a persisted queue's delivery. */
+  function continueUnobserved(): void {
+    if (observer !== null) return
+    releaseIfIdle()
+    deliverHead(null)
   }
 
   /**
@@ -464,53 +543,56 @@ export function createLedgerStore<Invocation, Error>(
     lifetimes.delete(mutationId)
     clearTimers(lifetime)
     lifetime.hold?.resolve()
-    if (!result.ok) lifetime.accepted.resolve(err(result.error))
-    lifetime.canonized.resolve(result)
+    if (!result.ok) {
+      lifetime.milestones.accepted.resolve(err(result.error))
+      if (result.error.kind !== "domain") endedUnreceipted.add(mutationId)
+    }
+    lifetime.milestones.canonized.resolve(result)
     publish({
       ...ledger,
       entries: ledger.entries.filter(
         (entry) => entry.envelope.mutationId !== mutationId
       ),
     })
-    saveOutcome()
+    saveQueue()
   }
 
   function receiveOutcome(
     mutationId: string,
-    attempt: number,
-    hold: Deferred<void>,
     outcome: Result<AcceptedStamp, Error>
   ): void {
     const lifetime = lifetimes.get(mutationId)
     const entry = entryFor(mutationId)
+    // Read before the answer is recorded: settling drops the lifetime. An
+    // answer to any attempt ends the current attempt's Action too.
+    const hold = lifetime?.hold ?? null
     if (lifetime && entry && entry.delivery.kind !== "accepted") {
-      if (attempt === lifetime.attempt && lifetime.waitTimer !== null) {
-        clearTimeout(lifetime.waitTimer)
-        lifetime.waitTimer = null
-      }
+      if (lifetime.waitTimer !== null) clearTimeout(lifetime.waitTimer)
+      lifetime.waitTimer = null
       if (outcome.ok) {
         advance(mutationId, { kind: "accepted", stamp: outcome.value })
-        saveOutcome()
-        lifetime.accepted.resolve(ok(outcome.value))
+        saveQueue()
+        lifetime.milestones.accepted.resolve(ok(outcome.value))
       } else {
         settle(mutationId, err({ kind: "domain", error: outcome.error }))
       }
     }
     // After the ledger records the answer: canon parked behind this Action
     // can only commit once the projection already accounts for it.
-    hold.resolve()
+    hold?.resolve()
+    continueUnobserved()
   }
 
   function receiveThrow(
     mutationId: string,
     attempt: number,
-    hold: Deferred<void>,
     error: unknown
   ): void {
     const lifetime = lifetimes.get(mutationId)
     const entry = entryFor(mutationId)
+    const hold = currentHold(lifetime, attempt)
     if (!lifetime || !entry || entry.delivery.kind === "accepted") {
-      hold.resolve()
+      hold?.resolve()
       return
     }
 
@@ -519,15 +601,19 @@ export function createLedgerStore<Invocation, Error>(
     } catch (controlFlow) {
       // Framework control flow (a redirect, say) must reach the framework.
       // The attempt's Action carries it; once that Action has been
-      // released, a fresh transition does.
-      if (hold.settled) {
-        startTransition(() => {
-          throw controlFlow
-        })
-      } else {
-        hold.reject(controlFlow)
+      // released, a fresh transition does. An unmounted root has no
+      // framework to reach.
+      if (observer !== null) {
+        if (hold && !hold.settled) {
+          hold.reject(controlFlow)
+        } else {
+          startTransition(() => {
+            throw controlFlow
+          })
+        }
       }
       settle(mutationId, err({ kind: "delivery-cancelled" }))
+      continueUnobserved()
       return
     }
 
@@ -539,7 +625,7 @@ export function createLedgerStore<Invocation, Error>(
           mayHaveCommitted: lifetime.mayHaveCommitted,
         })
       )
-      hold.resolve()
+      continueUnobserved()
       return
     }
 
@@ -569,10 +655,11 @@ export function createLedgerStore<Invocation, Error>(
         lifetime.retryTimer = setTimeout(() => {
           lifetime.retryTimer = null
           advance(mutationId, { kind: "queued" })
+          continueUnobserved()
         }, retryDelay)
       }
     }
-    hold.resolve()
+    hold?.resolve()
   }
 
   function expireAttempt(mutationId: string, attempt: number): void {
@@ -583,6 +670,52 @@ export function createLedgerStore<Invocation, Error>(
       lifetime.mayHaveCommitted = true
       lifetime.hold?.resolve()
     }
+  }
+
+  /**
+   * Starts one bounded delivery attempt when the queue head is queued. A
+   * mounted root delivers from its effects, and only a head among the
+   * `reconciled` entries its render checked against canon for replay
+   * refusals. Without an observer, a persisted queue delivers on its own.
+   */
+  function deliverHead(
+    reconciled: readonly LedgerEntry<Invocation>[] | null
+  ): void {
+    const head = queueHead(ledger.entries)
+    // Unrestored, the queue may still be missing older stored mutations.
+    if (!restored || head?.delivery.kind !== "queued") return
+    if (observer === null ? !outlivesRoot : !observer.active) return
+    // Entries are immutable, so only the same object was projected as it is.
+    if (observer !== null && !reconciled?.includes(head)) return
+    // A later mount could restore an ended mutation that storage still
+    // holds and commit it after anything sent now.
+    forgetUnstoredEndedMutations()
+    if (endedUnreceipted.size > 0) return
+
+    const mutationId = head.envelope.mutationId
+    const lifetime = lifetimes.get(mutationId)
+    if (!lifetime || !advance(mutationId, { kind: "sending" })) return
+
+    const attempt = ++lifetime.attempt
+    if (observer !== null) holdAttempt(lifetime)
+    lifetime.waitTimer = setTimeout(
+      () => expireAttempt(mutationId, attempt),
+      DELIVERY_WAIT_MS
+    )
+
+    let delivery: Promise<Result<AcceptedStamp, Error>>
+    try {
+      delivery = send(head.envelope)
+    } catch (error) {
+      delivery = Promise.reject(error)
+    }
+    outstanding = Promise.all([outstanding, delivery.then(noop, noop)]).then(
+      noop
+    )
+    void delivery.then(
+      (outcome) => receiveOutcome(mutationId, outcome),
+      (error: unknown) => receiveThrow(mutationId, attempt, error)
+    )
   }
 
   /**
@@ -603,56 +736,160 @@ export function createLedgerStore<Invocation, Error>(
   }
 
   /**
-   * Settles every receipt as unmounted. Unless a later mount will restore an
-   * unaccepted mutation, first sends every envelope awaiting delivery.
+   * Ends the current observation: settles the root's receipts as unmounted
+   * and drops what only its canon decided. `next` observes from now on;
+   * `null` leaves a persisted queue delivering on its own.
    */
-  function dispose(): void {
-    // Unmount ends this root's ability to *observe* an outcome; it does not
+  function endObservation(next: Observer | null): void {
+    // Unmount ends a root's ability to *observe* an outcome; it does not
     // repeal the user's intent.
-    //
-    // Unmount removes no stored envelope, so a later mount restores what
-    // storage holds and delivers it in order under the same mutation IDs.
-    // While storage holds an unaccepted mutation, this root sends nothing on
-    // the way down: a farewell send could commit a mutation before an
-    // earlier one that never reached the authority, or race the later mount
-    // that delivers it. That includes a stored mutation this root has
-    // already dropped, as after a terminal answer since `deactivate`.
-    //
-    // Otherwise no later mount can deliver this queue. An envelope that never
-    // reached the authority — typically a debounced autosave flushed from a
-    // leaf's unmount cleanup, where the leaf tears down before the provider —
-    // is sent fire-and-forget on the way down, after every attempt already
-    // in flight has been answered, so two edits to one field keep their
-    // order. The canonical envelope and durable mutation ID make the send
-    // effectively-once at the authority. A `sending` or `uncertain` entry may
-    // already have committed; its receipt, not a second send, is what would
-    // resolve it.
-    if (!restoresUnaccepted(storage.restorableIds(), ledger.entries)) {
-      const awaiting = ledger.entries.filter((entry) =>
-        awaitsDelivery(entry.delivery)
-      )
-      void sendInOrder(awaiting.map((entry) => entry.envelope))
-    }
+    observer = next
 
     for (const entry of ledger.entries) {
       const lifetime = lifetimes.get(entry.envelope.mutationId)
       if (!lifetime) continue
-      clearTimers(lifetime)
       lifetime.hold?.resolve()
-      // `unknown` stays honest for a farewell send: it left, but no mounted
-      // root remains to learn whether the authority accepted it.
       const unmounted = err({
         kind: "root-unmounted",
         outcome: entry.delivery.kind === "accepted" ? "accepted" : "unknown",
       } as const)
-      lifetime.accepted.resolve(unmounted)
-      lifetime.canonized.resolve(unmounted)
+      lifetime.milestones.accepted.resolve(unmounted)
+      lifetime.milestones.canonized.resolve(unmounted)
+      lifetime.claimed = false
     }
+
+    if (!outlivesRoot) {
+      endMemoryQueue()
+      return
+    }
+
+    // The ledger keeps every entry: it delivers the unaccepted ones, and an
+    // accepted one renders for the next root until that root's canon covers
+    // it. Replay refusals belong to the canon of the root that ended.
+    publish({
+      entries: ledger.entries.map((entry) => ({ ...entry, conflicted: false })),
+      conflicts: [],
+      restoredEntries: [],
+    })
+    continueUnobserved()
+  }
+
+  /**
+   * A queue that lives only in memory ends with its root. An envelope that
+   * never reached the authority — typically a debounced autosave flushed from
+   * a leaf's unmount cleanup, where the leaf tears down before the provider —
+   * is sent fire-and-forget, after every attempt already in flight has been
+   * answered, so two edits to one field keep their order. The canonical
+   * envelope and durable mutation ID make the send effectively-once at the
+   * authority. A `sending` or `uncertain` entry may already have committed;
+   * its receipt, not a second send, is what would resolve it.
+   */
+  function endMemoryQueue(): void {
+    const awaiting = ledger.entries.filter((entry) =>
+      awaitsDelivery(entry.delivery)
+    )
+    void sendInOrder(awaiting.map((entry) => entry.envelope))
+
+    for (const lifetime of lifetimes.values()) clearTimers(lifetime)
     lifetimes.clear()
     publish({ ...ledger, entries: [] })
   }
 
+  /**
+   * Makes `token` the observer unless it already is or another mounted root
+   * observes. A root whose deactivation is still pending is replaced at once:
+   * its receipts end before the new root's begin.
+   * @returns Whether `token` became the observer.
+   */
+  function observe(token: object): boolean {
+    if (observer?.token === token || observer?.active) return false
+
+    const next: Observer = { token, active: false }
+    if (observer) endObservation(next)
+    else observer = next
+    return true
+  }
+
+  /** Puts the stored queue of an earlier page at the front of the queue. */
+  function restoreStored(): MutationReceipt<Error>[] {
+    restored = true
+
+    const restoredEntries: LedgerEntry<Invocation>[] = []
+    const receipts: MutationReceipt<Error>[] = []
+
+    for (const envelope of storage.load()) {
+      if (entryFor(envelope.mutationId)) continue
+
+      const lifetime = createLifetime(true, observer !== null)
+      lifetimes.set(envelope.mutationId, lifetime)
+      restoredEntries.push({
+        envelope,
+        delivery: { kind: "queued" },
+        conflicted: false,
+      })
+      receipts.push(receiptFor(envelope.mutationId, lifetime))
+    }
+
+    if (restoredEntries.length > 0) {
+      publish({
+        ...ledger,
+        entries: [...restoredEntries, ...ledger.entries],
+        restoredEntries,
+      })
+    }
+    // Also writes when nothing was restored: entries the root could not
+    // deliver leave storage.
+    saveQueue()
+    return receipts
+  }
+
+  /**
+   * Gives a root that takes over the queue the receipts no one holds: those
+   * that ended with the earlier root, and those of mutations restored before
+   * any root observed. A receipt from a `mutate` that ran after the earlier
+   * root unmounted stays with its caller. An uncertain head is delivered
+   * again, as a reload would; an attempt still in its wait holds the new
+   * root's Action, and its answer still settles the mutation.
+   */
+  function resumeObserved(): MutationReceipt<Error>[] {
+    const receipts: MutationReceipt<Error>[] = []
+
+    for (const entry of ledger.entries) {
+      const mutationId = entry.envelope.mutationId
+      const lifetime = lifetimes.get(mutationId)
+      if (!lifetime) continue
+      if (entry.delivery.kind === "sending" && lifetime.waitTimer !== null) {
+        holdAttempt(lifetime)
+      }
+      if (lifetime.claimed) continue
+
+      lifetime.claimed = true
+      if (lifetime.milestones.canonized.settled) {
+        lifetime.milestones = createMilestones()
+      }
+      if (entry.delivery.kind === "accepted") {
+        lifetime.milestones.accepted.resolve(ok(entry.delivery.stamp))
+      }
+      receipts.push(receiptFor(mutationId, lifetime))
+    }
+
+    retryUncertainHead()
+    return receipts
+  }
+
+  /** Re-queues an uncertain head with a fresh automatic-redelivery budget. */
+  function retryUncertainHead(): void {
+    const head = queueHead(ledger.entries)
+    if (head?.delivery.kind !== "uncertain") return
+    const lifetime = lifetimes.get(head.envelope.mutationId)
+    if (lifetime) lifetime.retryAttempts = 0
+    advance(head.envelope.mutationId, { kind: "queued" })
+  }
+
   return {
+    /** The persistence key; `undefined` for a queue in memory. */
+    key: storage.key,
+
     getSnapshot: (): Ledger<Invocation, Error> => ledger,
 
     /** Stamps of the accepted entries, by mutation ID: the refresh requirements. */
@@ -672,48 +909,29 @@ export function createLedgerStore<Invocation, Error>(
     },
 
     /**
-     * Puts the stored queue of an earlier page at the front of the queue, the
-     * first time it is called; later calls return nothing. Storage is not
-     * written before this runs. An earlier page may have sent any stored
-     * envelope, so a replay refusal never withdraws a restored mutation.
-     * @returns The restored mutations' receipts, in mutation order.
+     * Makes the root with `token` the observer, the first time it calls.
+     * The first observer puts the stored queue of an earlier page at the
+     * front of the queue; storage is not written before then. A root that
+     * takes over a persisted queue from an unmounted one receives the
+     * receipts no one holds; a receipt from a `mutate` that ran after the
+     * earlier root unmounted stays with its caller. A replay refusal never
+     * withdraws a restored mutation: an earlier page may have sent it.
+     * @returns The receipts this root now holds for mutations no `mutate`
+     *   call of this root made, in mutation order; empty after the first
+     *   call.
      */
-    restore(): MutationReceipt<Error>[] {
-      if (restored) return []
-      restored = true
-
-      const restoredEntries: LedgerEntry<Invocation>[] = []
-      const receipts: MutationReceipt<Error>[] = []
-
-      for (const envelope of storage.load()) {
-        if (entryFor(envelope.mutationId)) continue
-
-        const lifetime = createLifetime(true)
-        lifetimes.set(envelope.mutationId, lifetime)
-        restoredEntries.push({
-          envelope,
-          delivery: { kind: "queued" },
-          conflicted: false,
-        })
-        receipts.push(receiptFor(envelope.mutationId, lifetime))
-      }
-
-      if (restoredEntries.length > 0) {
-        publish({
-          ...ledger,
-          entries: [...restoredEntries, ...ledger.entries],
-          restoredEntries,
-        })
-      }
-      // Also writes when nothing was restored: entries the root could not
-      // deliver leave storage.
-      saveQueue()
-      return receipts
+    restore(token: object): MutationReceipt<Error>[] {
+      if (!observe(token)) return []
+      return restored ? resumeObserved() : restoreStored()
     },
 
     /** Records one predicted mutation at the end of the queue. */
     enqueue(envelope: MutationEnvelope<Invocation>): MutationReceipt<Error> {
-      const lifetime = createLifetime(false)
+      // A `mutate` that outlives its root, such as a debounced save, can
+      // reach a ledger no root has restored yet. The stored queue goes first.
+      if (!restored) restoreStored()
+
+      const lifetime = createLifetime(false, true)
       lifetimes.set(envelope.mutationId, lifetime)
       publish({
         ...ledger,
@@ -723,49 +941,17 @@ export function createLedgerStore<Invocation, Error>(
         ],
       })
       saveQueue()
+      if (observer === null) {
+        // A later root with this key must continue the queue it starts.
+        registration.register()
+        continueUnobserved()
+      }
       return receiptFor(envelope.mutationId, lifetime)
     },
 
-    /** Starts one bounded delivery attempt when the queue head is queued. */
-    deliverHead(): void {
-      const head = queueHead(ledger.entries)
-      if (!active || head?.delivery.kind !== "queued") return
-      const mutationId = head.envelope.mutationId
-      const lifetime = lifetimes.get(mutationId)
-      if (!lifetime || !advance(mutationId, { kind: "sending" })) return
+    deliverHead,
 
-      const attempt = ++lifetime.attempt
-      const hold = createDeferred<void>()
-      lifetime.hold = hold
-      startTransition(() => hold.promise)
-      lifetime.waitTimer = setTimeout(
-        () => expireAttempt(mutationId, attempt),
-        DELIVERY_WAIT_MS
-      )
-
-      let delivery: Promise<Result<AcceptedStamp, Error>>
-      try {
-        delivery = send(head.envelope)
-      } catch (error) {
-        delivery = Promise.reject(error)
-      }
-      outstanding = Promise.all([outstanding, delivery.then(noop, noop)]).then(
-        noop
-      )
-      void delivery.then(
-        (outcome) => receiveOutcome(mutationId, attempt, hold, outcome),
-        (error: unknown) => receiveThrow(mutationId, attempt, hold, error)
-      )
-    },
-
-    /** Re-queues an uncertain head with a fresh automatic-redelivery budget. */
-    retryDelivery(): void {
-      const head = queueHead(ledger.entries)
-      if (head?.delivery.kind !== "uncertain") return
-      const lifetime = lifetimes.get(head.envelope.mutationId)
-      if (lifetime) lifetime.retryAttempts = 0
-      advance(head.envelope.mutationId, { kind: "queued" })
-    },
+    retryDelivery: retryUncertainHead,
 
     /**
      * Records a replay refusal once per mutation. An envelope that never
@@ -808,25 +994,28 @@ export function createLedgerStore<Invocation, Error>(
       }
     },
 
-    activate(): void {
-      active = true
-      if (!storageReleased) return
-
-      // A Strict Mode effect replay: catch up on any outcome not stored.
-      storageReleased = false
-      saveQueue()
+    /**
+     * Starts delivery for the observing root, and lists a persisted queue
+     * again: an idle queue leaves its factory's queues when React Activity
+     * hides its root, and a later root with its key must find it.
+     */
+    activate(token: object): void {
+      if (observer?.token !== token) return
+      observer.active = true
+      registration.register()
     },
 
     /**
-     * Disposes at the next microtask unless reactivated first, so a Strict
-     * Mode effect replay does not end the root. Outcomes stop writing storage
-     * at once.
+     * Ends the root's observation at the next microtask unless it activates
+     * again first, so a Strict Mode effect replay does not end it.
      */
-    deactivate(): void {
-      active = false
-      storageReleased = true
+    deactivate(token: object): void {
+      if (observer?.token !== token) return
+      observer.active = false
       queueMicrotask(() => {
-        if (!active) dispose()
+        if (observer?.token === token && !observer.active) {
+          endObservation(null)
+        }
       })
     },
   }
