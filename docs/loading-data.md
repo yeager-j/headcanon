@@ -238,7 +238,7 @@ For writes outside generated actions, persist the data and revisions first, then
 | Another Server Action                       | `finalizeExternalActionCommit`      | Expires axis tags, refreshes the invoking route, and publishes invalidations.     |
 | A Route Handler, such as a webhook endpoint | `announceExternalCommit`            | Expires axis tags and publishes invalidations without requesting a route refresh. |
 
-Both helpers take the committed `stamp`, an invalidation publisher, and a publication failure reporter. Unlike the generated action, they require both. Without a realtime transport, pass a publisher that does nothing, such as `{ publish() {} }`, and a reporter such as `console.error`. They do not perform the write or make a separate commit atomic. They use Next.js cache APIs, so run them in a supported Next.js server context; an independent worker needs a handoff to that context. Use `acceptedStamp` to validate a stamp received across a storage or transport boundary.
+Both helpers take the committed `stamp` and an optional invalidation publisher. Pass the same publisher as the generated action; it reports its own failures through `onFailure`. Without a realtime transport, pass only the stamp: the helpers then publish nothing. They do not perform the write or make a separate commit atomic. They use Next.js cache APIs, so run them in a supported Next.js server context; an independent worker needs a handoff to that context. Use `acceptedStamp` to validate a stamp received across a storage or transport boundary.
 
 ## Diagnose data that stays behind
 

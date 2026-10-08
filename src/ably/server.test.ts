@@ -56,6 +56,22 @@ describe("Ably invalidation publisher", () => {
     ).toThrow("Invalid Ably axis-channel namespace")
   })
 
+  it("owns the failure reporter it was given", () => {
+    const onFailure = vi.fn()
+
+    expect(
+      createAblyInvalidationPublisher({
+        rest: restClient(),
+        namespace,
+        onFailure,
+      }).onFailure
+    ).toBe(onFailure)
+    expect(
+      createAblyInvalidationPublisher({ rest: restClient(), namespace })
+        .onFailure
+    ).toBeUndefined()
+  })
+
   it("batch-publishes one named singleton event per stamped axis", async () => {
     const rest = restClient()
     const publisher = createAblyInvalidationPublisher({ rest, namespace })

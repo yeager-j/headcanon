@@ -40,7 +40,7 @@ import "server-only"
 import { requireActor } from "@/lib/auth"
 import { db } from "@/lib/db"
 import { createDrizzleMutationAuthority } from "headcanon/drizzle"
-import { createMutationBinder } from "headcanon/next/server"
+import { createMutationBinder } from "headcanon/server"
 
 const notesAuthority = createDrizzleMutationAuthority({
   db,
@@ -71,14 +71,14 @@ import "server-only"
 
 import { notes } from "@/lib/db/schema"
 import { and, eq } from "drizzle-orm"
-import { throwMutationContention } from "headcanon"
 import {
   acceptMutation,
-  allowMutation,
-  allowMutationScreening,
+  allowAdmission,
+  allowScreening,
   denyMutation,
   refuseMutation,
-} from "headcanon/next/server"
+  throwMutationContention,
+} from "headcanon/server"
 
 import { notesBinder } from "../binder"
 import { isValidTitle, noteAxis, renameNote } from "../protocol"
@@ -90,7 +90,7 @@ export const renameNoteBinding = notesBinder.bind(renameNote, {
       .from(notes)
       .where(and(eq(notes.id, args.noteId), eq(notes.ownerId, actor.userId)))
 
-    return note ? allowMutationScreening(null) : denyMutation()
+    return note ? allowScreening() : denyMutation()
   },
 
   admit: async ({ tx, actor, args }) => {
@@ -99,7 +99,7 @@ export const renameNoteBinding = notesBinder.bind(renameNote, {
       .from(notes)
       .where(and(eq(notes.id, args.noteId), eq(notes.ownerId, actor.userId)))
 
-    return note ? allowMutation(note) : denyMutation()
+    return note ? allowAdmission(note) : denyMutation()
   },
 
   execute: async ({ tx, actor, args, evidence, stamp }) => {
@@ -130,6 +130,10 @@ export const renameNoteBinding = notesBinder.bind(renameNote, {
 
 Write command members in lifecycle order: `screen`, `admit`, `execute`, then optional `finalizeAccepted`. TypeScript uses this order to infer `evidence` from `admit` and `screened` from `screen`.
 
+`allowScreening(value)` passes `value` to `finalizeAccepted` as `screened`. `allowAdmission(value)` passes `value` to `execute` as `evidence`. Call either with no argument when the next step needs no value; it then receives `undefined`.
+
+Command modules import from `headcanon/server`, which loads no Next.js code. A non-Next server, such as a Route Handler or a worker, can use the same binder and commands. Only the action module imports `headcanon/next/server`.
+
 ### Why screening and admission are separate
 
 `screen` checks whether this delivery may proceed, including whether a retry may receive a stored outcome. It runs before receipt lookup and uses `executor` to read committed data outside the mutation transaction. A screening denial creates no receipt.
@@ -149,7 +153,7 @@ Admission alone does not lock the data it reads. The example also checks ownersh
 | An order may be submitted only while it is a draft.           | Check access to the order. Do not require it to remain a draft just to recover an earlier successful submission. | Read its current status for a new attempt. Let `execute` return a public refusal if it is no longer a draft.               |
 | A purchase needs enough stock.                                | Check whether the user may access the purchase operation.                                                        | Read stock through `tx` and pass it as evidence. Let `execute` reserve it with a guarded write or return a public refusal. |
 | An update depends on a row's current revision.                | No revision check is needed just to return a stored result.                                                      | Read the revision used by `execute` to guard the write. A contention retry reads it again.                                 |
-| A post-commit projection needs context from before the write. | Return that context with `allowMutationScreening(...)` so `finalizeAccepted` receives it as `screened`.          | Read any data needed for the write separately. Attempt evidence is not passed to finalization.                             |
+| A post-commit projection needs context from before the write. | Return that context with `allowScreening(...)` so `finalizeAccepted` receives it as `screened`.                  | Read any data needed for the write separately. Attempt evidence is not passed to finalization.                             |
 
 Use both steps when a permission controls access to stored outcomes and new writes. Keep conditions that a successful mutation changes, such as an order's draft status, in the transaction path so they do not block recovery of that success. `admit` can allow or deny; public business-rule refusals belong in `execute`.
 
@@ -228,7 +232,7 @@ If all attempts encounter contention, the authority returns a `contention` error
 
 Most commands need no `finalizeAccepted`. The generated action already expires cache tags for the accepted axes and requests a refresh of the invoking route.
 
-Use optional `finalizeAccepted` when readers depend on an application-owned projection that must be updated after the commit but before refresh. It receives `actor`, `args`, `stamp`, and the `screened` value returned by `allowMutationScreening(...)`. It does not receive `tx` or the attempt's `evidence`.
+Use optional `finalizeAccepted` when readers depend on an application-owned projection that must be updated after the commit but before refresh. It receives `actor`, `args`, `stamp`, and the `screened` value returned by `allowScreening(...)`. It does not receive `tx` or the attempt's `evidence`.
 
 After acceptance, the action runs these steps in order:
 
@@ -245,9 +249,9 @@ Do not treat finalization as a durable background job or a once-only hook. For e
 
 ### Optional realtime publication
 
-To notify other clients, supply both `invalidations` and `reportInvalidationFailure` to `createNextMutationAction`. Omit both when using route refresh alone.
+To notify other clients, supply an `invalidations` publisher to `createNextMutationAction`. Omit it when using route refresh alone.
 
-Publication failures and timeouts are reported without changing an accepted outcome. The action waits up to one second for publication; it does not provide a durable publication retry queue. See the planned [Realtime updates](realtime.md) guide for transport setup and recovery.
+The publisher owns its failure reporter: give `onFailure` to the publisher, such as `createAblyInvalidationPublisher`. Without `onFailure`, failures go to `console.error`. Publication failures and timeouts are reported without changing an accepted outcome. The action waits up to one second for publication; it does not provide a durable publication retry queue. See the planned [Realtime updates](realtime.md) guide for transport setup and recovery.
 
 ## Bound database and network waits
 

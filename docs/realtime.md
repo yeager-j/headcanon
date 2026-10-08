@@ -73,14 +73,7 @@ if (!key) throw new Error("Missing Ably API key")
 
 export const ablyRest = new Rest({ key })
 
-export const noteInvalidations = createAblyInvalidationPublisher({
-  rest: ablyRest,
-  namespace: realtimeNamespace,
-})
-
-export function reportInvalidationFailure(
-  failure: InvalidationPublicationFailure
-) {
+function reportInvalidationFailure(failure: InvalidationPublicationFailure) {
   if (failure.error instanceof AblyInvalidationPublicationError) {
     console.error("Realtime publication failed for some axes:", {
       eventId: failure.eventId,
@@ -91,18 +84,23 @@ export function reportInvalidationFailure(
 
   console.error("Realtime publication did not complete:", failure)
 }
+
+export const noteInvalidations = createAblyInvalidationPublisher({
+  rest: ablyRest,
+  namespace: realtimeNamespace,
+  onFailure: reportInvalidationFailure,
+})
 ```
 
-Pass the publisher and its failure reporter to the generated action from [Server setup](server-setup.md):
+The publisher owns its failure reporter. `onFailure` receives each publication that Ably rejects or that times out. Without `onFailure`, failures go to `console.error`.
+
+Pass the publisher to the generated action from [Server setup](server-setup.md):
 
 ```ts
 // lib/notes/actions.ts
 "use server"
 
-import {
-  noteInvalidations,
-  reportInvalidationFailure,
-} from "@/lib/realtime/server"
+import { noteInvalidations } from "@/lib/realtime/server"
 import { createNextMutationAction } from "headcanon/next/server"
 
 import { notesBinder } from "./binder"
@@ -114,11 +112,10 @@ export const applyNotesMutation = createNextMutationAction({
   binder: notesBinder,
   commands: [renameNoteBinding],
   invalidations: noteInvalidations,
-  reportInvalidationFailure,
 })
 ```
 
-Supply both options together. The action publishes after optional `finalizeAccepted`, cache invalidation, and route refresh. Accepted receipt recovery runs these steps again. If `finalizeAccepted` throws, the action still attempts invalidation, refresh, and publication before propagating the error.
+The action publishes after optional `finalizeAccepted`, cache invalidation, and route refresh. Accepted receipt recovery runs these steps again. If `finalizeAccepted` throws, the action still attempts invalidation, refresh, and publication before propagating the error.
 
 The publisher sends one message per stamped axis, sharing one event ID for that publication. It batches up to 100 channels per request. Any failure rejects with `AblyInvalidationPublicationError`; its `failures` lists the axes Ably did not accept, and all other axes were published.
 
@@ -473,7 +470,7 @@ The Ably adapter's `retry()` runs a failed start again. Otherwise it requests re
 
 ## Handle publication failures
 
-An accepted database write stays accepted if publication fails. Generated actions wait up to one second for publication, report rejection or timeout through `reportInvalidationFailure`, and preserve the accepted outcome. Timing out does not cancel the underlying publish operation; it may finish later.
+An accepted database write stays accepted if publication fails. Generated actions wait up to one second for publication, report rejection or timeout through the publisher's `onFailure`, and preserve the accepted outcome. Timing out does not cancel the underlying publish operation; it may finish later.
 
 The publisher has no durable retry queue. Connect the failure reporter to your application's diagnostics, and use a durable publication mechanism if missing a notification is unacceptable.
 

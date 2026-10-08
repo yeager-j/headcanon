@@ -5,17 +5,7 @@ import { forbidden } from "next/navigation"
 import { err, ok, type Result } from "serializable-result"
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest"
 
-import {
-  acceptMutation,
-  allowMutation,
-  allowMutationScreening,
-  createMutationBinder,
-  createNextMutationAction,
-  denyMutation,
-  refuseMutation,
-  type MutationBinder,
-  type MutationCommand,
-} from "."
+import { createNextMutationAction } from "."
 import {
   axisId,
   defineMutation,
@@ -27,6 +17,16 @@ import {
   createDrizzleMutationAuthority,
   type DrizzleMutationTx,
 } from "../../drizzle"
+import {
+  acceptMutation,
+  allowAdmission,
+  allowScreening,
+  createMutationBinder,
+  denyMutation,
+  refuseMutation,
+  type MutationBinder,
+  type MutationCommand,
+} from "../../server"
 import {
   createInMemoryMutationAuthority,
   type InMemoryReader,
@@ -132,11 +132,11 @@ const renameCommand: MutationCommand<
 > = {
   screen: ({ args }) => {
     expectTypeOf(args).toEqualTypeOf<{ readonly value: string }>()
-    return allowMutationScreening(undefined)
+    return allowScreening()
   },
   admit: ({ args }) => {
     expectTypeOf(args).toEqualTypeOf<{ readonly value: string }>()
-    return allowMutation(undefined)
+    return allowAdmission()
   },
   execute: ({ args }) => {
     expectTypeOf(args).toEqualTypeOf<{ readonly value: string }>()
@@ -149,11 +149,11 @@ const plainIncrementCommand: MutationCommand<
   string,
   CounterPreflight,
   CounterTx,
-  null,
-  null
+  undefined,
+  undefined
 > = {
-  screen: () => allowMutationScreening(null),
-  admit: () => allowMutation(null),
+  screen: () => allowScreening(),
+  admit: () => allowAdmission(),
   execute: () => acceptMutation(),
 }
 
@@ -162,14 +162,14 @@ const numberActorIncrementCommand: MutationCommand<
   number,
   CounterPreflight,
   CounterTx,
-  null,
-  null
+  undefined,
+  undefined
 > = {
   screen: ({ actor }) => {
     expectTypeOf(actor).toEqualTypeOf<number>()
-    return allowMutationScreening(null)
+    return allowScreening()
   },
-  admit: () => allowMutation(null),
+  admit: () => allowAdmission(),
   execute: () => acceptMutation(),
 }
 
@@ -288,8 +288,8 @@ function rejectMismatchedBindingsAtCompileTime() {
       scope: (actor) => actor,
     }),
   }).bind(increment, {
-    screen: () => allowMutationScreening(null),
-    admit: () => allowMutation(null),
+    screen: () => allowScreening(),
+    admit: () => allowAdmission(),
     execute: () => acceptMutation(),
   })
   createNextMutationAction({
@@ -362,12 +362,12 @@ function inferDrizzleContextAtCompileTime(db: NotesDatabase) {
       expectTypeOf(actor).toEqualTypeOf<User>()
       expectTypeOf(executor).toEqualTypeOf<(typeof authority)["preflight"]>()
       await executor.query.notes.findFirst()
-      return allowMutationScreening(null)
+      return allowScreening()
     },
     admit: async ({ tx, args }) => {
       expectTypeOf(tx).toEqualTypeOf<DrizzleMutationTx<NotesDatabase>>()
       await tx.insert(notes).values({ id: "note", title: `${args.amount}` })
-      return allowMutation(null)
+      return allowAdmission()
     },
     execute: () => acceptMutation(),
   })
@@ -414,11 +414,11 @@ describe("Next mutation action", () => {
         options.lifecycle?.push(`screen:${executor.read()}`)
         return options.denyScreen
           ? denyMutation()
-          : allowMutationScreening({ count: executor.read() })
+          : allowScreening({ count: executor.read() })
       },
       admit({ tx }) {
         options.lifecycle?.push(`admit:${tx.read()}`)
-        return allowMutation({ observed: tx.read() })
+        return allowAdmission({ observed: tx.read() })
       },
       execute({ tx, args, stamp, mutationId }) {
         options.lifecycle?.push(`execute:${mutationId}`)
@@ -449,7 +449,6 @@ describe("Next mutation action", () => {
       binder,
       commands: [binder.bind(increment, registered)],
       invalidations: options.invalidations ?? { publish: vi.fn() },
-      reportInvalidationFailure: vi.fn(),
     })
   }
 
@@ -544,8 +543,7 @@ describe("Next mutation action", () => {
     const authority = createAuthority()
     let transactionAdmissions = 0
     const registered = {
-      screen: ({ executor }) =>
-        allowMutationScreening({ count: executor.read() }),
+      screen: ({ executor }) => allowScreening({ count: executor.read() }),
       admit() {
         transactionAdmissions += 1
         return denyMutation()
@@ -666,20 +664,23 @@ describe("Next mutation action", () => {
     expect(events).toEqual(["update", "refresh"])
   })
 
-  it("requires a publisher and its failure reporter together", () => {
-    const binder = createMutationBinder({
-      actor: () => "actor",
-      authority: createAuthority(),
+  it("reports a rejected publication to the publisher's onFailure and stays accepted", async () => {
+    const failure = new Error("publish failed")
+    const onFailure = vi.fn()
+    const execute = action(createAuthority(), command(), {
+      invalidations: {
+        publish: () => Promise.reject(failure),
+        onFailure,
+      },
     })
-    const base = {
-      protocol,
-      binder,
-      commands: [binder.bind(increment, command())],
-    } as const
-    // @ts-expect-error — a publisher needs a reporter for its failures.
-    createNextMutationAction({ ...base, invalidations: { publish: vi.fn() } })
-    // @ts-expect-error — a reporter without a publisher has nothing to report.
-    createNextMutationAction({ ...base, reportInvalidationFailure: vi.fn() })
+
+    await expect(execute(envelope)).resolves.toMatchObject(
+      ok({ kind: "accepted" })
+    )
+
+    expect(onFailure).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ kind: "rejected", error: failure })
+    )
   })
 
   // README, Drizzle section: the binder fixes a command's context, so a
@@ -694,12 +695,12 @@ describe("Next mutation action", () => {
         expectTypeOf(actor).toEqualTypeOf<string>()
         expectTypeOf(executor).toEqualTypeOf<CounterPreflight>()
         expectTypeOf(args).toEqualTypeOf<IncrementArgs>()
-        return allowMutationScreening({ count: executor.read() })
+        return allowScreening({ count: executor.read() })
       },
       admit: ({ tx, actor }) => {
         expectTypeOf(tx).toEqualTypeOf<CounterTx>()
         expectTypeOf(actor).toEqualTypeOf<string>()
-        return allowMutation({ observed: tx.read() })
+        return allowAdmission({ observed: tx.read() })
       },
       execute: ({ evidence }) => {
         expectTypeOf(evidence).toEqualTypeOf<{ observed: number }>()
@@ -723,12 +724,12 @@ describe("Next mutation action", () => {
             expectTypeOf(actor).toEqualTypeOf<string>()
             expectTypeOf(executor).toEqualTypeOf<CounterPreflight>()
             expectTypeOf(args).toEqualTypeOf<IncrementArgs>()
-            return allowMutationScreening({ count: executor.read() })
+            return allowScreening({ count: executor.read() })
           },
           admit: ({ tx, actor }) => {
             expectTypeOf(tx).toEqualTypeOf<CounterTx>()
             expectTypeOf(actor).toEqualTypeOf<string>()
-            return allowMutation({ observed: tx.read() })
+            return allowAdmission({ observed: tx.read() })
           },
           execute: ({ tx, args, evidence, stamp }) => {
             expectTypeOf(evidence).toEqualTypeOf<{ observed: number }>()
@@ -789,17 +790,17 @@ describe("Next mutation action", () => {
     broader.bind(increment, {
       screen: ({ actor }) => {
         expectTypeOf(actor).toEqualTypeOf<Tenant>()
-        return allowMutationScreening(null)
+        return allowScreening()
       },
-      admit: () => allowMutation(null),
+      admit: () => allowAdmission(),
       execute: () => acceptMutation(),
     })
     anyActor.bind(increment, {
       screen: ({ actor }) => {
         expectTypeOf(actor).toEqualTypeOf<User>()
-        return allowMutationScreening(null)
+        return allowScreening()
       },
-      admit: () => allowMutation(null),
+      admit: () => allowAdmission(),
       execute: () => acceptMutation(),
     })
   })
@@ -810,7 +811,7 @@ describe("Next mutation action", () => {
       ...command({ finalizeAccepted }),
       screen: ({ args }) => {
         ;(args as { amount: number }).amount = 99
-        return allowMutationScreening({ count: 0 })
+        return allowScreening({ count: 0 })
       },
     } satisfies IncrementCommand
 
@@ -824,9 +825,8 @@ describe("Next mutation action", () => {
   it("accepts a three-axis command without another interface field", async () => {
     const authority = createAuthority()
     const registered: IncrementCommand = {
-      screen: ({ executor }) =>
-        allowMutationScreening({ count: executor.read() }),
-      admit: ({ tx }) => allowMutation({ observed: tx.read() }),
+      screen: ({ executor }) => allowScreening({ count: executor.read() }),
+      admit: ({ tx }) => allowAdmission({ observed: tx.read() }),
       execute: ({ tx, args, stamp }) => {
         tx.write(tx.read() + args.amount)
         for (const [name, value] of [
@@ -896,7 +896,6 @@ describe("Next mutation action", () => {
           binder.bind(increment, registered),
         ],
         invalidations: { publish: vi.fn() },
-        reportInvalidationFailure: vi.fn(),
       })
     ).toThrow("Duplicate mutation binding: next.increment")
   })
@@ -938,7 +937,6 @@ describe("Next mutation action", () => {
         binder: counterBinder,
         commands: [] as never,
         invalidations: { publish: vi.fn() },
-        reportInvalidationFailure: vi.fn(),
       })
     ).toThrow("Incomplete mutation bindings: missing [next.increment]")
   })

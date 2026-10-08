@@ -20,11 +20,16 @@ const SERVER_ONLY_EXPORTS = [
   "./drizzle",
   "./drizzle-schema",
   "./next/server",
+  "./server",
   "./testing",
 ]
 
-/** The export whose graph must also stay free of React and Next. */
-const SHARED_EXPORT = "."
+/**
+ * Exports whose graphs must import no React or Next, so they load in any
+ * runtime: the shared protocol model, and the binder and command outcomes
+ * that a non-Next server or a plain test imports. The exact keys only.
+ */
+const FRAMEWORK_FREE_EXPORTS = [".", "./server"]
 
 /**
  * Exports of test doubles. Their graphs must import no test framework, so the
@@ -155,14 +160,23 @@ export function testDoubleEntries(entries = packageEntries()) {
 }
 
 /**
+ * Selects the entries whose graphs must import no React or Next.
+ *
+ * @param {import("./package-entries.mjs").PackageEntry[]} [entries] The package's entries.
+ * @returns {import("./package-entries.mjs").PackageEntry[]} The framework-free entries.
+ */
+export function frameworkFreeEntries(entries = packageEntries()) {
+  return entries.filter(({ key }) => FRAMEWORK_FREE_EXPORTS.includes(key))
+}
+
+/**
  * Checks one file's own source against the client-graph rules.
  *
  * @param {string} file Root-relative path, used in reports.
  * @param {string} source The file's source text.
- * @param {boolean} [frameworkFree] Whether React and Next are also forbidden.
  * @returns {Violation[]} The rules the file breaks.
  */
-export function scanSource(file, source, frameworkFree = false) {
+export function scanSource(file, source) {
   const violations = []
   const scanned = blankComments(source)
 
@@ -190,13 +204,6 @@ export function scanSource(file, source, frameworkFree = false) {
         line,
         specifier,
         rule: "Node built-in in client graph",
-      })
-    } else if (frameworkFree && inPackages(specifier, FRAMEWORK_PACKAGES)) {
-      violations.push({
-        file,
-        line,
-        specifier,
-        rule: "framework dependency in shared graph",
       })
     } else if (!inPackages(specifier, CLIENT_PACKAGES)) {
       violations.push({
@@ -299,21 +306,34 @@ function walkEntryGraph(entry, root, check) {
  * each file it reaches.
  *
  * @param {string} entry Absolute path of the entry's source file.
- * @param {{ frameworkFree?: boolean, root?: string }} [options] Whether React
- *   and Next are forbidden in this graph, and the root that report paths are
- *   relative to.
+ * @param {string} [root] The root that report paths are relative to.
  * @returns {Violation[]} Every rule broken in the graph.
  */
-export function scanEntryGraph(
-  entry,
-  { frameworkFree = false, root = ROOT } = {}
-) {
+export function scanEntryGraph(entry, root = ROOT) {
   return walkEntryGraph(entry, root, {
-    file: (file, source) => scanSource(file, source, frameworkFree),
+    file: scanSource,
     edge: (file, line, specifier, target) =>
       /(^|\/)(server|[^/]+\.server)\b/.test(target)
         ? [{ file, line, specifier, rule: "server module in client graph" }]
         : [],
+  })
+}
+
+/**
+ * Walks an entry's graph and reports every import of the given packages.
+ *
+ * @param {string} entry Absolute path of the entry's source file.
+ * @param {string} root The root that report paths are relative to.
+ * @param {string[]} packages The forbidden packages, subpaths included.
+ * @param {string} rule The rule an import of one of them breaks.
+ * @returns {Violation[]} Every forbidden import in the graph.
+ */
+function scanForbiddenPackages(entry, root, packages, rule) {
+  return walkEntryGraph(entry, root, {
+    file: (file, source) =>
+      importSpecifiers(source)
+        .filter(({ specifier }) => inPackages(specifier, packages))
+        .map(({ specifier, line }) => ({ file, line, specifier, rule })),
   })
 }
 
@@ -325,19 +345,29 @@ export function scanEntryGraph(
  * @returns {Violation[]} Every test-framework import in the graph.
  */
 export function scanTestDoubleGraph(entry, root = ROOT) {
-  return walkEntryGraph(entry, root, {
-    file: (file, source) =>
-      importSpecifiers(source)
-        .filter(({ specifier }) =>
-          inPackages(specifier, TEST_FRAMEWORK_PACKAGES)
-        )
-        .map(({ specifier, line }) => ({
-          file,
-          line,
-          specifier,
-          rule: "test framework in test-double graph",
-        })),
-  })
+  return scanForbiddenPackages(
+    entry,
+    root,
+    TEST_FRAMEWORK_PACKAGES,
+    "test framework in test-double graph"
+  )
+}
+
+/**
+ * Walks a framework-free entry's graph and reports every React or Next
+ * import, type-only imports included.
+ *
+ * @param {string} entry Absolute path of the entry's source file.
+ * @param {string} [root] The root that report paths are relative to.
+ * @returns {Violation[]} Every framework import in the graph.
+ */
+export function scanFrameworkFreeGraph(entry, root = ROOT) {
+  return scanForbiddenPackages(
+    entry,
+    root,
+    FRAMEWORK_PACKAGES,
+    "framework dependency in framework-free graph"
+  )
 }
 
 /**
@@ -351,9 +381,8 @@ export function scanTestDoubleGraph(entry, root = ROOT) {
  */
 export function scanClientEntries(entries = clientEntries(), root = ROOT) {
   const unique = new Map()
-  for (const { key, source } of entries) {
-    const frameworkFree = key === SHARED_EXPORT
-    for (const violation of scanEntryGraph(source, { frameworkFree, root })) {
+  for (const { source } of entries) {
+    for (const violation of scanEntryGraph(source, root)) {
       const id = [
         violation.file,
         violation.line,
@@ -368,15 +397,20 @@ export function scanClientEntries(entries = clientEntries(), root = ROOT) {
 
 function run() {
   const entries = clientEntries()
+  const frameworkFree = frameworkFreeEntries()
   const doubles = testDoubleEntries()
   const violations = [
     ...scanClientEntries(entries),
+    ...frameworkFree.flatMap(({ source }) => scanFrameworkFreeGraph(source)),
     ...doubles.flatMap(({ source }) => scanTestDoubleGraph(source)),
   ]
 
   if (violations.length === 0) {
     console.log(
       `✓ ${entries.length} client entries are bundle-safe: ${entries.map(({ key }) => key).join(", ")}`
+    )
+    console.log(
+      `✓ ${frameworkFree.length} framework-free entries import no React or Next: ${frameworkFree.map(({ key }) => key).join(", ")}`
     )
     console.log(
       `✓ ${doubles.length} test-double entry imports no test framework: ${doubles.map(({ key }) => key).join(", ")}`

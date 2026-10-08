@@ -3,7 +3,7 @@ import {
   type Canon,
   type MutationAuthorityAdapter,
 } from "headcanon"
-import { createMutationBinder } from "headcanon/next/server"
+import { createMutationBinder } from "headcanon/server"
 import {
   createInMemoryMutationAuthority,
   type InMemoryMutationAuthority,

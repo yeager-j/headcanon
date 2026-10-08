@@ -3,7 +3,6 @@ import { cacheTag, refresh, revalidateTag, updateTag } from "next/cache"
 
 import type {
   InvalidationPublicationFailure,
-  InvalidationPublicationFailureReporter,
   InvalidationPublisher,
 } from "../../core/invalidation"
 import {
@@ -56,11 +55,12 @@ export async function defineCachedCanon<State>(input: {
 type ExpireTag = (tag: string) => void
 
 function recordPublicationFailure(
-  reportFailure: InvalidationPublicationFailureReporter,
+  invalidations: InvalidationPublisher,
   failure: InvalidationPublicationFailure
 ): void {
   try {
-    reportFailure(failure)
+    if (invalidations.onFailure) invalidations.onFailure(failure)
+    else console.error("Headcanon invalidation publication failed:", failure)
   } catch {
     // Diagnostics remain advisory just like the publication they observe.
   }
@@ -93,8 +93,7 @@ async function settleWithin(
 
 async function publishInvalidation(
   stamp: AcceptedStamp,
-  invalidations: InvalidationPublisher,
-  reportFailure: InvalidationPublicationFailureReporter
+  invalidations: InvalidationPublisher
 ): Promise<void> {
   const eventId = randomUUID()
   try {
@@ -103,14 +102,14 @@ async function publishInvalidation(
       INVALIDATION_PUBLICATION_TIMEOUT_MS
     )
     if (outcome === "timed-out") {
-      recordPublicationFailure(reportFailure, {
+      recordPublicationFailure(invalidations, {
         kind: "timed-out",
         eventId,
         stamp,
       })
     }
   } catch (error) {
-    recordPublicationFailure(reportFailure, {
+    recordPublicationFailure(invalidations, {
       kind: "rejected",
       eventId,
       stamp,
@@ -119,49 +118,32 @@ async function publishInvalidation(
   }
 }
 
-/** A realtime publisher and the sink for its failures; absent without realtime. */
-export interface Publication {
-  readonly invalidations: InvalidationPublisher
-  readonly reportFailure: InvalidationPublicationFailureReporter
-}
-
 export async function finalizeStamp(
   stamp: AcceptedStamp,
   expireTag: ExpireTag,
   refreshRoute: (() => void) | undefined,
-  publication: Publication | undefined
+  invalidations: InvalidationPublisher | undefined
 ): Promise<void> {
   for (const [axis] of revisionEntries(stamp.revisions)) {
     expireTag(await axisCacheTag(axis))
   }
 
   refreshRoute?.()
-  if (publication) {
-    await publishInvalidation(
-      stamp,
-      publication.invalidations,
-      publication.reportFailure
-    )
-  }
+  if (invalidations) await publishInvalidation(stamp, invalidations)
 }
 
 /**
  * Finalizes a non-protocol commit from inside a Server Action: expires its
  * axis tags, refreshes the invoking route, then publishes.
  * @param stamp Accepted revisions advanced by the commit.
- * @param invalidations Application-owned invalidation publisher.
- * @param reportFailure Diagnostic sink for publication failures.
+ * @param invalidations Application-owned invalidation publisher; omit it when the application has no realtime transport.
  * @returns Completion of cache expiry, route refresh, and bounded publication.
  */
 export function finalizeExternalActionCommit(
   stamp: AcceptedStamp,
-  invalidations: InvalidationPublisher,
-  reportFailure: InvalidationPublicationFailureReporter
+  invalidations?: InvalidationPublisher
 ): Promise<void> {
-  return finalizeStamp(stamp, updateTag, refresh, {
-    invalidations,
-    reportFailure,
-  })
+  return finalizeStamp(stamp, updateTag, refresh, invalidations)
 }
 
 /**
@@ -169,19 +151,17 @@ export function finalizeExternalActionCommit(
  * webhook, job): expires its axis tags at once, then publishes. It refreshes
  * no route.
  * @param stamp Accepted revisions advanced by the commit.
- * @param invalidations Application-owned invalidation publisher.
- * @param reportFailure Diagnostic sink for publication failures.
+ * @param invalidations Application-owned invalidation publisher; omit it when the application has no realtime transport.
  * @returns Completion of cache expiry and bounded publication.
  */
 export function announceExternalCommit(
   stamp: AcceptedStamp,
-  invalidations: InvalidationPublisher,
-  reportFailure: InvalidationPublicationFailureReporter
+  invalidations?: InvalidationPublisher
 ): Promise<void> {
   return finalizeStamp(
     stamp,
     (tag) => revalidateTag(tag, { expire: 0 }),
     undefined,
-    { invalidations, reportFailure }
+    invalidations
   )
 }

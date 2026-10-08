@@ -2,14 +2,14 @@
 
 import { fixtureBinder } from "@/lib/authority"
 import { addItem, fixtureProtocol, ITEMS_AXIS } from "@/lib/protocol"
+import { createNextMutationAction } from "headcanon/next/server"
 import {
   acceptMutation,
-  allowMutation,
-  allowMutationScreening,
-  createNextMutationAction,
+  allowAdmission,
+  allowScreening,
   denyMutation,
   refuseMutation,
-} from "headcanon/next/server"
+} from "headcanon/server"
 
 /**
  * The fixture's Server Action for {@link addItem}. A `reader` is denied; an
@@ -25,8 +25,8 @@ export const applyFixtureMutation = createNextMutationAction({
   commands: [
     fixtureBinder.bind(addItem, {
       screen: ({ actor }) =>
-        actor.role === "editor" ? allowMutationScreening(null) : denyMutation(),
-      admit: () => allowMutation(null),
+        actor.role === "editor" ? allowScreening() : denyMutation(),
+      admit: () => allowAdmission(),
       execute({ tx, args, stamp }) {
         const current = tx.read()
         if (current.items.includes(args.text)) {

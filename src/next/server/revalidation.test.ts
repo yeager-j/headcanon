@@ -129,11 +129,7 @@ describe("Next commit finalization", () => {
       events.push("refresh")
     })
 
-    await finalizeExternalActionCommit(
-      accepted,
-      recordingPublisher(events),
-      vi.fn()
-    )
+    await finalizeExternalActionCommit(accepted, recordingPublisher(events))
 
     expect(events.slice(0, 2)).toEqual([
       `update:${await axisCacheTag(first)}`,
@@ -146,7 +142,7 @@ describe("Next commit finalization", () => {
   })
 
   it("uses immediate revalidation outside a Server Action and never refreshes", async () => {
-    await announceExternalCommit(accepted, { publish: vi.fn() }, vi.fn())
+    await announceExternalCommit(accepted, { publish: vi.fn() })
 
     expect(nextCache.revalidateTag.mock.calls).toEqual([
       [await axisCacheTag(first), { expire: 0 }],
@@ -156,24 +152,37 @@ describe("Next commit finalization", () => {
     expect(nextCache.refresh).not.toHaveBeenCalled()
   })
 
-  it("keeps publication failure advisory and still refreshes the invoking route", async () => {
-    const reportFailure = vi.fn()
-    const error = new Error("realtime unavailable")
+  it("expires and refreshes with no publisher when there is no realtime", async () => {
     await expect(
-      finalizeExternalActionCommit(
-        accepted,
-        {
-          publish: async () => {
-            throw error
-          },
-        },
-        reportFailure
-      )
+      finalizeExternalActionCommit(accepted)
     ).resolves.toBeUndefined()
 
     expect(nextCache.updateTag).toHaveBeenCalledTimes(2)
     expect(nextCache.refresh).toHaveBeenCalledOnce()
-    expect(reportFailure).toHaveBeenCalledExactlyOnceWith({
+  })
+
+  it("expires outside a Server Action with no publisher when there is no realtime", async () => {
+    await expect(announceExternalCommit(accepted)).resolves.toBeUndefined()
+
+    expect(nextCache.revalidateTag).toHaveBeenCalledTimes(2)
+    expect(nextCache.refresh).not.toHaveBeenCalled()
+  })
+
+  it("keeps publication failure advisory and still refreshes the invoking route", async () => {
+    const onFailure = vi.fn()
+    const error = new Error("realtime unavailable")
+    await expect(
+      finalizeExternalActionCommit(accepted, {
+        publish: async () => {
+          throw error
+        },
+        onFailure,
+      })
+    ).resolves.toBeUndefined()
+
+    expect(nextCache.updateTag).toHaveBeenCalledTimes(2)
+    expect(nextCache.refresh).toHaveBeenCalledOnce()
+    expect(onFailure).toHaveBeenCalledExactlyOnceWith({
       kind: "rejected",
       eventId: expect.any(String),
       stamp: accepted,
@@ -181,26 +190,42 @@ describe("Next commit finalization", () => {
     })
 
     await expect(
-      finalizeExternalActionCommit(
-        accepted,
-        { publish: async () => Promise.reject(error) },
-        () => {
+      finalizeExternalActionCommit(accepted, {
+        publish: async () => Promise.reject(error),
+        onFailure: () => {
           throw new Error("diagnostics unavailable")
-        }
-      )
+        },
+      })
     ).resolves.toBeUndefined()
+  })
+
+  it("reports a publication failure to console.error when the publisher has no onFailure", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined)
+    const error = new Error("realtime unavailable")
+
+    try {
+      await finalizeExternalActionCommit(accepted, {
+        publish: async () => Promise.reject(error),
+      })
+
+      expect(consoleError).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.objectContaining({ kind: "rejected", error })
+      )
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 
   it("bounds stalled advisory publication after refreshing the route", async () => {
     vi.useFakeTimers()
-    const reportFailure = vi.fn()
-    const finalization = finalizeExternalActionCommit(
-      accepted,
-      {
-        publish: () => new Promise<void>(() => undefined),
-      },
-      reportFailure
-    )
+    const onFailure = vi.fn()
+    const finalization = finalizeExternalActionCommit(accepted, {
+      publish: () => new Promise<void>(() => undefined),
+      onFailure,
+    })
     const settled = vi.fn()
     void finalization.then(settled)
 
@@ -214,7 +239,7 @@ describe("Next commit finalization", () => {
 
     await expect(finalization).resolves.toBeUndefined()
     expect(settled).toHaveBeenCalledOnce()
-    expect(reportFailure).toHaveBeenCalledExactlyOnceWith({
+    expect(onFailure).toHaveBeenCalledExactlyOnceWith({
       kind: "timed-out",
       eventId: expect.any(String),
       stamp: accepted,

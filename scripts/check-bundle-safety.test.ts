@@ -5,8 +5,10 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import {
   clientEntries,
+  frameworkFreeEntries,
   scanClientEntries,
   scanEntryGraph,
+  scanFrameworkFreeGraph,
   scanSource,
   scanTestDoubleGraph,
   testDoubleEntries,
@@ -87,25 +89,6 @@ describe("client-graph source rules", () => {
       scanSource("src/index.ts", '// import { x } from "node:crypto"')
     ).toEqual([])
   })
-
-  it.each([
-    ['import type { ReactNode } from "react"', "react"],
-    [
-      'export type { AppRouterInstance } from "next/navigation"',
-      "next/navigation",
-    ],
-  ])(
-    "rejects a client framework dependency from the shared graph",
-    (source, specifier) => {
-      expect(scanSource("src/index.ts", source, true)).toEqual([
-        expect.objectContaining({
-          file: "src/index.ts",
-          specifier,
-          rule: "framework dependency in shared graph",
-        }),
-      ])
-    }
-  )
 })
 
 describe("client-graph walk", () => {
@@ -116,7 +99,7 @@ describe("client-graph walk", () => {
       "src/nested/b.ts": 'import { createHash } from "node:crypto"',
     })
 
-    expect(scanEntryGraph(join(root, "src/entry.ts"), { root })).toEqual([
+    expect(scanEntryGraph(join(root, "src/entry.ts"), root)).toEqual([
       expect.objectContaining({
         file: "src/nested/b.ts",
         specifier: "node:crypto",
@@ -134,7 +117,7 @@ describe("client-graph walk", () => {
         [target]: "export const run = 1",
       })
 
-      expect(scanEntryGraph(join(root, "src/entry.ts"), { root })).toEqual([
+      expect(scanEntryGraph(join(root, "src/entry.ts"), root)).toEqual([
         expect.objectContaining({
           file: "src/entry.ts",
           line: 2,
@@ -151,7 +134,7 @@ describe("client-graph walk", () => {
       "src/a/index.ts": 'import { readFileSync } from "node:fs"',
     })
 
-    expect(scanEntryGraph(join(root, "src/entry.ts"), { root })).toEqual([
+    expect(scanEntryGraph(join(root, "src/entry.ts"), root)).toEqual([
       expect.objectContaining({
         file: "src/a/index.ts",
         specifier: "node:fs",
@@ -163,30 +146,10 @@ describe("client-graph walk", () => {
   it("rejects a relative import that resolves to no file", () => {
     const root = tree({ "src/entry.ts": 'import { a } from "./missing"' })
 
-    expect(scanEntryGraph(join(root, "src/entry.ts"), { root })).toEqual([
+    expect(scanEntryGraph(join(root, "src/entry.ts"), root)).toEqual([
       expect.objectContaining({
         specifier: "./missing",
         rule: "unresolved relative import",
-      }),
-    ])
-  })
-
-  it("forbids React and Next in the shared graph only", () => {
-    const root = tree({
-      "src/index.ts": 'export { a } from "./a"',
-      "src/react.ts": 'export { a } from "./a"',
-      "src/a.ts": 'import { useMemo } from "react"',
-    })
-    const entries = [
-      { key: ".", source: join(root, "src/index.ts") },
-      { key: "./react", source: join(root, "src/react.ts") },
-    ]
-
-    expect(scanClientEntries(entries.slice(1), root)).toEqual([])
-    expect(scanClientEntries(entries, root)).toEqual([
-      expect.objectContaining({
-        file: "src/a.ts",
-        rule: "framework dependency in shared graph",
       }),
     ])
   })
@@ -206,6 +169,66 @@ describe("client-graph walk", () => {
     expect(scanClientEntries(entries, root)).toEqual([
       expect.objectContaining({ file: "src/shared.ts", specifier: "node:fs" }),
     ])
+  })
+})
+
+describe("framework-free graph", () => {
+  it.each([
+    ['import type { ReactNode } from "react"', "react"],
+    ['import { refresh } from "next/cache"', "next/cache"],
+    [
+      'export type { AppRouterInstance } from "next/navigation"',
+      "next/navigation",
+    ],
+  ])(
+    "rejects a framework import reached through imports: %s",
+    (source, specifier) => {
+      const root = tree({
+        "src/server/index.ts": 'export { bind } from "./binder"',
+        "src/server/binder.ts": source,
+      })
+
+      expect(
+        scanFrameworkFreeGraph(join(root, "src/server/index.ts"), root)
+      ).toEqual([
+        expect.objectContaining({
+          file: "src/server/binder.ts",
+          specifier,
+          rule: "framework dependency in framework-free graph",
+        }),
+      ])
+    }
+  )
+
+  it("allows Node built-ins and other packages in a framework-free graph", () => {
+    const root = tree({
+      "src/server/index.ts":
+        'import { randomUUID } from "node:crypto"\nimport { ok } from "serializable-result"',
+    })
+
+    expect(
+      scanFrameworkFreeGraph(join(root, "src/server/index.ts"), root)
+    ).toEqual([])
+  })
+
+  it("selects the shared and server entries only", () => {
+    const entries = [".", "./next/server", "./react", "./server"].map(
+      (key) => ({ key, source: `/src/${key}.ts` })
+    )
+
+    expect(frameworkFreeEntries(entries).map(({ key }) => key)).toEqual([
+      ".",
+      "./server",
+    ])
+  })
+
+  it("keeps the real headcanon and headcanon/server graphs free of React and Next", () => {
+    const entries = frameworkFreeEntries()
+
+    expect(entries.map(({ key }) => key)).toEqual([".", "./server"])
+    for (const { source } of entries) {
+      expect(scanFrameworkFreeGraph(source)).toEqual([])
+    }
   })
 })
 
@@ -272,6 +295,7 @@ describe("client entry selection", () => {
       "./next/client",
       "./next/server",
       "./react",
+      "./server",
       "./testing",
       "./testing/react",
       "./brand-new",

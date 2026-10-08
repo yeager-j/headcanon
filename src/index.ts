@@ -44,7 +44,6 @@ export {
   deliveryAgePolicy,
   MutationContentionError,
   receiptRetentionMs,
-  throwMutationContention,
   type DeliveryAgePolicy,
   type MutationAuthorityAdapter,
   type MutationAuthorityAdapterError,
