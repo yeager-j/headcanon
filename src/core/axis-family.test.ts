@@ -246,6 +246,37 @@ describe("defineAxis with named key segments", () => {
       "An axis family needs at least one key segment"
     )
   })
+
+  it("throws when of receives a missing or non-string segment", () => {
+    const pairAxis = defineAxis("pairs", { left: anyString, right: anyString })
+
+    expect(() => pairAxis.of({ left: "a" } as never)).toThrow(
+      'Invalid key for axis family "pairs"'
+    )
+    expect(() => pairAxis.of({ left: "a", right: 1 } as never)).toThrow(
+      'Invalid key for axis family "pairs"'
+    )
+  })
+
+  it("treats a segment named ~standard as a segment, not a schema", () => {
+    const markedAxis = defineAxis("marked", {
+      "~standard": anyString,
+      id: anyString,
+    })
+    const axis = markedAxis.of({ "~standard": "a", id: "b" })
+
+    expect(axis).toBe("marked/a/b")
+    expect(markedAxis.parse(axis)).toEqual({
+      ok: true,
+      value: { "~standard": "a", id: "b" },
+    })
+  })
+
+  it("rejects a symbol-named segment", () => {
+    expect(() =>
+      defineAxis("symbols", { id: anyString, [Symbol("extra")]: anyString })
+    ).toThrow("Axis key segments must have string names")
+  })
 })
 
 describe("defineAxis types", () => {
@@ -284,6 +315,23 @@ describe("defineAxis types", () => {
     >()
     // @ts-expect-error — a key with named segments needs every segment.
     expect(() => workspaceNoteAxis.of({ workspaceId: TENANT_ID })).toThrow()
+  })
+
+  it("throws when of receives a non-string key from untyped code", () => {
+    expect(() => defineAxis("items", anyString).of(1 as never)).toThrow(
+      'Invalid key for axis family "items"'
+    )
+  })
+
+  it("leaves symbol-named properties out of the key type", () => {
+    const extra = Symbol("extra")
+    // Never called: defineAxis rejects the symbol at runtime.
+    const define = () =>
+      defineAxis("symbols", { id: anyString, [extra]: anyString })
+
+    expectTypeOf<ReturnType<typeof define>>().toEqualTypeOf<
+      AxisFamily<{ readonly id: string }>
+    >()
   })
 
   it("refuses a key schema whose output is not a string", () => {

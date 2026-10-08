@@ -12,7 +12,9 @@ type KeySegmentSchema = StandardSchemaV1<string, string>
 type KeyShape = Readonly<Record<string, KeySegmentSchema>>
 
 type KeyOfShape<Shape extends KeyShape> = {
-  readonly [Name in keyof Shape]: StandardSchemaV1.InferOutput<Shape[Name]>
+  readonly [Name in keyof Shape & string]: StandardSchemaV1.InferOutput<
+    Shape[Name]
+  >
 }
 
 /**
@@ -55,7 +57,7 @@ export interface AxisFamily<Key> {
 /** How a family turns its key into segments and back. */
 interface KeyCodec<Key> {
   readonly schemas: readonly KeySegmentSchema[]
-  toSegments(key: Key): readonly string[]
+  toSegments(key: Key): readonly unknown[]
   fromSegments(segments: readonly string[]): Key
 }
 
@@ -72,7 +74,7 @@ interface KeyCodec<Key> {
  * @param key The key schema, or an object of segment schemas in axis order.
  * @returns The family, which builds axes with `of` and reads them with `parse`.
  * @throws Error when the family name is empty or contains `/`, or the object
- * of segment schemas is empty.
+ * of segment schemas is empty or has a symbol-named segment.
  * @example
  * const noteAxis = defineAxis("notes", z.uuid())
  * noteAxis.of(noteId) // "notes/<noteId>"
@@ -116,9 +118,12 @@ export function defineAxis(
   }
 
   const of = (value: unknown): AxisId => {
-    const address = prefix + codec.toSegments(value).join(AXIS_SEPARATOR)
+    const segments = codec.toSegments(value)
+    // A non-string from untyped code must not be coerced into a valid key.
+    const strings = segments.every((segment) => typeof segment === "string")
+    const address = prefix + segments.join(AXIS_SEPARATOR)
     // `of` accepts only what `parse` reads back, so the two cannot drift.
-    const parsed = parse(address)
+    const parsed = strings ? parse(address) : null
 
     if (!parsed?.ok) {
       throw new Error(
@@ -136,7 +141,7 @@ function keyCodec(key: KeySegmentSchema | KeyShape): KeyCodec<unknown> {
   if (isStandardSchema(key)) {
     return {
       schemas: [key],
-      toSegments: (value) => [value as string],
+      toSegments: (value) => [value],
       fromSegments: ([segment]) => segment,
     }
   }
@@ -145,12 +150,15 @@ function keyCodec(key: KeySegmentSchema | KeyShape): KeyCodec<unknown> {
   if (names.length === 0) {
     throw new Error("An axis family needs at least one key segment")
   }
+  if (Object.getOwnPropertySymbols(key).length > 0) {
+    throw new Error("Axis key segments must have string names")
+  }
 
   return {
     schemas: Object.values(key),
-    // A missing segment encodes as empty, which `of` then rejects.
+    // A missing segment is not a string, which `of` then rejects.
     toSegments: (value) =>
-      names.map((name) => (value as Record<string, string>)[name] ?? ""),
+      names.map((name) => (value as Record<string, unknown>)[name]),
     fromSegments: (segments) =>
       Object.freeze(
         Object.fromEntries(names.map((name, index) => [name, segments[index]]))
@@ -158,10 +166,24 @@ function keyCodec(key: KeySegmentSchema | KeyShape): KeyCodec<unknown> {
   }
 }
 
+/**
+ * Whether `key` is one schema rather than a shape. A shape may name a segment
+ * `~standard`, so check the marker's structure, not only its name: a Standard
+ * Schema's marker carries `version: 1` and a `validate` function, and a
+ * segment schema does not.
+ */
 function isStandardSchema(
   key: KeySegmentSchema | KeyShape
 ): key is KeySegmentSchema {
-  return "~standard" in key
+  const marker: unknown = (key as { readonly "~standard"?: unknown })[
+    "~standard"
+  ]
+  return (
+    typeof marker === "object" &&
+    marker !== null &&
+    (marker as { readonly version?: unknown }).version === 1 &&
+    typeof (marker as { readonly validate?: unknown }).validate === "function"
+  )
 }
 
 function segmentsProblem(
