@@ -15,8 +15,11 @@ import {
   DEFAULT_CLOCK_SKEW_TOLERANCE_MS,
   DEFAULT_MAX_DELIVERY_AGE_MS,
   deliveryAgePolicy,
+  executePreparedMutation,
   prepareMutationRequest,
   receiptRetentionMs,
+  type MutationAcceptance,
+  type StampAccumulator,
 } from "./authority"
 
 const amountSchema: StandardSchemaV1<unknown, { readonly amount: number }> = {
@@ -252,6 +255,85 @@ describe("stamp accumulator", () => {
 
     expect(() => stamp.record(axis, 1)).toThrow(
       "Revision regressed while stamping axis: entity/one"
+    )
+  })
+})
+
+describe("accepted stamp check", () => {
+  const counterAxis = axisId("authority/counter")
+
+  async function acceptWith(
+    sequence: number,
+    accept: (stamp: StampAccumulator) => MutationAcceptance
+  ) {
+    const authority = createInMemoryMutationAuthority<number, string, never>({
+      initialState: 0,
+      scope: (actor) => actor,
+    })
+    const prepared = await prepareMutationRequest(protocol, {
+      protocol: protocol.id,
+      mutationId: `30000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`,
+      createdAt: Date.now(),
+      invocation: add({ amount: 1 }),
+    })
+    if (!prepared.ok) throw new Error("Invalid stamp check envelope")
+
+    const outcome = executePreparedMutation({
+      prepared: prepared.value,
+      actor: "actor",
+      authority,
+      async run(tx, stamp) {
+        tx.write(tx.read() + 1)
+        return accept(stamp)
+      },
+    })
+    return { authority, outcome }
+  }
+
+  it("throws for an acceptance with an empty stamp and records nothing", async () => {
+    const { authority, outcome } = await acceptWith(10, () => ({
+      kind: "accepted",
+    }))
+
+    await expect(outcome).rejects.toThrow(
+      "Mutation authority.add accepted with an empty stamp. Call stamp.record(axis, revision) for each axis it advances, or return acceptMutation({ unchanged: true }) when it changes nothing."
+    )
+    expect(authority.read()).toBe(0)
+    expect(authority.receiptCount()).toBe(0)
+  })
+
+  it("throws for an unchanged acceptance that recorded a revision", async () => {
+    const { authority, outcome } = await acceptWith(11, (stamp) => {
+      stamp.record(counterAxis, 1)
+      return { kind: "accepted", unchanged: true }
+    })
+
+    await expect(outcome).rejects.toThrow(
+      "Mutation authority.add accepted as unchanged but recorded a revision"
+    )
+    expect(authority.read()).toBe(0)
+    expect(authority.receiptCount()).toBe(0)
+  })
+
+  it("accepts an unchanged acceptance with an empty stamp", async () => {
+    const { outcome } = await acceptWith(12, () => ({
+      kind: "accepted",
+      unchanged: true,
+    }))
+
+    await expect(outcome).resolves.toEqual(
+      ok({ kind: "accepted", stamp: { revisions: {} } })
+    )
+  })
+
+  it("accepts a stamped acceptance", async () => {
+    const { outcome } = await acceptWith(13, (stamp) => {
+      stamp.record(counterAxis, 1)
+      return { kind: "accepted" }
+    })
+
+    await expect(outcome).resolves.toEqual(
+      ok({ kind: "accepted", stamp: { revisions: { [counterAxis]: 1 } } })
     )
   })
 })

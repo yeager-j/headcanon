@@ -159,17 +159,18 @@ Use both steps when a permission controls access to stored outcomes and new writ
 
 ### Choose the right outcome
 
-| Outcome                     | Use it for                                                       | Receipt behavior                                                                                        |
-| --------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `acceptMutation()`          | A successful command.                                            | Commits application writes and the accepted receipt together.                                           |
-| `refuseMutation(error)`     | An expected business rule failure safe to explain to the caller. | Rolls back the attempt's writes and records the public refusal.                                         |
-| `denyMutation()`            | Missing access that should not expose a reason.                  | Creates no receipt in `screen`; rolls back attempt writes and records a denial in `admit` or `execute`. |
-| `throwMutationContention()` | A concurrent change that requires a fresh attempt.               | Rolls back the transaction and retries with a fresh stamp, up to `maxAttempts`.                         |
-| An unexpected exception     | A database failure or programming error.                         | Propagates without committing the attempt or a new receipt.                                             |
+| Outcome                               | Use it for                                                                        | Receipt behavior                                                                                        |
+| ------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `acceptMutation()`                    | A successful command.                                                             | Commits application writes and the accepted receipt together.                                           |
+| `acceptMutation({ unchanged: true })` | A successful command that changes nothing, such as a rename to the current title. | Records an accepted receipt with an empty stamp. The client ends the prediction at once.                |
+| `refuseMutation(error)`               | An expected business rule failure safe to explain to the caller.                  | Rolls back the attempt's writes and records the public refusal.                                         |
+| `denyMutation()`                      | Missing access that should not expose a reason.                                   | Creates no receipt in `screen`; rolls back attempt writes and records a denial in `admit` or `execute`. |
+| `throwMutationContention()`           | A concurrent change that requires a fresh attempt.                                | Rolls back the transaction and retries with a fresh stamp, up to `maxAttempts`.                         |
+| An unexpected exception               | A database failure or programming error.                                          | Propagates without committing the attempt or a new receipt.                                             |
 
 The generated action returns denials as `ok({ kind: "denied" })`, without a reason. `createNextPredictedRoot` maps that outcome to a terminal mutation failure. You do not need to throw Next.js `forbidden()` for this path.
 
-Every mutation bound to a server command needs a `refusal` schema, even if the command has no public refusal cases. Use a schema that accepts no values, such as Zod's `z.never()`, for that case. Refusal schemas must validate synchronously, and their values must be JSON serializable. Keep secrets and internal error details out of public refusals.
+Give a mutation a `refusal` schema when its command can return `refuseMutation(error)`. If the command has no public refusal cases, omit `refusal`: the mutation's refusal type is then `never`, and a stored refusal for it throws instead of replaying. Refusal schemas must validate synchronously, and their values must be JSON serializable. Keep secrets and internal error details out of public refusals.
 
 The action validates arguments before deriving the actor or running commands. It does not run the client predictor on the server, so repeat all business rules needed for a valid write. Arguments must already be in their schema's parsed form; the action rejects parsing that changes them. Normalize inputs before creating the invocation.
 
@@ -207,6 +208,8 @@ The Drizzle adapter runs at `READ COMMITTED`, regardless of the database default
 When a guarded update affects no row, call `throwMutationContention()`. The adapter discards the failed transaction and its stamp, then runs admission and execution again against current data. Do not catch this exception and turn it into a public refusal.
 
 Record every revision the successful transaction advances with `stamp.record(axis, revision)`. Recording a stamp does not update your database: your command must persist the revision itself. If one command changes several independently tracked records, record each affected axis.
+
+An accepted command must record at least one axis. If `execute` returns `acceptMutation()` with an empty stamp, the authority throws, rolls the transaction back, and records no receipt. Without this check, the client would end the prediction before refreshed data arrives, and the old value would show again. When a command accepts and changes nothing, return `acceptMutation({ unchanged: true })` and record no axis. A command that records an axis and also returns `unchanged: true` throws too.
 
 Use stable axis names and increasing, non-negative safe integers. Loaders must read the displayed values and their revisions together. Missing or incorrect revisions can prevent the client from recognizing that a saved mutation has reached the screen.
 

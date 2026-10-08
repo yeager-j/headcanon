@@ -3,6 +3,7 @@ import { ok } from "serializable-result"
 import { describe, expect, expectTypeOf, it } from "vitest"
 
 import {
+  acceptMutation,
   allowAdmission,
   allowMutation,
   allowMutationScreening,
@@ -60,6 +61,24 @@ describe("allowed outcomes", () => {
   it("keeps the deprecated names as aliases", () => {
     expect(allowMutation).toBe(allowAdmission)
     expect(allowMutationScreening).toBe(allowScreening)
+  })
+})
+
+describe("accepted outcome", () => {
+  it("accepts with no argument, for a command that records its axes", () => {
+    const accepted = acceptMutation()
+
+    expect(accepted).toEqual({ kind: "accepted" })
+    expect(Object.isFrozen(accepted)).toBe(true)
+  })
+
+  it("declares an explicit no-change acceptance", () => {
+    const accepted = acceptMutation({ unchanged: true })
+
+    expect(accepted).toEqual({ kind: "accepted", unchanged: true })
+    expect(Object.isFrozen(accepted)).toBe(true)
+    // @ts-expect-error — only `true` declares an empty stamp on purpose.
+    acceptMutation({ unchanged: false })
   })
 })
 

@@ -1,6 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { refresh, updateTag } from "next/cache"
-import { err, ok, type Result } from "serializable-result"
+import { ok, type Result } from "serializable-result"
 
 import {
   executePreparedMutation,
@@ -12,6 +12,7 @@ import {
 } from "../../core/authority"
 import type { InvalidationPublisher } from "../../core/invalidation"
 import type {
+  AnyMutationDefinition,
   AnyProtocolDefinition,
   MutationRefusalOf,
 } from "../../core/protocol"
@@ -22,7 +23,6 @@ import {
   type MutationBinder,
   type MutationBinding,
   type MutationCommand,
-  type MutationWithRefusal,
   type ValidBindings,
 } from "../../server/binder"
 import { parseMutationRefusal } from "../../server/refusal"
@@ -32,7 +32,7 @@ import { finalizeStamp } from "./revalidation"
  * The erased form the action dispatches through once the binding list has
  * been checked: any parsed args and the protocol's refusal union.
  */
-type RuntimeMutation<Refusal> = MutationWithRefusal &
+type RuntimeMutation<Refusal> = AnyMutationDefinition &
   ((args: unknown) => unknown) & {
     readonly refusal: StandardSchemaV1<unknown, Refusal>
   }
@@ -96,6 +96,7 @@ type RuntimeBinding<Actor, Preflight, Transaction, Refusal> = MutationBinding<
  * @param options Protocol, binder, exhaustive commands made by that binder, and optionally an invalidation publisher.
  * @returns A protocol-branded Server Action returning terminal outcomes (`accepted`, `refused`, or `denied`) or typed executor failures.
  * @throws Error at creation when a binding is duplicated, uses another definition, was made by another binder, or the list is incomplete.
+ * @throws Error when a command accepts with an empty stamp without `acceptMutation({ unchanged: true })`, or records an axis with it; the attempt rolls back and no receipt is recorded.
  * @throws Trusted actor or command callbacks may throw unexpected application/framework failures.
  */
 export function createNextMutationAction<
@@ -170,9 +171,9 @@ export function createNextMutationAction<
           actor,
           args: attemptArgs,
         })
-        if (admitted.kind === "denied") return err(admitted)
+        if (admitted.kind === "denied") return admitted
 
-        const decision = await binding.command.execute({
+        return binding.command.execute({
           tx,
           actor,
           args: attemptArgs,
@@ -180,7 +181,6 @@ export function createNextMutationAction<
           stamp,
           mutationId: prepared.value.mutationId,
         })
-        return decision.kind === "accepted" ? ok(undefined) : err(decision)
       },
     })
     if (!outcome.ok || outcome.value.kind !== "accepted") return outcome

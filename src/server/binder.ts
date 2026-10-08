@@ -1,5 +1,3 @@
-import type { StandardSchemaV1 } from "@standard-schema/spec"
-
 import type {
   MutationAuthorityAdapter,
   StampAccumulator,
@@ -19,10 +17,6 @@ import type {
   MutationScreening,
 } from "./outcomes"
 
-export type MutationWithRefusal = AnyMutationDefinition & {
-  readonly refusal: StandardSchemaV1
-}
-
 type MutationArgs<Mutation extends AnyMutationDefinition> = Mutation extends (
   args: infer Args
 ) => unknown
@@ -31,7 +25,7 @@ type MutationArgs<Mutation extends AnyMutationDefinition> = Mutation extends (
 
 /** One app-owned command bound to a client-safe mutation definition. */
 export interface MutationCommand<
-  Mutation extends MutationWithRefusal,
+  Mutation extends AnyMutationDefinition,
   Actor,
   Preflight,
   Transaction,
@@ -63,7 +57,9 @@ export interface MutationCommand<
   /**
    * Runs after `admit` in the same attempt. Write domain rows through `tx`,
    * record each axis the attempt advances on `stamp`, and return
-   * `acceptMutation`, `refuseMutation`, or `denyMutation`.
+   * `acceptMutation`, `refuseMutation`, or `denyMutation`. An acceptance
+   * that records no axis throws and records no receipt, unless it is
+   * `acceptMutation({ unchanged: true })`.
    */
   readonly execute: (
     context: {
@@ -104,7 +100,7 @@ export interface MutationBinderIdentity {
 
 /** Definition-keyed association between one mutation and its application command. */
 export interface MutationBinding<
-  Mutation extends MutationWithRefusal,
+  Mutation extends AnyMutationDefinition,
   Command = unknown,
 > {
   /** The protocol's definition object for this mutation. */
@@ -142,7 +138,7 @@ export interface MutationBinder<
    * `screened` are inferred.
    */
   readonly bind: <
-    const Mutation extends MutationWithRefusal,
+    const Mutation extends AnyMutationDefinition,
     Screened,
     Evidence,
   >(
@@ -218,7 +214,7 @@ export function createMutationBinder<
   return binder
 }
 
-export type AnyMutationBinding = MutationBinding<MutationWithRefusal>
+export type AnyMutationBinding = MutationBinding<AnyMutationDefinition>
 
 export type BoundMutation<Commands extends readonly AnyMutationBinding[]> =
   Commands[number] extends MutationBinding<infer Mutation, unknown>

@@ -7,6 +7,7 @@ import {
   defineProtocol,
   type MutationErrorOf,
   type MutationInvocation,
+  type MutationRefusalOf,
   type ProtocolInvocation,
 } from ".."
 import { prepareMutationRequest } from "./authority"
@@ -256,6 +257,25 @@ describe("defineMutation", () => {
     expectTypeOf<MutationErrorOf<typeof correlated>>().toEqualTypeOf<
       PredictionRefusal | AuthorityRefusal
     >()
+  })
+
+  it("gives a mutation with no refusal cases a schema that rejects every value", () => {
+    for (const stored of [undefined, null, "refused", { code: "refused" }]) {
+      expect(increment.refusal["~standard"].validate(stored)).toEqual({
+        issues: [{ message: "This mutation declares no refusal cases" }],
+      })
+    }
+
+    expectTypeOf<MutationRefusalOf<typeof increment>>().toBeNever()
+    expectTypeOf<MutationErrorOf<typeof increment>>().toBeNever()
+    expectTypeOf<
+      MutationRefusalOf<typeof increment | typeof correlated>
+    >().toEqualTypeOf<AuthorityRefusal>()
+  })
+
+  it("gives every definition the same enumerable members", () => {
+    expect(Object.keys(increment)).toEqual(Object.keys(correlated))
+    expect(Object.keys(increment)).toContain("refusal")
   })
 })
 

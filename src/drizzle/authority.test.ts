@@ -25,6 +25,7 @@ import {
   receiptKey,
   receiptRetentionMs,
   throwMutationContention,
+  type MutationAcceptance,
   type MutationAttemptFailure,
 } from "../core/authority"
 import { defineMutation, defineProtocol } from "../core/protocol"
@@ -241,7 +242,7 @@ type TouchEnvelope = ReturnType<typeof touchEnvelope>
 
 type TouchRun = (
   tx: ContractTransaction
-) => Promise<Result<void, MutationAttemptFailure<unknown>>>
+) => Promise<MutationAcceptance | MutationAttemptFailure<unknown>>
 
 function windowAuthority(
   db: ContractDatabase,
@@ -295,7 +296,7 @@ function countingTouch(effect: string) {
   const run: TouchRun = async (tx) => {
     counter.attempts += 1
     await tx.insert(contractEffects).values({ effect })
-    return ok(undefined)
+    return { kind: "accepted", unchanged: true }
   }
 
   return { counter, run }
@@ -465,7 +466,7 @@ async function expireDuringContendedAttempt(
       throwMutationContention()
     }
     await tx.insert(contractEffects).values({ effect: "retried" })
-    return ok(undefined)
+    return { kind: "accepted", unchanged: true }
   })
 
   return { outcome, attempts, mutationId: envelope.mutationId }
@@ -589,7 +590,7 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
             )
           }
           await tx.insert(contractEffects).values({ effect: "serialization" })
-          return ok(undefined)
+          return { kind: "accepted", unchanged: true }
         },
       })
     }

@@ -9,9 +9,23 @@ export interface MutationInvocation<Name extends string, Args, Error = never> {
   readonly __error?: Error
 }
 
-type RefusalOfSchema<Schema> = Schema extends StandardSchemaV1
-  ? StandardSchemaV1.InferOutput<Schema>
-  : never
+/** The refusal schema type of a mutation that declares no refusal cases. */
+type NoRefusalSchema = StandardSchemaV1<never, never>
+
+/**
+ * The refusal schema {@link defineMutation} gives a mutation that declares
+ * none. It rejects every value, so a stored refusal for such a mutation fails
+ * closed like any other invalid stored refusal.
+ */
+const NO_REFUSALS: NoRefusalSchema = Object.freeze({
+  "~standard": Object.freeze({
+    version: 1,
+    vendor: "headcanon",
+    validate: () => ({
+      issues: [{ message: "This mutation declares no refusal cases" }],
+    }),
+  }),
+})
 
 /**
  * Rejects an argument schema whose parsed output is not itself a valid input.
@@ -42,7 +56,9 @@ export interface MutationContext {
  * the predictor and the server command receive that same value, and authority
  * parses it again and refuses it unless parsing leaves it unchanged. `predict`
  * must be pure and deterministic because later canons replay the same
- * invocation through it.
+ * invocation through it. `RefusalSchema` defaults to a schema that accepts no
+ * values, so a mutation that declares no refusal cases has the refusal type
+ * `never`.
  * @param args Arguments in the schema's parsed (output) form.
  * @returns A frozen, serializable named mutation invocation.
  */
@@ -51,14 +67,14 @@ export type MutationDefinition<
   Schema extends StandardSchemaV1,
   State,
   PredictionError,
-  RefusalSchema extends StandardSchemaV1 | undefined = undefined,
+  RefusalSchema extends StandardSchemaV1 = NoRefusalSchema,
 > = {
   (
     args: StandardSchemaV1.InferOutput<Schema>
   ): MutationInvocation<
     Name,
     StandardSchemaV1.InferOutput<Schema>,
-    PredictionError | RefusalOfSchema<RefusalSchema>
+    PredictionError | StandardSchemaV1.InferOutput<RefusalSchema>
   >
   readonly name: Name
   readonly args: Schema
@@ -67,9 +83,15 @@ export type MutationDefinition<
     args: StandardSchemaV1.InferOutput<Schema>,
     context: MutationContext
   ) => Result<State, PredictionError>
-} & (RefusalSchema extends StandardSchemaV1
-  ? { readonly refusal: RefusalSchema }
-  : { readonly refusal?: undefined })
+  // `refusal` stays a separate intersection member: in one object type, a
+  // definition written inline in `defineProtocol` fails its one-state check.
+} & {
+  /**
+   * Parses the authority refusals a receipt stores and replays. A mutation
+   * that declares no refusal cases has one that rejects every value.
+   */
+  readonly refusal: RefusalSchema
+}
 
 /**
  * The erased shape every {@link MutationDefinition} satisfies, used as a
@@ -81,6 +103,7 @@ export interface AnyMutationDefinition {
   (...args: never[]): unknown
   readonly name: string
   readonly args: StandardSchemaV1
+  readonly refusal: StandardSchemaV1
   readonly predict: (...args: never[]) => Result<unknown, unknown>
 }
 
@@ -198,7 +221,9 @@ function deepFreeze<Value>(value: Value): Value {
  * a valid input is a compile error. `predict` must be pure and deterministic
  * because pending invocations are replayed over later authoritative canons.
  * If `refusal` is supplied, its output schema defines the structured error
- * that may be stored and reproduced from a receipt. The definition is read
+ * that may be stored and reproduced from a receipt. Without it, the mutation
+ * declares no refusal cases: its refusal type is `never`, and a stored
+ * refusal for it fails closed on replay. The definition is read
  * once: later changes to the passed object do not affect the factory.
  *
  * @param definition Stable name, argument schema, pure predictor, and optional refusal schema.
@@ -210,11 +235,14 @@ export function defineMutation<
   Schema extends StandardSchemaV1,
   State,
   PredictionError,
-  RefusalSchema extends StandardSchemaV1 | undefined = undefined,
+  RefusalSchema extends StandardSchemaV1 = NoRefusalSchema,
 >(definition: {
   readonly name: Name
   readonly args: Schema & ParsedFormSchema<Schema>
-  /** Schema for the authority refusals a receipt stores and replays. */
+  /**
+   * Schema for the authority refusals a receipt stores and replays. Omit it
+   * when the command has no refusal cases.
+   */
   readonly refusal?: RefusalSchema
   readonly predict: (
     state: State,
@@ -229,9 +257,7 @@ export function defineMutation<
   Object.defineProperties(invoke, {
     name: { value: name, enumerable: true },
     args: { value: schema, enumerable: true },
-    ...(refusal === undefined
-      ? {}
-      : { refusal: { value: refusal, enumerable: true } }),
+    refusal: { value: refusal ?? NO_REFUSALS, enumerable: true },
     predict: { value: predict, enumerable: true },
   })
 
@@ -269,7 +295,11 @@ export function defineProtocol<
   const names = new Set<string>()
 
   for (const mutation of mutations) {
-    if (mutation.args === undefined || typeof mutation.predict !== "function") {
+    if (
+      mutation.args === undefined ||
+      mutation.refusal === undefined ||
+      typeof mutation.predict !== "function"
+    ) {
       throw new Error(`Invalid mutation definition: ${mutation.name}`)
     }
     if (names.has(mutation.name)) {
