@@ -1,6 +1,7 @@
 # Contributing to Headcanon
 
-The package documentation is in [`README-old.md`](README-old.md).
+The package documentation is in [`README.md`](README.md) and the guides in
+[`docs/`](docs).
 
 ## Layout
 
@@ -69,6 +70,7 @@ npm run lint
 npm run typecheck             # the package and gate scripts; no build
 npm run check:bundle-safety   # browser entries import nothing server-only; test doubles import no test framework
 npm run check:public-api-docs # every public export has JSDoc
+npm run check:doc-links       # doc links resolve; the README lists every export
 npm test                      # set HEADCANON_TEST_DATABASE_URL to run the Postgres suite
 npm run check:package         # builds; publint + Are the Types Wrong
 npm run check:fixture         # builds; type-checks the fixture with its generated route types

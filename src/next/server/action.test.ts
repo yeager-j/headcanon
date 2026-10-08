@@ -696,8 +696,9 @@ describe("Next mutation action", () => {
     )
   })
 
-  // README, Drizzle section: the binder fixes a command's context, so a
-  // command needs no type annotation, inline or declared on its own.
+  // docs/server-setup.md, "Bind your commands": the binder fixes a command's
+  // context, so a command needs no type annotation, inline or declared on its
+  // own.
   it("infers a bound command's context, args, evidence, and screened value", async () => {
     const binder = createMutationBinder({
       actor: () => "actor",

@@ -29,9 +29,9 @@ import { setFaults } from "./support/fixture-page"
  *    reads that state with `use()`, so the router suspends in a transition
  *    lane. React renders every pending transition lane as one batch, so no
  *    transition commits until the call answers. The package cannot end that
- *    hold: Next's `fetch` for the call takes no abort signal. README, "A
- *    Server Action that does not answer", tells adopters to bound it on the
- *    server instead.
+ *    hold: Next's `fetch` for the call takes no abort signal.
+ *    docs/server-setup.md#bound-database-and-network-waits tells adopters to
+ *    bound it on the server instead.
  * 5. The same queue is serial: a second Server Action call is not sent while
  *    the first is unanswered, so a `retryDelivery()` waits too. A navigation
  *    is not held: Next discards the pending call's router update and

@@ -111,8 +111,8 @@ function withRouterCarrier<
  * unanswered, no transition in the app commits and later Server Action calls
  * (`retryDelivery()` included) wait behind it. A navigation still proceeds.
  * Give the command's external work and database waits a deadline below the
- * platform's request limit. See README, "A Server Action that does not
- * answer".
+ * platform's request limit. See
+ * docs/server-setup.md#bound-database-and-network-waits.
  *
  * @param options Protocol and either generated action or explicit delivery dependencies.
  * @returns A predicted-root hook for the Next App Router.

@@ -145,9 +145,26 @@ When you need feedback or follow-up work, pass `onPrediction`, `onAcceptance`, o
 
 Recovery listeners let you show retry controls when delivery is uncertain or refreshed data falls behind.
 
-## Further reading
+## Entry points
 
-Documentation is coming soon:
+Import each part of Headcanon from the entry for where your code runs. Each entry's full API documentation is the JSDoc in its shipped types; your editor shows it on hover.
+
+| Entry                      | Use it in                                        | Main exports                                                                                                   |
+| -------------------------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `headcanon`                | Shared code for the browser and server           | `defineMutation`, `defineProtocol`, `defineCanon`, `defineAxis`, `acceptedStamp`, `withPollingFallback`        |
+| `headcanon/next/client`    | Next.js client components                        | `createNextPredictedRoot`, `createNextObservedRoot`, `useRouterRefresh`                                        |
+| `headcanon/react`          | React client components without the Next binding | `createPredictedRoot`, `createPredictedRootContext`, `createObservedRoot`, `useSnapshotRefresh`                |
+| `headcanon/server`         | Server commands, with or without Next.js         | `createMutationBinder`, `acceptMutation`, `refuseMutation`, `denyMutation`, `allowScreening`, `allowAdmission` |
+| `headcanon/next/server`    | Next.js Server Actions and loaders               | `createNextMutationAction`, `defineCachedCanon`, `axisCacheTag`, `finalizeExternalActionCommit`                |
+| `headcanon/drizzle`        | The server, with Drizzle and Postgres            | `createDrizzleMutationAuthority`, `matchesPostgresError`                                                       |
+| `headcanon/drizzle-schema` | Your Drizzle schema                              | `headcanonMutationReceipts`                                                                                    |
+| `headcanon/ably/channels`  | Shared Ably configuration                        | `ablyChannelNamespace`                                                                                         |
+| `headcanon/ably/client`    | The browser, with Ably                           | `createAblyAxisInvalidations`                                                                                  |
+| `headcanon/ably/server`    | The server, with Ably                            | `createAblyInvalidationPublisher`, `createAblyAxisTokenRequest`                                                |
+| `headcanon/testing`        | Tests                                            | `createInMemoryMutationAuthority`, `createInMemoryInvalidationAdapter`                                         |
+| `headcanon/testing/react`  | Tests with Vitest and Testing Library            | `verifyRefreshContract`                                                                                        |
+
+## Further reading
 
 - [Getting started](docs/getting-started.md) — a complete working feature.
 - [Server setup](docs/server-setup.md) — authentication, commands, and Drizzle.
@@ -155,4 +172,3 @@ Documentation is coming soon:
 - [React usage](docs/react.md) — shared state, feedback, and recovery.
 - [Realtime updates](docs/realtime.md) — Ably and polling fallback.
 - [Testing](docs/testing.md) — test helpers and the refresh adapter contract.
-- [API reference](docs/api.md) — package exports and options.

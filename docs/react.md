@@ -482,5 +482,5 @@ A snapshot refetch must update the canon passed to the root; returning fetched d
 - [Getting started](getting-started.md) — the complete note editor.
 - [Loading data](loading-data.md) — canon, cache tags, and refresh diagnosis.
 - [Server setup](server-setup.md) — commands, receipts, and bounded server work.
-- [Realtime updates](realtime.md) — planned guide to invalidation adapters and polling fallback.
-- [Testing](testing.md) — planned guide to testing roots and adapters.
+- [Realtime updates](realtime.md) — invalidation adapters and polling fallback.
+- [Testing](testing.md) — testing roots and adapters.

@@ -38,6 +38,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run check:bundle-safety
       - run: npm run check:public-api-docs
+      - run: npm run check:doc-links
       - run: npm test
       - run: npm run check:package
       # Generates the fixture's route types, then type-checks the fixture

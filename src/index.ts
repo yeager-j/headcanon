@@ -51,6 +51,6 @@ export {
 } from "./core/invalidation"
 
 // Diagnostics: read a canon's revisions while debugging coverage.
-// Application code does not need them. See docs/loading-data.md, "Know when
-// canon confirms a mutation".
+// Application code does not need them. See
+// docs/loading-data.md#know-when-canon-confirms-a-mutation.
 export { covers, revisionAt, revisionEntries } from "./core/revisions"
