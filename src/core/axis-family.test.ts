@@ -70,6 +70,13 @@ describe("defineAxis", () => {
     expect(defineAxis("notes", uuid).parse(axis)).toBeNull()
   })
 
+  it.each([undefined, null, 42, ["notes", NOTE_ID], { axis: "notes" }])(
+    "returns null for the non-string %j",
+    (axis) => {
+      expect(defineAxis("notes", uuid).parse(axis)).toBeNull()
+    }
+  )
+
   it.each([
     ["notes/", "empty-segment"],
     [`notes/${NOTE_ID}/extra`, "segment-count"],

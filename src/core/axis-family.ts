@@ -45,10 +45,11 @@ export interface AxisFamily<Key> {
 
   /**
    * Reads the key from an untrusted axis, such as one a browser requests.
-   * @returns `null` when the axis belongs to another family, a failure when
-   * it belongs to this family but its key is malformed, or the key.
+   * @returns `null` when the value is not a string or the axis belongs to
+   * another family, a failure when it belongs to this family but its key is
+   * malformed, or the key.
    */
-  parse(axis: string): Result<Key, AxisKeyError> | null
+  parse(axis: unknown): Result<Key, AxisKeyError> | null
 }
 
 /** How a family turns its key into segments and back. */
@@ -104,8 +105,8 @@ export function defineAxis(
   const codec = keyCodec(key)
   const prefix = family + AXIS_SEPARATOR
 
-  const parse = (axis: string): Result<unknown, AxisKeyError> | null => {
-    if (!axis.startsWith(prefix)) return null
+  const parse = (axis: unknown): Result<unknown, AxisKeyError> | null => {
+    if (typeof axis !== "string" || !axis.startsWith(prefix)) return null
 
     const segments = axis.slice(prefix.length).split(AXIS_SEPARATOR)
     const reason = segmentsProblem(codec.schemas, segments)
