@@ -2,7 +2,7 @@
 
 Headcanon needs confirmed server data and the revisions that describe it. Together, these form a **canon**. The client displays pending predictions over that canon until refreshed data confirms the accepted changes.
 
-This guide uses the notes table, `requireActor()`, and shared `noteAxis()` helper from [Getting started](getting-started.md).
+This guide uses the notes table, `requireActor()`, and the shared `noteAxis` axis family from [Getting started](getting-started.md).
 
 ## Choose a loader
 
@@ -41,7 +41,7 @@ export async function loadNoteCanon(noteId: string) {
 
   return defineCanon<NoteState>({
     value: { id: note.id, title: note.title },
-    revisions: { [noteAxis(note.id)]: note.revision },
+    revisions: { [noteAxis.of(note.id)]: note.revision },
   })
 }
 ```
@@ -103,13 +103,36 @@ Treat the returned value as immutable on the client. Changes belong in mutation 
 
 An **axis** is a stable name for an independently advancing revision. It can represent one record or a collection. Your storage model defines it; Headcanon does not infer dependencies from SQL queries.
 
-| View                                              | Possible axis                    | When to advance it                                                          |
-| ------------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------- |
-| One note                                          | `notes/<noteId>`                 | Whenever a write changes the note's tracked state.                          |
-| A workspace's note list                           | `workspaces/<workspaceId>/notes` | Whenever a write changes the list's membership, order, or displayed fields. |
-| A view combining note data and workspace settings | Both the note and settings axes  | Advance each affected axis in the transaction that changes it.              |
+| View                                              | Possible axis                   | When to advance it                                                          |
+| ------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------- |
+| One note                                          | `notes/<noteId>`                | Whenever a write changes the note's tracked state.                          |
+| A workspace's note list                           | `workspace-notes/<workspaceId>` | Whenever a write changes the list's membership, order, or displayed fields. |
+| A view combining note data and workspace settings | Both the note and settings axes | Advance each affected axis in the transaction that changes it.              |
 
-These names are examples, not package conventions. Use the same helper in loaders and commands. Include tenant identity when record IDs are not globally unique; receipt scope does not automatically namespace axes.
+These names are examples, not package conventions. Define each kind of axis once with `defineAxis`, and use that family in loaders, commands, and token policy:
+
+```ts
+// lib/notes/protocol.ts
+import { defineAxis } from "headcanon"
+import { z } from "zod"
+
+export const noteAxis = defineAxis("notes", z.uuid())
+export const workspaceNotesAxis = defineAxis("workspace-notes", z.uuid())
+```
+
+An axis is the family name, then each key segment, separated by `/`. A key segment must not be empty or contain `/`, and its schema must accept it unchanged. Give each family a different name.
+
+Receipt scope does not namespace axes. When record IDs are not globally unique, put the tenant in the key. Give the family an object of named segments; the axis lists them in that order:
+
+```ts
+export const tenantNoteAxis = defineAxis("tenant-notes", {
+  tenantId: z.uuid(),
+  noteId: z.string().regex(/^[a-z0-9-]+$/),
+})
+
+tenantNoteAxis.of({ tenantId, noteId }) // "tenant-notes/<tenantId>/<noteId>"
+tenantNoteAxis.parse(axis) // ok({ tenantId, noteId }), a failure, or null
+```
 
 Every writer must persist the new revision with its data changes. This includes imports, administrative tools, and background jobs. Do not reset a revision or reuse an axis for unrelated data.
 
@@ -204,7 +227,7 @@ async function readCachedNoteCanon(noteId: string, userId: string) {
 
   return defineCachedCanon<NoteState>({
     value: { id: note.id, title: note.title },
-    revisions: { [noteAxis(note.id)]: note.revision },
+    revisions: { [noteAxis.of(note.id)]: note.revision },
   })
 }
 ```

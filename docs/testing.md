@@ -193,7 +193,7 @@ afterEach(cleanup)
 
 it("keeps the prediction until canon covers the accepted revision", async () => {
   const noteId = "00000000-0000-4000-8000-000000000001"
-  const axis = noteAxis(noteId)
+  const axis = noteAxis.of(noteId)
   const canon = (title: string, revision: number) =>
     defineCanon({
       value: { id: noteId, title },
@@ -279,7 +279,7 @@ afterEach(cleanup)
 
 it("loads canon after an invalidation", async () => {
   const noteId = "00000000-0000-4000-8000-000000000001"
-  const axis = noteAxis(noteId)
+  const axis = noteAxis.of(noteId)
   const canon = (title: string, revision: number) =>
     defineCanon({
       value: { id: noteId, title },

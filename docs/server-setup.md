@@ -122,7 +122,7 @@ export const renameNoteBinding = notesBinder.bind(renameNote, {
 
     if (!updated) throwMutationContention()
 
-    stamp.record(noteAxis(args.noteId), nextRevision)
+    stamp.record(noteAxis.of(args.noteId), nextRevision)
     return acceptMutation()
   },
 })

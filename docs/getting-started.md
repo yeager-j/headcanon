@@ -51,7 +51,7 @@ Create a module that both the browser and server can import:
 
 ```ts
 // lib/notes/protocol.ts
-import { axisId, defineMutation, defineProtocol } from "headcanon"
+import { defineAxis, defineMutation, defineProtocol } from "headcanon"
 import { err, ok } from "serializable-result"
 import { z } from "zod"
 
@@ -60,9 +60,7 @@ export type NoteState = {
   title: string
 }
 
-export function noteAxis(noteId: string) {
-  return axisId(`notes/${noteId}`)
-}
+export const noteAxis = defineAxis("notes", z.uuid())
 
 export function isValidTitle(title: string) {
   return title.trim().length > 0 && title.length <= 200
@@ -94,7 +92,7 @@ The mutation defines its inputs, public refusal values, and a **predictor**: a f
 
 Keep the predictor pure. It can run again when newer server data arrives, so it must not write data, make requests, or produce side effects.
 
-`noteAxis()` gives each note a stable address for revision tracking. The server write and data loader must use the same address.
+`noteAxis` is an **axis family**. `noteAxis.of(noteId)` gives each note a stable address, `notes/<noteId>`, for revision tracking. The server write and data loader must use the same address. `of` throws if the ID is not a UUID. `noteAxis.parse(axis)` reads the note ID back from an address; [Realtime](realtime.md) uses it to check the axes a browser asks for.
 
 ## 4. Connect Headcanon to your server
 
@@ -200,7 +198,7 @@ export const applyNotesMutation = createNextMutationAction({
           throwMutationContention()
         }
 
-        stamp.record(noteAxis(args.noteId), nextRevision)
+        stamp.record(noteAxis.of(args.noteId), nextRevision)
         return acceptMutation()
       },
     }),
@@ -257,7 +255,7 @@ export async function loadNoteCanon(noteId: string) {
       title: note.title,
     },
     revisions: {
-      [noteAxis(note.id)]: note.revision,
+      [noteAxis.of(note.id)]: note.revision,
     },
   })
 }

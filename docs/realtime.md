@@ -4,7 +4,7 @@ Realtime invalidations tell mounted views that newer server data exists. They co
 
 Headcanon includes an Ably publisher, a client subscription adapter, and an optional polling fallback. Your application owns token issuance and decides which axes each viewer may observe.
 
-This guide extends the note editor in [Getting started](getting-started.md), using its notes table, `requireActor()`, and `noteAxis()` helper. It assumes you already have an Ably app and a server API key permitted to publish and issue subscribe-capable tokens for your chosen channels.
+This guide extends the note editor in [Getting started](getting-started.md), using its notes table, `requireActor()`, and `noteAxis` axis family. It assumes you already have an Ably app and a server API key permitted to publish and issue subscribe-capable tokens for your chosen channels.
 
 ## How updates reach a view
 
@@ -138,13 +138,18 @@ import { createAblyAxisTokenRequest } from "headcanon/ably/server"
 import { z } from "zod"
 
 const requestSchema = z.object({
-  axes: z.array(z.string().min(1)).min(1).max(128),
+  axes: z.array(z.string()).min(1).max(128),
 })
 
-/** The note ID in a `noteAxis()` value, or null for any other axis. */
-function noteIdOf(axis: string): string | null {
-  const id = /^notes\/(.+)$/.exec(axis)?.[1]
-  return id !== undefined && z.uuid().safeParse(id).success ? id : null
+/** The note IDs in the requested axes, or null if any axis is not a note axis. */
+function requestedNoteIds(axes: readonly string[]): string[] | null {
+  const noteIds = new Set<string>()
+  for (const axis of axes) {
+    const noteId = noteAxis.parse(axis)
+    if (!noteId?.ok) return null
+    noteIds.add(noteId.value)
+  }
+  return [...noteIds]
 }
 
 export async function POST(request: Request) {
@@ -155,12 +160,11 @@ export async function POST(request: Request) {
     return new Response("Invalid axis request", { status: 400 })
   }
 
-  const noteIds = parsed.data.axes.map(noteIdOf)
-  if (noteIds.some((id) => id === null)) {
+  const requestedIds = requestedNoteIds(parsed.data.axes)
+  if (!requestedIds) {
     return new Response("Forbidden", { status: 403 })
   }
 
-  const requestedIds = [...new Set(noteIds as string[])]
   const ownedNotes = await db
     .select({ id: notes.id })
     .from(notes)
@@ -174,7 +178,7 @@ export async function POST(request: Request) {
   const tokenRequest = await createAblyAxisTokenRequest({
     rest: ablyRest,
     namespace: realtimeNamespace,
-    axes: ownedNotes.map(({ id }) => noteAxis(id)),
+    axes: ownedNotes.map(({ id }) => noteAxis.of(id)),
     clientId: actor.userId,
     ttlMs: 10 * 60 * 1000,
   })
@@ -185,7 +189,7 @@ export async function POST(request: Request) {
 }
 ```
 
-The axes passed to `createAblyAxisTokenRequest` come from `noteAxis()` and rows the server read, never from the browser's strings. The helper derives each axis's channel and grants `subscribe` on exactly those channels. The axis count limit is an application choice in this example, not a Headcanon adapter limit.
+`noteAxis.parse` returns `null` for an axis of another family and a failure for a note axis with an ID that is not a UUID, so the endpoint refuses both. The axes passed to `createAblyAxisTokenRequest` come from `noteAxis.of()` and rows the server read, never from the browser's strings. The helper derives each axis's channel and grants `subscribe` on exactly those channels. The axis count limit is an application choice in this example, not a Headcanon adapter limit.
 
 Extend the policy when roots observe collection or workspace axes. Apply your tenant and viewer rules to every axis. When you set `clientId`, take it from trusted server identity; a viewer without an account gets none (see [Serve viewers without an account](#serve-viewers-without-an-account)). Never pass the browser's axes through unchecked or grant a wildcard merely to make attachment succeed. Issued capabilities must also be permitted by your Ably API key. See [Ably capabilities](https://ably.com/docs/auth/capabilities).
 
@@ -291,7 +295,7 @@ This example extends the endpoint above. It assumes the notes table has a boolea
 import { getActor } from "@/lib/auth"
 import { and, eq, inArray, or } from "drizzle-orm"
 
-// requestSchema and noteIdOf as above.
+// requestSchema and requestedNoteIds as above.
 
 export async function POST(request: Request) {
   const actor = await getActor()
@@ -301,15 +305,14 @@ export async function POST(request: Request) {
     return new Response("Invalid axis request", { status: 400 })
   }
 
-  const noteIds = parsed.data.axes.map(noteIdOf)
-  if (noteIds.some((id) => id === null)) {
+  const requestedIds = requestedNoteIds(parsed.data.axes)
+  if (!requestedIds) {
     return new Response("Forbidden", { status: 403 })
   }
 
   const readableByViewer = actor
     ? or(eq(notes.readableByLink, true), eq(notes.ownerId, actor.userId))
     : eq(notes.readableByLink, true)
-  const requestedIds = [...new Set(noteIds as string[])]
   const readableNotes = await db
     .select({ id: notes.id })
     .from(notes)
@@ -321,7 +324,7 @@ export async function POST(request: Request) {
   const tokenRequest = await createAblyAxisTokenRequest({
     rest: ablyRest,
     namespace: realtimeNamespace,
-    axes: readableNotes.map(({ id }) => noteAxis(id)),
+    axes: readableNotes.map(({ id }) => noteAxis.of(id)),
     clientId: actor?.userId,
     ttlMs: 5 * 60 * 1000,
   })
