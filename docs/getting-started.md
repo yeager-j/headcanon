@@ -374,7 +374,7 @@ The generated Server Action requests a route refresh after acceptance. The clien
 
 This example covers a successful save and basic refusal feedback. Before shipping, add recovery listeners so users can retry uncertain delivery or stalled refreshes.
 
-Further guides are planned:
+Read these guides next:
 
 - [React usage](react.md) — recovery controls, mutation milestones, and sharing a root across components.
 - [Server setup](server-setup.md) — command policies, transaction limits, and receipt management.

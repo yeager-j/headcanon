@@ -68,7 +68,8 @@
     "dist",
     "src",
     "!src/**/*.test.ts",
-    "drizzle"
+    "drizzle",
+    "docs"
   ],
   "engines": {
     "node": ">=22"
@@ -83,6 +84,7 @@
     "typecheck": "tsc --noEmit",
     "check:bundle-safety": "node scripts/check-bundle-safety.mjs",
     "check:public-api-docs": "node scripts/check-public-api-docs.mjs",
+    "check:doc-links": "node scripts/check-doc-links.mjs",
     "check:package": "npm run build && publint && attw --pack . --profile esm-only",
     "check:fixture": "npm run build && npm run typecheck -w headcanon-fixture",
     "test": "vitest run",

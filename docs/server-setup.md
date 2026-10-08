@@ -254,7 +254,7 @@ Do not treat finalization as a durable background job or a once-only hook. For e
 
 To notify other clients, supply an `invalidations` publisher to `createNextMutationAction`. Omit it when using route refresh alone.
 
-The publisher owns its failure reporter: give `onFailure` to the publisher, such as `createAblyInvalidationPublisher`. Publication failures and timeouts are reported without changing an accepted outcome. The action waits up to one second for publication; it does not provide a durable publication retry queue. See the planned [Realtime updates](realtime.md) guide for transport setup and recovery.
+The publisher owns its failure reporter: give `onFailure` to the publisher, such as `createAblyInvalidationPublisher`. Publication failures and timeouts are reported without changing an accepted outcome. The action waits up to one second for publication; it does not provide a durable publication retry queue. See [Realtime updates](realtime.md) for transport setup and recovery.
 
 ## Bound database and network waits
 
@@ -340,6 +340,7 @@ Keep stored refusal values readable across deployments for as long as their rece
 ## Further reading
 
 - [Getting started](getting-started.md) — the complete note editor.
-- [Loading data](loading-data.md) — planned guide to revisions, loaders, and caching.
-- [React usage](react.md) — planned guide to feedback and delivery recovery.
+- [Loading data](loading-data.md) — revisions, loaders, and caching.
+- [React usage](react.md) — feedback and delivery recovery.
+- [Realtime updates](realtime.md) — publishers, token endpoints, and polling fallback.
 - [Testing](testing.md) — command tests and the in-memory authority.

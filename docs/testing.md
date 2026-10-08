@@ -351,7 +351,7 @@ Hook tests cannot verify that Next delivers new canon or that a real token permi
 3. Edit one note from two authorized sessions. Confirm the second view refreshes after publication. With the owner-only policy in Realtime updates, both sessions must belong to the owner.
 4. Disconnect realtime, change data elsewhere, then reconnect. Confirm a gap refresh catches the view up. Test polling separately if enabled.
 
-The repository's own [contributor guide](../CONTRIBUTING.md) lists package and browser test commands. Those commands test Headcanon itself; your application needs its own tests for permissions, storage, and UI behavior.
+The repository's own [contributor guide](https://github.com/yeager-j/headcanon/blob/main/CONTRIBUTING.md) lists package and browser test commands. Those commands test Headcanon itself; your application needs its own tests for permissions, storage, and UI behavior.
 
 ## Further reading
 

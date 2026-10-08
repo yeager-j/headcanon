@@ -296,5 +296,5 @@ If your app cannot afford a reload, load the data on the client and refresh it w
 
 - [Getting started](getting-started.md) — the complete note editor.
 - [Server setup](server-setup.md) — guarded writes, accepted stamps, and finalization.
-- [React usage](react.md) — planned guide to root lifetime and recovery controls.
-- [Realtime updates](realtime.md) — planned guide to changes from other clients.
+- [React usage](react.md) — root lifetime and recovery controls.
+- [Realtime updates](realtime.md) — changes from other clients.
