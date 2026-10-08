@@ -184,6 +184,14 @@ Each callback reports its own mutation. If the interface permits overlapping sub
 
 If prediction fails, only `onPrediction` runs: no receipt is created and the later stages do not open. Once a receipt exists, acceptance and canonization callbacks can report terminal failures as well as success. Their error shape is `MutationLifecycleError`; a server's public refusal is under `result.error.error` when `result.error.kind === "domain"`.
 
+To name a mutation's public error type in your own code, such as a save hook that covers several mutations, use `MutationErrorOf` from `headcanon`. It is the union of the mutation's prediction error and its refusal:
+
+```ts
+import type { MutationErrorOf } from "headcanon"
+
+type SaveError = MutationErrorOf<typeof renameNote>
+```
+
 ### Await a receipt for sequential work
 
 Use the receipt promises when an event handler needs to wait for a particular stage:

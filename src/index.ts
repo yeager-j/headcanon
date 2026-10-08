@@ -20,6 +20,7 @@ export {
   type AnyMutationDefinition,
   type MutationContext,
   type MutationDefinition,
+  type MutationErrorOf,
   type MutationInvocation,
   type MutationRefusalOf,
   type ProtocolDefinition,
