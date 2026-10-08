@@ -29,7 +29,15 @@ export type MutationLifecycleError<Error> =
    */
   | { readonly kind: "delivery-cancelled" }
   /** Delivery has a final answer that is not a domain refusal. */
-  | TerminalDeliveryFailure
+  | (TerminalDeliveryFailure & {
+      /**
+       * An earlier delivery of this mutation may have committed: an attempt
+       * threw an ordinary error or outlived `DELIVERY_WAIT_MS`, or the root
+       * restored the mutation from an earlier page. `false` means every
+       * earlier attempt in this page was answered without a commit.
+       */
+      readonly mayHaveCommitted: boolean
+    })
   /** The root unmounted before the mutation settled. */
   | {
       readonly kind: "root-unmounted"
@@ -101,8 +109,9 @@ export class RetryableDeliveryError extends Error {
  * authority could admit the same envelope later, from another copy of it.
  *
  * `stale-client` means the server does not know the endpoint this client
- * called, because the client's code is older than the deployed build: nothing
- * was written, and only a reload of the page can deliver the mutation.
+ * called, because the client's code is older than the deployed build. This
+ * delivery wrote nothing, and only a reload of the page can deliver the
+ * mutation.
  */
 export type TerminalDeliveryFailure =
   | { readonly kind: "denied" }
@@ -523,7 +532,13 @@ export function createLedgerStore<Invocation, Error>(
     }
 
     if (error instanceof TerminalDeliveryError) {
-      settle(mutationId, err(error.failure))
+      settle(
+        mutationId,
+        err({
+          ...error.failure,
+          mayHaveCommitted: lifetime.mayHaveCommitted,
+        })
+      )
       hold.resolve()
       return
     }
