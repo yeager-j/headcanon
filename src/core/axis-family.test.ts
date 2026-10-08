@@ -90,6 +90,23 @@ describe("defineAxis", () => {
     })
   })
 
+  it.each(["\uD800", "\uDC00", "a\uD800b"])(
+    "rejects the lone-surrogate key %j, which UTF-8 would merge with U+FFFD",
+    (key) => {
+      const axis = defineAxis("keys", anyString)
+
+      expect(axis.parse(`keys/${key}`)).toEqual({
+        ok: false,
+        error: {
+          code: "invalid-axis-key",
+          reason: "key-rejected",
+          axis: `keys/${key}`,
+        },
+      })
+      expect(() => axis.of(key)).toThrow('Invalid key for axis family "keys"')
+    }
+  )
+
   it.each(["", "a/b", "/", "not-a-uuid"])(
     "throws when of receives the invalid key %j",
     (key) => {
@@ -176,7 +193,7 @@ describe("defineAxis", () => {
     }
   })
 
-  it.each(["a", " ", "%2F", "__proto__", "..", "\uD800", "ü", "a b"])(
+  it.each(["a", " ", "%2F", "__proto__", "..", "\uD83D\uDE00", "ü", "a b"])(
     "builds and parses the key %j back to itself",
     (key) => {
       const axis = defineAxis("keys", anyString)

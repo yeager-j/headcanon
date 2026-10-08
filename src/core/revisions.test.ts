@@ -43,9 +43,29 @@ describe("revision", () => {
 describe("axis addresses", () => {
   it("rejects an empty axis at construction", () => {
     expect(() => axisId("")).toThrow(
-      "An axis address must be a non-empty string"
+      "An axis address must be a non-empty string with no lone surrogate"
     )
   })
+
+  // UTF-8 turns each lone surrogate into U+FFFD, so these would share a
+  // channel name and cache tag with "items/\uFFFD" and with each other.
+  it.each(["items/\uD800", "items/\uDC00", "items/\uD800\uD800", "\uDFFF"])(
+    "rejects the lone-surrogate axis %j everywhere it is admitted",
+    (axis) => {
+      expect(() => axisId(axis)).toThrow("no lone surrogate")
+      expect(revisionVector({ [axis]: 1 })).toEqual({
+        ok: false,
+        error: {
+          code: "invalid-revision-vector",
+          reason: "invalid-axis",
+          axis,
+        },
+      })
+      expect(
+        axisInvalidation({ eventId: "event-1", axis, revision: 1 }).ok
+      ).toBe(false)
+    }
+  )
 
   it("rejects an empty axis inside an untrusted vector", () => {
     expect(revisionVector({ "": 1 })).toEqual({
@@ -59,7 +79,14 @@ describe("axis addresses", () => {
   })
 
   it("admits only axes that a realtime invalidation can also carry", () => {
-    for (const axis of ["entity/one", " ", "__proto__", "a\u0000b"]) {
+    for (const axis of [
+      "entity/one",
+      " ",
+      "__proto__",
+      "a\u0000b",
+      "items/\uFFFD",
+      "items/\uD83D\uDE00",
+    ]) {
       const parsed = revisionVector({ [axis]: 1 })
       expect(parsed.ok).toBe(true)
       expect(

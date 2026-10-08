@@ -4,6 +4,7 @@ import { err, ok, type Result } from "serializable-result"
 import { plainRecordViolation } from "./admission"
 import type { MutationInvocation } from "./protocol"
 import { sha256Hex } from "./sha256"
+import { isWellFormedUnicode } from "./unicode"
 
 /**
  * The exact receipt identity material for one parsed protocol invocation.
@@ -50,21 +51,6 @@ export type CanonicalInvocationError = {
     | "non-enumerable-property"
     | "unsupported-array-property"
   readonly path: readonly (string | number)[]
-}
-
-function hasValidUnicode(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index)
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1)
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
-      index += 1
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      return false
-    }
-  }
-
-  return true
 }
 
 function invalid(
@@ -126,7 +112,9 @@ function validateJsonValue(
   if (typeof value === "string") {
     const sizeError = accountString(budget, value, path)
     if (sizeError) return sizeError
-    return hasValidUnicode(value) ? undefined : invalid("invalid-unicode", path)
+    return isWellFormedUnicode(value)
+      ? undefined
+      : invalid("invalid-unicode", path)
   }
   if (typeof value === "number") {
     return Number.isFinite(value)
@@ -213,7 +201,7 @@ function validateJsonValue(
     for (const [key, propertyValue] of entries) {
       const keySizeError = accountString(budget, key, [...path, key])
       if (keySizeError) return keySizeError
-      if (!hasValidUnicode(key)) {
+      if (!isWellFormedUnicode(key)) {
         return invalid("invalid-unicode", [...path, key])
       }
 
