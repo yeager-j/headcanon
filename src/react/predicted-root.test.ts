@@ -2072,6 +2072,37 @@ describe("createPredictedRoot — persisted queue", () => {
     expect(stored()).toBeUndefined()
   })
 
+  it("never writes over a stored queue it could not read", () => {
+    // The read fails once; the store itself still accepts writes. A write
+    // from this root would replace a queue it never saw.
+    const restored = storedEnvelope({ amount: 1 })
+    const memory = createMemoryPersistence([restored])
+    let readFails = true
+    const persistence: QueuePersistence = {
+      load() {
+        if (!readFails) return memory.persistence.load()
+        readFails = false
+        throw new DOMException("blocked", "SecurityError")
+      },
+      save: (envelopes) => memory.persistence.save(envelopes),
+    }
+
+    const firstPage = mountPersisted(persistence)
+    expect(firstPage.result.current.status.pending).toBe(0)
+    expect(memory.stored()).toEqual([restored])
+
+    act(() => {
+      mutate(firstPage.result, add({ amount: 2 }))
+    })
+    expect(firstPage.result.current.value).toBe(2)
+    expect(memory.stored()).toEqual([restored])
+    firstPage.unmount()
+
+    const { result, send } = mountPersisted(persistence)
+    expect(send).toHaveBeenCalledWith(restored)
+    expect(result.current.value).toBe(1)
+  })
+
   it("keeps working in memory when the store throws", async () => {
     const persistence: QueuePersistence = {
       load() {
@@ -2117,10 +2148,13 @@ describe("sessionStoragePersistence", () => {
   })
 
   it("replaces a stored value that is not JSON", () => {
+    // Text that is not JSON is a value the root cannot use, not a failed
+    // read, so the root cleans it up.
     globalThis.sessionStorage.setItem("counter-queue", "{not json")
     const persistence = sessionStoragePersistence("counter-queue")
 
     const { result } = mountPersisted(persistence)
+    expect(globalThis.sessionStorage.getItem("counter-queue")).toBeNull()
     act(() => {
       mutate(result, add({ amount: 1 }))
     })

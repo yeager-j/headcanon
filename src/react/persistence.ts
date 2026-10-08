@@ -14,25 +14,32 @@ import type { AnyProtocolDefinition } from "../core/protocol"
 /**
  * A synchronous store for a predicted root's pending envelopes. The root reads
  * it once per mount and writes the whole queue after each change, before
- * `mutate` returns. Either method may throw: the root then keeps its queue in
- * memory only.
+ * `mutate` returns. Either method may throw; the root's queue in memory stays
+ * complete.
  *
- * The root checks every loaded envelope and drops any it cannot deliver, so
- * the store needs no validation of its own.
+ * The root checks every loaded value and drops any envelope it cannot
+ * deliver, so the store needs no validation of its own.
  */
 export interface QueuePersistence {
-  /** Returns the stored queue, or `undefined` when nothing is stored. */
+  /**
+   * Returns the stored queue, or `undefined` when nothing is stored. Throw
+   * only when the store cannot be read: that root then never writes to the
+   * store, so a later mount can still restore what it holds. Return a value
+   * the root cannot use, rather than throwing, to have the root replace it.
+   */
   load(): unknown
   /**
    * Replaces the stored queue with `envelopes`, in mutation order. An empty
-   * list means no mutation is pending.
+   * list means no mutation is pending. When it throws, the root writes again
+   * on the next change.
    */
   save(envelopes: readonly MutationEnvelope<unknown>[]): void
 }
 
 /**
  * Stores a predicted root's pending envelopes in `sessionStorage` under `key`,
- * as JSON. The key is removed when no mutation is pending.
+ * as JSON. The key is removed when no mutation is pending. Text under the key
+ * that is not JSON is replaced.
  *
  * `sessionStorage` belongs to one tab: a reload of the tab keeps the queue, a
  * closed tab loses it. Give each mounted root its own key.
@@ -53,7 +60,14 @@ export function sessionStoragePersistence(key: string): QueuePersistence {
   return {
     load() {
       const stored = globalThis.sessionStorage.getItem(key)
-      return stored === null ? undefined : (JSON.parse(stored) as unknown)
+      if (stored === null) return undefined
+
+      try {
+        return JSON.parse(stored) as unknown
+      } catch {
+        // The read worked; the text is a value the root drops and replaces.
+        return stored
+      }
     },
     save(envelopes) {
       if (envelopes.length === 0) {
@@ -80,7 +94,9 @@ const MEMORY_QUEUE_STORAGE: QueueStorage<never> = {
 
 /**
  * Wraps `persistence` so that no storage failure reaches the ledger. A failed
- * write leaves the last stored queue; the next change writes again.
+ * write leaves the last stored queue; the next change writes again. After a
+ * failed read the root never writes: its queue would replace a stored queue
+ * it could not see.
  */
 export function createQueueStorage<Invocation>(
   persistence: QueuePersistence | undefined,
@@ -88,18 +104,23 @@ export function createQueueStorage<Invocation>(
 ): QueueStorage<Invocation> {
   if (!persistence) return MEMORY_QUEUE_STORAGE
 
+  let readFailed = false
+
   return {
     load() {
       let stored: unknown
       try {
         stored = persistence.load()
       } catch {
+        readFailed = true
         return []
       }
 
       return parseStoredQueue<Invocation>(stored, protocol)
     },
     save(envelopes) {
+      if (readFailed) return
+
       try {
         persistence.save(envelopes)
       } catch {

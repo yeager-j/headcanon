@@ -411,7 +411,7 @@ Restored mutations count in `status.pending` and `status.delivery`. No `mutate` 
 
 The root checks every stored envelope before it restores it. It drops an envelope for a different protocol ID, an unknown mutation name, an envelope with missing or extra fields (including a missing `createdAt`), arguments that the mutation's schema refuses or changes (the server admits only arguments in parsed form), and a repeated mutation ID. A stored value that is not valid JSON is dropped completely. A schema that validates asynchronously cannot be checked in time, so its mutations are dropped too. Dropped mutations are not reported.
 
-If storage is missing or refuses a read or write, for example in a private window or when it is full, `mutate` still works and the queue stays in memory.
+If storage is missing or refuses a read or write, for example in a private window or when it is full, `mutate` still works and the queue stays in memory. A root that cannot read storage never writes to it either, so whatever it holds stays there for a later mount. Text under the key that is not JSON counts as a stored value the root cannot use, and the root replaces it.
 
 Know the limits:
 
