@@ -1,8 +1,10 @@
 import { ok, type Result } from "serializable-result"
 
 import {
+  checkDeliveryAge,
   contentionRetry,
   createStampAccumulator,
+  deliveryAgePolicy,
   prepareTerminalOutcome,
   receiptKey,
   replayReceipt,
@@ -70,11 +72,13 @@ export interface InMemoryMutationAuthority<
  * fixtures. It has no test-framework dependency, so it runs in any test runner
  * or in a Next server module. Each attempt gets an isolated copy of the state;
  * an attempt that wrote state commits only if no other commit landed since it
- * began, otherwise it reruns like a serialization failure.
- * @param options The initial state, actor scope, and optional copy and retry
- *   policy.
+ * began, otherwise it reruns like a serialization failure. Before each
+ * attempt it checks the delivery window against `Date.now()`, so fake timers
+ * that set the system time control it.
+ * @param options The initial state, actor scope, and optional copy, retry,
+ *   and delivery-window policy.
  * @returns An isolated in-memory mutation authority.
- * @throws Error when `maxAttempts` is not a positive integer.
+ * @throws Error when `maxAttempts`, `maxDeliveryAgeMs`, or `clockSkewToleranceMs` is invalid.
  */
 export function createInMemoryMutationAuthority<
   State,
@@ -92,9 +96,20 @@ export function createInMemoryMutationAuthority<
   readonly clone?: (value: State) => State
   /** Attempts per mutation before it returns `contention`. Defaults to 2. */
   readonly maxAttempts?: number
+  /**
+   * Oldest `createdAt` a new execution accepts, in milliseconds before now.
+   * A positive safe integer; defaults to 7 days.
+   */
+  readonly maxDeliveryAgeMs?: number
+  /**
+   * How far `createdAt` may be ahead of now, in milliseconds. A non-negative
+   * safe integer; defaults to 1 hour.
+   */
+  readonly clockSkewToleranceMs?: number
 }): InMemoryMutationAuthority<State, Actor, Refusal> {
   const clone = options.clone ?? ((value: State) => structuredClone(value))
   const retry = contentionRetry({ maxAttempts: options.maxAttempts })
+  const deliveryAge = deliveryAgePolicy(options)
 
   let state = clone(options.initialState)
   let version = 0
@@ -175,7 +190,13 @@ export function createInMemoryMutationAuthority<
       return withReceiptLock(key, async () => {
         const recorded = receipts.get(key)
         if (recorded) return replayReceipt(recorded, request)
-        return retry(request.mutationId, () => attempt(key, request, run))
+
+        return retry(request.mutationId, async () => {
+          const admitted = checkDeliveryAge(deliveryAge, request, Date.now())
+          if (!admitted.ok) return admitted
+
+          return attempt(key, request, run)
+        })
       })
     },
     read: () => clone(state),

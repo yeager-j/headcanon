@@ -277,6 +277,10 @@ An ordinary delivery error, a response that exceeds the root's 10-second wait, o
 
 `retryDelivery()` resends the original envelope with the same mutation ID and a fresh automatic retry budget. It does nothing unless delivery is uncertain. Do not call `mutate` again to retry the same intent: that creates a new mutation ID and can apply the change twice. A late server answer can still settle the original receipt.
 
+The resent envelope also keeps its original `createdAt`. The server refuses a new execution of an envelope older than its maximum delivery age (7 days by default). While the server still has a receipt for the mutation, a retry gets the stored outcome at any age. After the server deletes old receipts, a retry gets `undeliverable` with `error.code` `"delivery-expired"`, even if the first attempt committed and only its response was lost. Before you offer to make the change again, load current data and check whether it is already saved.
+
+The same rule applies to envelopes sent when the root unmounts and to any queue that stores envelopes and sends them later, such as one kept in `sessionStorage`. Such a queue must keep each envelope's mutation ID and `createdAt` unchanged. See [Limit delivery age](server-setup.md#limit-delivery-age).
+
 The 10-second wait does not cancel a Next.js Server Action. An unanswered action can still hold up later Server Actions and transitions. Bound server work as described in [Server setup](server-setup.md#bound-database-and-network-waits).
 
 ### Stalled freshness
@@ -337,11 +341,16 @@ Local prediction failures are returned directly by `mutate`. After a receipt exi
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `"domain"`             | The server returned the mutation's public refusal, available as `error`.                                                                                                              |
 | `"denied"`             | The server denied access without exposing a reason.                                                                                                                                   |
-| `"undeliverable"`      | The server rejected the envelope, arguments, or a reused mutation ID; `error` contains the executor failure.                                                                          |
+| `"undeliverable"`      | The server rejected this delivery: the envelope, its arguments, a reused mutation ID, or a creation time outside the delivery window. `error` contains the executor failure.          |
 | `"stale-client"`       | The server does not know the Server Action this page called, because the page's code is older than the deployed build. The write was never made, and a retry cannot help.             |
 | `"replay-refused"`     | Replay refused a prediction that could still be withdrawn; `error` contains the predictor's refusal.                                                                                  |
 | `"delivery-cancelled"` | The Next binding passed framework control flow, such as a redirect, back to Next.js. This does not prove the write was rolled back: `finalizeAccepted` can redirect after the commit. |
 | `"root-unmounted"`     | The root stopped observing the mutation. `outcome` is `"accepted"` if acceptance was known, otherwise `"unknown"`.                                                                    |
+
+An `"undeliverable"` delivery wrote nothing, but it does not always prove that the mutation never committed. `error.code` tells you more:
+
+- `"delivery-expired"`: the envelope is older than the server's maximum delivery age. An earlier delivery of it may have committed if its receipt has since been deleted. Check current data before creating a replacement mutation.
+- `"delivery-from-future"`: the envelope's `createdAt` is too far ahead of the server's clock, usually because the device clock is wrong. Ask the user to correct the clock. The server could admit the same envelope later, for example from another tab.
 
 Show a "Refresh to update" prompt for `"stale-client"`. Only a page reload loads the new build. Each mutation that is still queued is also sent and also fails with `"stale-client"`, one at a time, so the root does not stop. Next.js can keep an action's ID across builds, so an old page can still save some changes after a deploy. Headcanon reports `"stale-client"` only when the server does not know the action's ID.
 

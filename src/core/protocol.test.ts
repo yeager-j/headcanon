@@ -178,6 +178,7 @@ function envelope(
   return {
     protocol: protocol.id,
     mutationId: "00000000-0000-4000-8000-000000000000",
+    createdAt: Date.now(),
     invocation,
   }
 }

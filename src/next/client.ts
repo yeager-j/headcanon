@@ -164,9 +164,10 @@ export function createNextObservedRoot(options: NextObservedRootOptions = {}) {
  * An accepted outcome becomes the stamp and a refused outcome the domain
  * refusal. Exhausted contention throws {@link RetryableDeliveryError}, so the
  * root redelivers the same envelope. A denial, or any other executor error
- * (the envelope, its arguments, or its mutation ID was refused), throws
- * {@link TerminalDeliveryError}: the answer is final and a retry would get it
- * again.
+ * (the envelope, its arguments, its mutation ID, or its creation time was
+ * refused), throws {@link TerminalDeliveryError} and ends the queue entry.
+ * A `delivery-expired` refusal proves only that this delivery wrote nothing,
+ * not that an earlier delivery of the envelope did not commit.
  *
  * When the server does not know the action's ID, because a new build was
  * deployed after this page loaded, the sender throws a `stale-client`

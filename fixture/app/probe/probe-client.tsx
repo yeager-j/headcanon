@@ -52,6 +52,7 @@ export function ProbeClient({
   ): MutationEnvelope<ReturnType<typeof addItem>> => ({
     protocol: fixtureProtocol.id,
     mutationId: globalThis.crypto.randomUUID(),
+    createdAt: Date.now(),
     invocation: addItem({ text }),
   })
 

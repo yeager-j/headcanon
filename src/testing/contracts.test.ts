@@ -1,6 +1,13 @@
+import { err } from "serializable-result"
 import { describe, expect, it } from "vitest"
 
-import { MutationContentionError } from "../core/authority"
+import {
+  checkDeliveryAge,
+  deliveryAgePolicy,
+  MutationContentionError,
+  type MutationAuthorityRequest,
+  type MutationDeliveryAgeError,
+} from "../core/authority"
 import type { InvalidationSubscription } from "../core/invalidation"
 import type { AxisId } from "../core/revisions"
 import {
@@ -54,6 +61,58 @@ function withAuthority(
   authority: Partial<Authority>
 ): Fixture {
   return { ...fixture, authority: { ...fixture.authority, ...authority } }
+}
+
+const DEFAULT_WINDOW = deliveryAgePolicy({})
+
+/** Whether the default window refuses `request` now with `code`. */
+function refusedWith(
+  request: MutationAuthorityRequest<unknown, unknown>,
+  code: MutationDeliveryAgeError["code"]
+): boolean {
+  const admitted = checkDeliveryAge(DEFAULT_WINDOW, request, Date.now())
+  return !admitted.ok && admitted.error.code === code
+}
+
+/** An adapter that admits envelopes the window refuses with `code`. */
+function ignoresWindow(code: MutationDeliveryAgeError["code"]) {
+  return (fixture: Fixture) =>
+    withAuthority(fixture, {
+      execute: (request, run) =>
+        fixture.authority.execute(
+          refusedWith(request, code)
+            ? { ...request, createdAt: Date.now() }
+            : request,
+          run
+        ),
+    })
+}
+
+/** An adapter that refuses by `code` before it looks up the receipt. */
+function checksWindowBeforeLookup(code: MutationDeliveryAgeError["code"]) {
+  return (fixture: Fixture) =>
+    withAuthority(fixture, {
+      execute: async (request, run) =>
+        refusedWith(request, code)
+          ? err({ code, mutationId: request.mutationId })
+          : fixture.authority.execute(request, run),
+    })
+}
+
+/** An adapter that reports `code` instead of a reused mutation ID. */
+function checksWindowBeforeCollision(code: MutationDeliveryAgeError["code"]) {
+  return (fixture: Fixture) =>
+    withAuthority(fixture, {
+      execute: async (request, run) => {
+        const outcome = await fixture.authority.execute(request, run)
+        const reused =
+          !outcome.ok && outcome.error.code === "mutation-id-reused"
+
+        return reused && refusedWith(request, code)
+          ? err({ code, mutationId: request.mutationId })
+          : outcome
+      },
+    })
 }
 
 /** Each mutant breaks one authority rule and names the case that must catch it. */
@@ -166,6 +225,52 @@ const authorityMutants: ReadonlyArray<{
     },
     caughtBy:
       "screens through a preflight executor that sees only committed state",
+  },
+  {
+    flaw: "executes an expired delivery",
+    breaks: ignoresWindow("delivery-expired"),
+    caughtBy: "refuses an expired delivery without running or recording it",
+  },
+  {
+    flaw: "executes a future-dated delivery",
+    breaks: ignoresWindow("delivery-from-future"),
+    caughtBy: "refuses a future-dated delivery without running or recording it",
+  },
+  {
+    flaw: "records an expired delivery as a denial",
+    breaks: (fixture) =>
+      withAuthority(fixture, {
+        execute: (request, run) =>
+          refusedWith(request, "delivery-expired")
+            ? fixture.authority.execute(
+                { ...request, createdAt: Date.now() },
+                async () => err({ kind: "denied" })
+              )
+            : fixture.authority.execute(request, run),
+      }),
+    caughtBy: "refuses an expired delivery without running or recording it",
+  },
+  {
+    flaw: "checks expiry before replaying a receipt",
+    breaks: checksWindowBeforeLookup("delivery-expired"),
+    caughtBy: "replays a recorded outcome to an expired redelivery",
+  },
+  {
+    flaw: "checks a future date before replaying a receipt",
+    breaks: checksWindowBeforeLookup("delivery-from-future"),
+    caughtBy: "replays a recorded outcome to a future-dated redelivery",
+  },
+  {
+    flaw: "reports expiry instead of a reused ID",
+    breaks: checksWindowBeforeCollision("delivery-expired"),
+    caughtBy:
+      "rejects an expired redelivery with another invocation as a reused ID",
+  },
+  {
+    flaw: "reports a future date instead of a reused ID",
+    breaks: checksWindowBeforeCollision("delivery-from-future"),
+    caughtBy:
+      "rejects a future-dated redelivery with another invocation as a reused ID",
   },
 ]
 

@@ -743,6 +743,29 @@ describe("createPredictedRoot", () => {
     await waitFor(() => expect(send).toHaveBeenCalledTimes(3))
   })
 
+  it("stamps the envelope's creation time once and resends it on retry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    const createdAt = Date.UTC(2026, 0, 1)
+    vi.setSystemTime(createdAt)
+    const { result, deliveries, send } = setup()
+
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+    expect(deliveries[0]?.envelope.createdAt).toBe(createdAt)
+
+    vi.setSystemTime(createdAt + 24 * 60 * 60 * 1000)
+    act(() => deliveries[0]?.reject(new Error("response lost")))
+    await waitFor(() =>
+      expect(result.current.status.delivery).toBe("uncertain")
+    )
+    act(() => result.current.retryDelivery())
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2))
+
+    expect(deliveries[1]?.envelope.createdAt).toBe(createdAt)
+    act(() => deliveries[1]?.resolve(ok(stamp(1))))
+  })
+
   it("waits for the server outcome when replay refuses a retried uncertain envelope", async () => {
     // Retry re-queues the envelope, but the lost attempt may have committed:
     // canon that holds the change must not withdraw it as replay-refused.
@@ -1068,6 +1091,31 @@ describe("createPredictedRoot — unmount does not discard unsent intent", () =>
 
     expect(deliveries[1]?.envelope.invocation.args.amount).toBe(2)
     expect(writes).toEqual([1, 2])
+  })
+
+  it("sends a queued envelope on the way down with its original creation time", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    const headCreatedAt = Date.UTC(2026, 0, 1)
+    const queuedCreatedAt = headCreatedAt + 1000
+    vi.setSystemTime(headCreatedAt)
+    const { result, deliveries, send, unmount } = setup()
+
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+    vi.setSystemTime(queuedCreatedAt)
+    act(() => {
+      mutate(result, add({ amount: 2 }))
+    })
+    vi.setSystemTime(queuedCreatedAt + 60 * 60 * 1000)
+
+    unmount()
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2))
+
+    expect(deliveries[0]?.envelope.createdAt).toBe(headCreatedAt)
+    expect(deliveries[1]?.envelope.createdAt).toBe(queuedCreatedAt)
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
   })
 
   it("does not re-send an envelope whose delivery may already have committed", async () => {

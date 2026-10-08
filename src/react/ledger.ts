@@ -85,11 +85,20 @@ export class RetryableDeliveryError extends Error {
 }
 
 /**
- * A deterministic answer that ends a mutation without acceptance or a domain
- * refusal. `denied` is the authority's private denial. `undeliverable` is an
- * executor refusal of the envelope itself (malformed envelope, arguments that
- * do not parse, a non-canonical invocation, or a reused mutation ID): the
- * authority did nothing, and the same envelope can never succeed.
+ * A final answer that ends a mutation's queue entry without acceptance or a
+ * domain refusal. `denied` is the authority's private denial.
+ *
+ * `undeliverable` is an executor refusal of this delivery: a malformed
+ * envelope, arguments that do not parse, a non-canonical invocation, a reused
+ * mutation ID, or an envelope outside the authority's delivery window
+ * (`delivery-expired` or `delivery-from-future`). This delivery wrote
+ * nothing. A delivery-window refusal does not prove that an earlier delivery
+ * of the same envelope did not commit: once the authority deletes that
+ * receipt, a committed mutation whose response was lost also comes back
+ * `delivery-expired`. Check current data before creating a replacement
+ * mutation. A `delivery-from-future` refusal ends this entry, but the
+ * authority could admit the same envelope later, from another copy of it.
+ *
  * `stale-client` means the server does not know the endpoint this client
  * called, because the client's code is older than the deployed build: nothing
  * was written, and only a reload of the page can deliver the mutation.
@@ -109,8 +118,7 @@ export type TerminalDeliveryFailure =
  * The `send` adapter throws this when delivery has a final answer that is
  * neither an accepted stamp nor a domain refusal. The root settles both
  * receipt milestones with the failure, drops the prediction, and moves on to
- * the next queued mutation. It never retries: redelivering the same envelope
- * would get the same answer.
+ * the next queued mutation. It never redelivers that envelope.
  */
 export class TerminalDeliveryError extends Error {
   /** The final answer; both receipt milestones settle with it. */

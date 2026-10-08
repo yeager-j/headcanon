@@ -2,6 +2,8 @@
 // re-export it here.
 export {
   createDrizzleMutationAuthority,
+  type DeleteExpiredReceiptsOptions,
+  type DrizzleMutationAuthority,
   type DrizzleMutationAuthorityOptions,
   type DrizzleMutationTransaction,
   type DrizzleMutationTx,
