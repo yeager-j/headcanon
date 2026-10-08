@@ -37,7 +37,7 @@ import {
   type MutationAuthorityContractHarness,
   type MutationAuthorityContractRefusal,
   type MutationAuthorityContractState,
-} from "../testing/contracts"
+} from "../testing/suites/authority-contract"
 import { deleteReceiptsOlderThan } from "./authority"
 import { headcanonMutationReceipts } from "./schema"
 

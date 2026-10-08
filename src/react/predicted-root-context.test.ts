@@ -16,11 +16,11 @@ import {
   axisId,
   defineMutation,
   defineProtocol,
-  revisionVector,
   type AcceptedStamp,
   type Canon,
   type MutationEnvelope,
 } from ".."
+import { revisionVector } from "../core/revisions"
 
 type CounterError = { readonly code: "prediction-refused" }
 type CounterArgs = { readonly amount: number }

@@ -143,7 +143,7 @@ Design a mutating root's loader to observe every axis its commands can stamp, ev
 
 Once an accepted mutation's stamp is covered, the root stops applying its prediction and its Canonization milestone succeeds (the receipt's `canonized` promise). Other pending mutations can still remain.
 
-For diagnostics, use `covers(canon.revisions, stamp.revisions)`, `revisionAt`, and `revisionEntries` from `headcanon`. Revision vectors are opaque: do not index them directly or cast a plain object into one.
+For diagnostics, use `covers(canon.revisions, stamp.revisions)`, `revisionAt`, and `revisionEntries` from `headcanon`. They are for debugging coverage; application code does not need them. Revision vectors are opaque: do not index them directly or cast a plain object into one.
 
 ## Cache a loader in Next.js
 

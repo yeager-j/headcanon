@@ -11,8 +11,8 @@ import {
   defineMutation,
   defineProtocol,
   type InvalidationPublisher,
-  type MutationAuthorityAdapter,
 } from "../.."
+import type { MutationAuthorityAdapter } from "../../core/authority"
 import {
   createDrizzleMutationAuthority,
   type DrizzleMutationTx,

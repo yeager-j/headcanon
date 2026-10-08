@@ -59,10 +59,6 @@
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
     },
-    "./testing/contracts": {
-      "types": "./dist/testing/contracts.d.ts",
-      "default": "./dist/testing/contracts.js"
-    },
     "./testing/react": {
       "types": "./dist/testing/react.d.ts",
       "default": "./dist/testing/react.js"

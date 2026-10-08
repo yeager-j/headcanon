@@ -1,78 +1,50 @@
+// `headcanon`: the framework-free API an application uses to define its
+// protocol, build canon, and choose an invalidation transport. Exports with
+// no use of their own name the types that public signatures in this and the
+// other entries use. Adapter internals (the authority receipt protocol,
+// payload parsers, and contract suites) are not exported.
 export {
   acceptedStamp,
   axisId,
-  covers,
   defineCanon,
-  revision,
-  revisionAt,
-  revisionEntries,
-  revisionVector,
   type AcceptedStamp,
   type AcceptedStampValidationError,
   type AxisId,
   type Canon,
   type Revision,
-  type RevisionValidationError,
   type RevisionVector,
-  type RevisionVectorValidationError,
 } from "./core/revisions"
 export {
   defineMutation,
   defineProtocol,
   type AnyMutationDefinition,
-  type InvocationOf,
-  type MutationDefinition,
-  type MutationErrorOf,
-  type MutationInvocation,
   type MutationContext,
+  type MutationDefinition,
+  type MutationInvocation,
   type MutationRefusalOf,
   type ProtocolDefinition,
   type ProtocolInvocation,
 } from "./core/protocol"
 export {
-  prepareCanonicalInvocation,
-  type CanonicalInvocation,
-  type CanonicalInvocationError,
-  type PreparedCanonicalInvocation,
-} from "./core/canonical-invocation"
-export {
-  checkDeliveryAge,
-  createStampAccumulator,
-  DEFAULT_CLOCK_SKEW_TOLERANCE_MS,
-  DEFAULT_MAX_DELIVERY_AGE_MS,
-  DEFAULT_RECEIPT_CLEANUP_MARGIN_MS,
-  deliveryAgePolicy,
-  MutationContentionError,
-  receiptRetentionMs,
-  type DeliveryAgePolicy,
-  type MutationAuthorityAdapter,
-  type MutationAuthorityAdapterError,
-  type MutationAuthorityRequest,
-  type MutationAttemptFailure,
-  type MutationDeliveryAgeError,
   type MutationEnvelope,
   type MutationExecutorError,
   type MutationTerminalOutcome,
   type ProtocolIdentity,
-  type ReadableStampAccumulator,
-  type StampAccumulator,
 } from "./core/authority"
 export {
-  axisInvalidation,
-  createLazyInvalidationAdapter,
   createNoRealtimeInvalidationAdapter,
-  isDegradedInvalidationStatus,
   withPollingFallback,
   withVisibilityRefresh,
-  type AxisInvalidationValidationError,
-  type AxisInvalidation,
   type InvalidationAdapter,
   type InvalidationPublicationFailure,
   type InvalidationPublicationFailureReporter,
   type InvalidationPublisher,
   type InvalidationStatus,
-  type InvalidationSubscription,
-  type LazyInvalidationAdapterOptions,
   type PollingFallbackOptions,
   type RetryableInvalidationAdapter,
 } from "./core/invalidation"
+
+// Diagnostics: read a canon's revisions while debugging coverage.
+// Application code does not need them. See docs/loading-data.md, "Know when
+// canon confirms a mutation".
+export { covers, revisionAt, revisionEntries } from "./core/revisions"

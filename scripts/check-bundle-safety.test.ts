@@ -265,9 +265,10 @@ describe("test-double graph", () => {
   })
 
   it("selects only the exact test-double export, not the suites", () => {
-    const entries = ["./testing", "./testing/contracts", "./testing/react"].map(
-      (key) => ({ key, source: `/src/${key}.ts` })
-    )
+    const entries = ["./testing", "./testing/react"].map((key) => ({
+      key,
+      source: `/src/${key}.ts`,
+    }))
 
     expect(testDoubleEntries(entries).map(({ key }) => key)).toEqual([
       "./testing",

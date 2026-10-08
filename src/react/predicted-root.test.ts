@@ -32,13 +32,12 @@ import {
   axisId,
   defineMutation,
   defineProtocol,
-  revisionVector,
   type AcceptedStamp,
   type Canon,
   type MutationContext,
   type MutationEnvelope,
 } from ".."
-import { revisionAt } from "../core/revisions"
+import { revisionAt, revisionVector } from "../core/revisions"
 import { DELIVERY_RETRY_DELAYS_MS } from "./ledger"
 import { createPredictedRootHook } from "./predicted-root"
 import { UNCOVERED_REFRESH_RETRY_MS } from "./refresh"

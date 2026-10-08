@@ -15,27 +15,29 @@ import { sha256Hex } from "../core/sha256"
 import {
   verifyInvalidationContract,
   type InvalidationContractHarness,
-} from "../testing/contracts"
+} from "../testing/suites/invalidation-contract"
 import {
   ABLY_AXIS_INVALIDATION_EVENT,
   ablyAxisChannelName,
-  ablyChannelNamespace,
   ablySubscribeCapability,
-} from "./channels"
+} from "./channel-names"
+import { ablyChannelNamespace } from "./channels"
 import {
   createAblyAxisInvalidations,
-  createAblyInvalidationAdapter,
   type AblyAxisInvalidationsOptions,
+  type AblyRealtimeClient,
+  type AblyRealtimeOptions,
+  type AblyTokenRequest,
+} from "./client"
+import {
+  createAblyAdapterCore,
   type AblyChannelState,
   type AblyChannelStateChange,
   type AblyConnectionState,
   type AblyConnectionStateChange,
   type AblyErrorInfo,
   type AblyRealtimeChannel,
-  type AblyRealtimeClient,
-  type AblyRealtimeOptions,
-  type AblyTokenRequest,
-} from "./client"
+} from "./realtime-adapter"
 import { createAblyInvalidationPublisher, type AblyRestClient } from "./server"
 
 // Hashing resolves in microtasks here, so once the fake service settles, one
@@ -236,10 +238,10 @@ function ablyContractHarness(): InvalidationContractHarness {
     create() {
       const service = new FakeAblyService()
       return {
-        adapter: createAblyInvalidationAdapter({
+        adapter: createAblyAdapterCore({
           realtime: service.realtime,
           namespace: "contract",
-        }),
+        }).adapter,
         publisher: createAblyInvalidationPublisher({
           rest: service.rest,
           namespace: "contract",
@@ -272,10 +274,10 @@ function subscription(axes: readonly AxisId[]) {
 }
 
 function adapterFor(service: FakeAblyService) {
-  return createAblyInvalidationAdapter({
+  return createAblyAdapterCore({
     realtime: service.realtime,
     namespace,
-  })
+  }).adapter
 }
 
 describe("Ably invalidation capability lifecycle", () => {
@@ -287,11 +289,12 @@ describe("Ably invalidation capability lifecycle", () => {
     const service = new FakeAblyService()
 
     for (const invalidNamespace of ["", " preview", "preview:", "a::b"]) {
-      expect(() =>
-        createAblyInvalidationAdapter({
-          realtime: service.realtime,
-          namespace: invalidNamespace,
-        })
+      expect(
+        () =>
+          createAblyAdapterCore({
+            realtime: service.realtime,
+            namespace: invalidNamespace,
+          }).adapter
       ).toThrow("Invalid Ably axis-channel namespace")
     }
   })
@@ -575,11 +578,11 @@ describe("Ably invalidation capability lifecycle", () => {
   it("rejects domain-bearing messages and messages for a different axis", async () => {
     const service = new FakeAblyService()
     const onMalformedMessage = vi.fn()
-    const adapter = createAblyInvalidationAdapter({
+    const adapter = createAblyAdapterCore({
       realtime: service.realtime,
       namespace,
       onMalformedMessage,
-    })
+    }).adapter
     const observed = subscription([axisA])
     adapter.subscribe(observed)
     await settle()

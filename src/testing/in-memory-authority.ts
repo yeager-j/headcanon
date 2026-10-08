@@ -37,7 +37,7 @@ export interface InMemoryTransaction<State> extends InMemoryReader<State> {
 
 /**
  * The authority `createInMemoryMutationAuthority` returns: a mutation
- * authority adapter plus controls for tests.
+ * authority to pass to `createMutationBinder`, plus controls for tests.
  */
 export interface InMemoryMutationAuthority<
   State,
@@ -68,8 +68,7 @@ export interface InMemoryMutationAuthority<
 }
 
 /**
- * Creates an in-memory {@link MutationAuthorityAdapter} for tests and local
- * fixtures. It has no test-framework dependency, so it runs in any test runner
+ * Creates an in-memory mutation authority for tests and local fixtures. It has no test-framework dependency, so it runs in any test runner
  * or in a Next server module. Each attempt gets an isolated copy of the state;
  * an attempt that wrote state commits only if no other commit landed since it
  * began, otherwise it reruns like a serialization failure. Before each

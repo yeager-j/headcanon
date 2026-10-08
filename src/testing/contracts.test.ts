@@ -10,23 +10,21 @@ import {
 } from "../core/authority"
 import type { InvalidationSubscription } from "../core/invalidation"
 import type { AxisId } from "../core/revisions"
-import {
-  createInMemoryInvalidationContractHarness,
-  verifyInvalidationContract,
-  verifyMutationAuthorityContract,
-} from "./contracts"
 import type { InMemoryReader, InMemoryTransaction } from "./in-memory-authority"
 import { createInMemoryInvalidationAdapter } from "./in-memory-invalidation"
 import {
   createInMemoryMutationAuthorityContractHarness,
   mutationAuthorityContractCases,
+  verifyMutationAuthorityContract,
   type MutationAuthorityContractFixture,
   type MutationAuthorityContractRefusal,
   type MutationAuthorityContractState,
 } from "./suites/authority-contract"
 import type { ContractCase } from "./suites/contract-case"
 import {
+  createInMemoryInvalidationContractHarness,
   invalidationContractCases,
+  verifyInvalidationContract,
   type InvalidationContractFixture,
 } from "./suites/invalidation-contract"
 

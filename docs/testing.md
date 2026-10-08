@@ -1,6 +1,6 @@
 # Testing
 
-Test the decisions your application owns: what a mutation predicts, who may run it, what the transaction saves, and what users see while confirmation is pending. Headcanon provides in-memory test doubles and reusable contracts for custom adapters.
+Test the decisions your application owns: what a mutation predicts, who may run it, what the transaction saves, and what users see while confirmation is pending. Headcanon provides in-memory test doubles and a reusable contract for custom refresh adapters.
 
 This guide uses Vitest and the note protocol from [Getting started](getting-started.md). The React examples control delivery and canon separately, so they need no running Next.js server, database, or Ably connection.
 
@@ -12,7 +12,7 @@ This guide uses Vitest and the note protocol from [Getting started](getting-star
 | Permissions, database writes, revision increments, and stored outcomes           | Run your server commands against an isolated test database.    |
 | Pending UI, acceptance, canonization, and recovery controls                      | Render a root or component with controlled delivery and canon. |
 | How a view responds to remote revisions                                          | Use the in-memory invalidation adapter.                        |
-| A custom authority, invalidation transport, or refresh adapter                   | Run the matching contract suite.                               |
+| A custom refresh adapter                                                         | Run the refresh contract suite.                                |
 | Server Actions, cache invalidation, route refresh, and realtime working together | Use browser tests against the running application.             |
 
 ## Install test dependencies
@@ -46,13 +46,12 @@ Next.js publishes no package `exports` map, so Node cannot resolve Headcanon's `
 
 Headcanon keeps its test helpers in separate entries:
 
-| Entry                         | Contents                                                                           | Requirements                                                           |
-| ----------------------------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `headcanon/testing`           | In-memory authority and invalidation bus                                           | No test framework; works with any runner or in a local server fixture. |
-| `headcanon/testing/contracts` | Authority and invalidation contract suites, harness types, and reference harnesses | Vitest; Node environment unless your adapter needs a DOM.              |
-| `headcanon/testing/react`     | Refresh contract suite and its harness type                                        | Vitest, Testing Library, and a DOM such as jsdom.                      |
+| Entry                     | Contents                                    | Requirements                                                           |
+| ------------------------- | ------------------------------------------- | ---------------------------------------------------------------------- |
+| `headcanon/testing`       | In-memory authority and invalidation bus    | No test framework; works with any runner or in a local server fixture. |
+| `headcanon/testing/react` | Refresh contract suite and its harness type | Vitest, Testing Library, and a DOM such as jsdom.                      |
 
-The contract entries support Vitest `^4.1.6`; the React contract also requires Testing Library `^16.3.2`. Import the framework-free doubles from `headcanon/testing`, not from a contract entry.
+The contract entry supports Vitest `^4.1.6` and Testing Library `^16.3.2`. Import the framework-free doubles from `headcanon/testing`, not from the contract entry.
 
 ## Test a predictor directly
 
@@ -316,38 +315,11 @@ Use `invalidations.setStatus("unavailable")` to test transport status UI. To exe
 
 For the integration in [Realtime updates](realtime.md), test your token endpoint's permission decisions: allow owned note axes, reject other users' axes, and reject a mixed request containing even one unauthorized axis. The application passes approved axes to `createAblyAxisTokenRequest`; `createAblyAxisInvalidations` handles the browser's token handshake. Application tests do not need to recreate channel hashing or capability parsing.
 
-## Verify custom adapters
+## Verify a custom refresh adapter
 
-Contract suites are for code that implements or wraps an adapter. You do not need to rerun Headcanon's reference adapters in every application.
+The refresh contract is for code that implements or wraps a refresh adapter. You do not need to rerun it against `useRouterRefresh` or `useSnapshotRefresh` in every application.
 
-Each verifier registers Vitest tests. Call it at the top level of a test file, outside `it` or a hook. To see the authority and invalidation contracts run against the reference implementations:
-
-```ts
-// test/reference-contracts.test.ts
-import {
-  createInMemoryInvalidationContractHarness,
-  createInMemoryMutationAuthorityContractHarness,
-  verifyInvalidationContract,
-  verifyMutationAuthorityContract,
-} from "headcanon/testing/contracts"
-
-verifyMutationAuthorityContract(
-  createInMemoryMutationAuthorityContractHarness()
-)
-verifyInvalidationContract(createInMemoryInvalidationContractHarness())
-```
-
-For your own adapter, replace the reference harness with one that creates fresh, isolated storage or subscriptions for each case:
-
-| Suite                             | What your harness supplies                                                                                                                                                                                                               | What it checks                                                                                                                                                                                                                                                                                                         |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `verifyMutationAuthorityContract` | An authority with its default attempt limit and default delivery window; storage initialized to `MUTATION_AUTHORITY_CONTRACT_INITIAL_STATE`; `load`, conditional `writeAxis`, `appendEffect`, `replace`, and receipt inspection methods. | Receipt replay and ID collisions, committed-state screening, atomic stamps, empty-stamp acceptance, rollback, refusal parsing, contention recovery, and the delivery window: an expired or future-dated envelope runs nothing and records nothing unless a receipt already exists. The suite owns the fixture command. |
-| `verifyInvalidationContract`      | `adapter`, `publisher`, `published()` entries, and `settled()` to wait until subscriptions are live.                                                                                                                                     | Axis filtering, one payload per axis, payload fields, and unsubscribe cleanup.                                                                                                                                                                                                                                         |
-| `verifyRefreshContract`           | A `useRefresh(request)` hook and a completion mode.                                                                                                                                                                                      | Acceptance grace, stalling after two uncovered refreshes, a fresh attempt budget on manual retry, and one refresh of a current root when the page becomes visible.                                                                                                                                                     |
-
-A custom adapter applies the delivery window with `deliveryAgePolicy` and `checkDeliveryAge` from `headcanon`. Check after the receipt lookup misses and before every attempt, with one clock that also timestamps the receipt. Delete a receipt only after `receiptRetentionMs` on that clock. The contract cannot see your clock, so also test that a delivery waiting on your lock is judged by the clock after the wait.
-
-The exported harness types describe each method. The authority suite uses `MutationAuthorityContractState` and `MUTATION_AUTHORITY_CONTRACT_AXES`; keep fixture writes transactional and make `writeAxis` compare the expected revision. For external resources, arrange test cleanup through your runner's hooks.
+`verifyRefreshContract` registers Vitest tests. Call it at the top level of a test file, outside `it` or a hook. Your harness supplies a `useRefresh(request)` hook and a completion mode. The suite checks acceptance grace, stalling after two uncovered refreshes, a fresh attempt budget on manual retry, and one refresh of a current root when the page becomes visible.
 
 A snapshot refresh contract can use the public hook directly:
 

@@ -3,17 +3,15 @@ import { describe, expect, it, vi } from "vitest"
 import {
   acceptedStamp,
   axisId,
-  axisInvalidation,
   covers,
   defineCanon,
-  revision,
   revisionAt,
   revisionEntries,
-  revisionVector,
   type Revision,
   type RevisionVector,
 } from ".."
-import { revisionVectorFrom } from "./revisions"
+import { axisInvalidation } from "./invalidation"
+import { revision, revisionVector, revisionVectorFrom } from "./revisions"
 
 function vector(input: Record<string, unknown>): RevisionVector {
   const result = revisionVector(input)
