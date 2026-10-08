@@ -1,6 +1,6 @@
 {
   "name": "headcanon",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Optimistic mutations for Next.js: believe your writes until canon says otherwise.",
   "keywords": [
     "optimistic-updates",
