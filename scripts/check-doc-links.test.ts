@@ -58,6 +58,12 @@ describe("heading slugs", () => {
 
     expect([...slugs]).toEqual(["setup", "setup-1", "setup-2"])
   })
+
+  it("gives a heading that collides with a generated slug the next free suffix", () => {
+    const slugs = headingSlugs(["# A", "# A", "# A-1"].join("\n"))
+
+    expect([...slugs]).toEqual(["a", "a-1", "a-1-1"])
+  })
 })
 
 describe("markdown links", () => {
@@ -78,6 +84,14 @@ describe("markdown links", () => {
       { line: 3, target: "#top" },
       { line: 5, target: "./react.md" },
     ])
+  })
+
+  it("finds links with double-quoted, single-quoted, and parenthesized titles", () => {
+    const links = markdownLinks(
+      ['[a](a.md "A")', "[b](b.md 'B')", "[c](c.md (C))"].join("\n")
+    )
+
+    expect(links.map((link) => link.target)).toEqual(["a.md", "b.md", "c.md"])
   })
 
   it("skips URL schemes, fenced code, and code spans", () => {
@@ -162,6 +176,28 @@ describe("doc links gate", () => {
       "README.md:3 links to missing file docs/api.md",
       "README.md:4 links to missing heading #gone in README.md",
       "src/index.ts:2 links to missing heading #old-heading in docs/guide.md",
+    ])
+  })
+
+  it("resolves a link's path without its query string", () => {
+    const root = tree({
+      "README.md": "[raw](docs/guide.md?plain=1#set-up)",
+      "docs/guide.md": "## Set up",
+    })
+
+    expect(checkDocLinks({ root, files: ["README.md"] }).failures).toEqual([])
+  })
+
+  it("rejects a guide link that leaves docs/ for a file the package does not ship", () => {
+    const root = tree({
+      "README.md": "# Top",
+      "CONTRIBUTING.md": "# Contributing",
+      "docs/guide.md":
+        "[contributing](../CONTRIBUTING.md)\n[readme](../README.md)",
+    })
+
+    expect(checkDocLinks({ root, files: ["docs/guide.md"] }).failures).toEqual([
+      "docs/guide.md:1 links to CONTRIBUTING.md, which the package does not ship beside docs/",
     ])
   })
 })

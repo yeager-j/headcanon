@@ -1,7 +1,7 @@
 // @ts-check
 
 import { existsSync, readdirSync, readFileSync } from "node:fs"
-import { dirname, join, relative } from "node:path"
+import { dirname, isAbsolute, join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 
 import { packageEntries, ROOT } from "./package-entries.mjs"
@@ -59,22 +59,26 @@ function filesUnder(root, directory) {
  * @returns {Set<string>} Every anchor a link into the file can use.
  */
 export function headingSlugs(markdown) {
-  const slugs = new Set()
+  // GitHub's allocation (github-slugger): a slug that is already taken,
+  // whether by a heading or by a generated suffix, gets the next free suffix.
   /** @type {Map<string, number>} */
-  const seen = new Map()
+  const occurrences = new Map()
 
   for (const line of maskFences(markdown).split("\n")) {
     const heading = /^ {0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(line)
     if (!heading?.[1]) continue
 
-    const slug = slugify(heading[1])
-    const count = seen.get(slug) ?? 0
-
-    seen.set(slug, count + 1)
-    slugs.add(count === 0 ? slug : `${slug}-${count}`)
+    const base = slugify(heading[1])
+    let slug = base
+    while (occurrences.has(slug)) {
+      const count = (occurrences.get(base) ?? 0) + 1
+      occurrences.set(base, count)
+      slug = `${base}-${count}`
+    }
+    occurrences.set(slug, 0)
   }
 
-  return slugs
+  return new Set(occurrences.keys())
 }
 
 /**
@@ -103,7 +107,8 @@ function slugify(headingText) {
  */
 export function markdownLinks(markdown) {
   const text = maskCodeSpans(maskFences(markdown))
-  const inline = /\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g
+  const inline =
+    /\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g
   const definition = /^ {0,3}\[[^\]]+\]:\s*<?([^\s>]+)>?/gm
   const matches = [...text.matchAll(inline), ...text.matchAll(definition)]
 
@@ -229,7 +234,8 @@ export function checkDocLinks({ root = ROOT, files = docFiles(root) } = {}) {
     for (const { line, target } of references) {
       referenceCount += 1
 
-      const [path = "", anchor] = target.split("#")
+      const [uri = "", anchor] = target.split("#")
+      const path = uri.split("?")[0] ?? ""
       const targetPath = path
         ? join(base, decodeURIComponent(path))
         : join(root, file)
@@ -237,6 +243,13 @@ export function checkDocLinks({ root = ROOT, files = docFiles(root) } = {}) {
 
       if (!existsSync(targetPath)) {
         failures.push(`${file}:${line} links to missing file ${shownTarget}`)
+        continue
+      }
+
+      if (isMarkdown && leavesPackagedDocs(root, file, targetPath)) {
+        failures.push(
+          `${file}:${line} links to ${shownTarget}, which the package does not ship beside docs/`
+        )
         continue
       }
 
@@ -250,6 +263,24 @@ export function checkDocLinks({ root = ROOT, files = docFiles(root) } = {}) {
   }
 
   return { failures, referenceCount }
+}
+
+/**
+ * Whether a link from a guide leaves `docs/` for a file other than the
+ * README. The guides ship in the package, where the rest of the repo
+ * (CONTRIBUTING, the fixture) is absent, so such a link breaks once installed.
+ *
+ * @param {string} root The repo root.
+ * @param {string} file The linking file, relative to `root`.
+ * @param {string} targetPath The link's absolute target.
+ * @returns {boolean} True when a `docs/` file links outside `docs/` and not to README.md.
+ */
+function leavesPackagedDocs(root, file, targetPath) {
+  if (!file.startsWith("docs/")) return false
+
+  const fromDocs = relative(join(root, "docs"), targetPath)
+  const insideDocs = !fromDocs.startsWith("..") && !isAbsolute(fromDocs)
+  return !insideDocs && targetPath !== join(root, "README.md")
 }
 
 /**
