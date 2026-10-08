@@ -12,9 +12,10 @@ import {
 import type { AnyProtocolDefinition } from "../core/protocol"
 
 /**
- * A synchronous store for a predicted root's pending envelopes. The root reads
- * it once per mount and writes the whole queue after each change, before
- * `mutate` returns. Either method may throw; the root's queue in memory stays
+ * A synchronous store for a predicted root's pending envelopes. The first
+ * root of a queue reads it once; a root that continues a queue still in
+ * memory does not. The queue is written whole after each change, before
+ * `mutate` returns. Either method may throw; the queue in memory stays
  * complete.
  *
  * The root checks every loaded value and drops any envelope it cannot
@@ -25,7 +26,8 @@ export interface QueuePersistence {
    * Names the stored queue. Roots of one factory whose stores have the same
    * key share one delivery queue: a root that mounts while an earlier root's
    * queue is still being delivered continues that queue instead of reading
-   * the store again.
+   * the store again. Mount one root per key at a time, and use each key with
+   * one factory only.
    */
   readonly key: string
   /**

@@ -3,6 +3,7 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { act, render, renderHook, waitFor } from "@testing-library/react"
 import {
+  Activity,
   createElement,
   startTransition,
   StrictMode,
@@ -2854,6 +2855,131 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     await expect(receipt.accepted).resolves.toEqual(ok(stamp(1)))
   })
 
+  it("continues a queue that a mutate after unmount started when the root remounts", async () => {
+    // The root was idle when it unmounted, so its ledger had left the
+    // factory's queues. A held `mutate` starts a new delivery; a root that
+    // mounts with the same key must queue behind it.
+    const { persistence, flaky } = createFlakyPersistence()
+    const { mount, deliveries, send } = createPersistedFactory(persistence)
+    const firstVisit = mount()
+    const staleMutate = firstVisit.result.current.mutate
+    firstVisit.unmount()
+    await act(async () => {})
+
+    flaky.failWrites = true
+    act(() => {
+      acceptedLocally(staleMutate(add({ amount: 1 })))
+    })
+    const { result } = mount()
+    act(() => {
+      mutate(result, add({ amount: 2 }))
+    })
+    await act(async () => {})
+    expect(send).toHaveBeenCalledOnce()
+
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    expect(
+      deliveries.map((delivery) => delivery.envelope.invocation.args.amount)
+    ).toEqual([1, 2])
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
+  })
+
+  it("releases a remounted root's Action when an earlier attempt's answer arrives", async () => {
+    vi.useFakeTimers()
+    const { persistence } = createMemoryPersistence()
+    const { deliveries, send } = createControlledSender()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const firstVisit = renderHook(() =>
+      useCounterPredictions({ canon: canon(0, 0) })
+    )
+    act(() => {
+      acceptedLocally(firstVisit.result.current.mutate(add({ amount: 1 })))
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DELIVERY_WAIT_MS)
+    })
+    firstVisit.unmount()
+    await act(async () => {})
+
+    const { result } = renderHook(() => {
+      const root = useCounterPredictions({ canon: canon(0, 0) })
+      const [unrelated, setUnrelated] = useState(0)
+      return { root, unrelated, setUnrelated }
+    })
+    await act(async () => {})
+    expect(send).toHaveBeenCalledTimes(2)
+    await act(async () => {
+      startTransition(() => result.current.setUnrelated(1))
+    })
+    expect(result.current.unrelated).toBe(0)
+
+    // The first attempt answers; the retry never does.
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    expect(result.current.root.status.delivery).toBe("idle")
+    expect(result.current.unrelated).toBe(1)
+  })
+
+  it("withdraws a cleanup mutation that the replacement root's canon refuses", async () => {
+    // The old root's canon permits the mutation; the replacement's canon
+    // refuses it before it was ever sent.
+    const { persistence } = createMemoryPersistence()
+    const { deliveries, send } = createControlledSender()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      send,
+      refresh: useNoRefresh,
+      persistence,
+    })
+    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+      name: "CounterRoot",
+    })
+    let latestMutate: CounterMutate | undefined
+    function AutosaveOnUnmount() {
+      const { mutate: mutateRoot } = CounterRoot.useRoot()
+      useEffect(() => {
+        latestMutate = mutateRoot
+      })
+      useEffect(
+        () => () => {
+          latestMutate?.(add({ amount: 1, refuseAt: 5 }))
+        },
+        []
+      )
+      return null
+    }
+    const roots = new Map<string, ReturnType<typeof useCounterPredictions>>()
+    function Replacement() {
+      roots.set("replacement", CounterRoot.useRoot())
+      return null
+    }
+    const view = render(
+      createElement(CounterRoot.Provider, {
+        key: "a",
+        canon: canon(0, 0),
+        children: createElement(AutosaveOnUnmount),
+      })
+    )
+
+    view.rerender(
+      createElement(CounterRoot.Provider, {
+        key: "b",
+        canon: canon(5, 1),
+        children: createElement(Replacement),
+      })
+    )
+    await act(async () => {})
+
+    expect(send).not.toHaveBeenCalled()
+    expect(deliveries).toHaveLength(0)
+    expect(roots.get("replacement")?.status.pending).toBe(0)
+    expect(roots.get("replacement")?.conflicts).toHaveLength(1)
+  })
+
   it("does not pass a background delivery's control flow to React", async () => {
     const signal = new Error("framework control flow")
     const propagated = vi.fn()
@@ -2896,6 +3022,44 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
       window.removeEventListener("error", captureSignal)
     }
   })
+})
+
+describe("createPredictedRoot — Activity", () => {
+  it.each([
+    ["without persistence", undefined],
+    ["with persistence", createMemoryPersistence().persistence],
+  ] as const)(
+    "delivers after a hidden root is revealed again, %s",
+    async (_label, persistence) => {
+      const { deliveries, send } = createControlledSender()
+      const useCounterPredictions = createPredictedRoot({
+        protocol: counterProtocol,
+        send,
+        refresh: useNoRefresh,
+        persistence,
+      })
+      const roots = new Map<string, ReturnType<typeof useCounterPredictions>>()
+      function Counter() {
+        roots.set("counter", useCounterPredictions({ canon: canon(0, 0) }))
+        return null
+      }
+      const shown = (mode: "visible" | "hidden") =>
+        createElement(Activity, { mode, children: createElement(Counter) })
+      const view = render(shown("visible"))
+      view.rerender(shown("hidden"))
+      await act(async () => {})
+      view.rerender(shown("visible"))
+      await act(async () => {})
+
+      act(() => {
+        acceptedLocally(roots.get("counter")!.mutate(add({ amount: 1 })))
+      })
+      await act(async () => {})
+
+      expect(send).toHaveBeenCalledOnce()
+      act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    }
+  )
 })
 
 describe("sessionStoragePersistence", () => {

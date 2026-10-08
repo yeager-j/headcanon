@@ -8,6 +8,7 @@ import {
   useEffect,
   useEffectEvent,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react"
@@ -550,6 +551,12 @@ export function createPredictedRootHook<
     return store
   }
 
+  /** The ledger now delivering `store`'s queue: a later root may have replaced it. */
+  const continuedLedger = (
+    store: LedgerStore<Invocation, Error>
+  ): LedgerStore<Invocation, Error> =>
+    (store.key !== undefined && queues.get(store.key)) || store
+
   return function usePredictedRoot({ canon, recoveryListeners }) {
     const [store] = useState(() => ledgerFor(canon))
     // Identifies this root to the ledger, which may outlive it.
@@ -584,10 +591,17 @@ export function createPredictedRootHook<
       }
     }, [observerToken, store])
 
+    // A `mutate` held past the root's unmount, such as a debounced save, no
+    // longer restores: it must not make an unmounted root observe again.
+    const unmounted = useRef(false)
     useEffect(() => {
+      unmounted.current = false
       restoreQueue()
       store.activate(observerToken)
-      return () => store.deactivate(observerToken)
+      return () => {
+        unmounted.current = true
+        store.deactivate(observerToken)
+      }
     }, [observerToken, restoreQueue, store])
 
     // Reconcile this render's projection, then deliver. Refusals first, so a
@@ -602,15 +616,15 @@ export function createPredictedRootHook<
         if (conflict) surfaceConflict(conflict)
       }
       store.canonize(canon.revisions)
-      store.deliverHead()
-    }, [canon, projection, store])
+      store.deliverHead(ledger.entries)
+    }, [canon, ledger.entries, projection, store])
 
     const mutate = useCallback(
       (
         invocation: Invocation,
         stageOverrides?: MutationStageListeners<Error>
       ): Result<MutationReceipt<Error>, Error> => {
-        restoreQueue()
+        if (!unmounted.current) restoreQueue()
         // Until a render includes the restored entries, every call predicts
         // over them and this render's entries, so calls in one event still
         // check against one value.
@@ -636,7 +650,8 @@ export function createPredictedRootHook<
           return result
         }
 
-        const receipt = store.enqueue(envelope)
+        const queue = unmounted.current ? continuedLedger(store) : store
+        const receipt = queue.enqueue(envelope)
         observeStages(receipt, stages, false)
         const result = ok(receipt)
         stages.onPrediction?.(result)
