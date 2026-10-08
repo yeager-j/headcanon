@@ -1387,8 +1387,9 @@ describe("createPredictedRoot — terminal and paused delivery", () => {
       deliveries[0]?.reject(new TerminalDeliveryError(failure))
     )
 
-    await expect(refused.accepted).resolves.toEqual(err(failure))
-    await expect(refused.canonized).resolves.toEqual(err(failure))
+    const settled = err({ ...failure, mayHaveCommitted: false })
+    await expect(refused.accepted).resolves.toEqual(settled)
+    await expect(refused.canonized).resolves.toEqual(settled)
     expect(result.current.status.delivery).toBe("sending")
     expect(result.current.value).toBe(2)
     expect(send).toHaveBeenCalledTimes(2)
@@ -1414,7 +1415,7 @@ describe("createPredictedRoot — terminal and paused delivery", () => {
       )
     )
 
-    const staleClient = err({ kind: "stale-client" })
+    const staleClient = err({ kind: "stale-client", mayHaveCommitted: false })
     const mutation = { id: receipt.id, restored: false }
     expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(staleClient, mutation)
     expect(onCanonization).toHaveBeenCalledExactlyOnceWith(
@@ -1423,6 +1424,73 @@ describe("createPredictedRoot — terminal and paused delivery", () => {
     )
     expect(result.current.value).toBe(0)
     expect(result.current.status.delivery).toBe("idle")
+  })
+
+  it("reports that a stale-client retry may have committed after a lost response", async () => {
+    // The first attempt commits, but its response is lost. A deploy then
+    // replaces the build, so the retry reaches an endpoint the server does
+    // not know.
+    const { result, deliveries } = setup()
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+    await act(async () => deliveries[0]?.reject(new Error("response lost")))
+    expect(result.current.status.delivery).toBe("uncertain")
+
+    act(() => result.current.retryDelivery())
+    await act(async () =>
+      deliveries[1]?.reject(new TerminalDeliveryError({ kind: "stale-client" }))
+    )
+
+    await expect(receipt.accepted).resolves.toEqual(
+      err({ kind: "stale-client", mayHaveCommitted: true })
+    )
+  })
+
+  it("reports that a terminal retry may have committed after an unanswered attempt", async () => {
+    vi.useFakeTimers()
+    const { result, deliveries } = setup()
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DELIVERY_WAIT_MS)
+    })
+    expect(result.current.status.delivery).toBe("uncertain")
+
+    act(() => result.current.retryDelivery())
+    await act(async () =>
+      deliveries[1]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+    )
+
+    await expect(receipt.accepted).resolves.toEqual(
+      err({ kind: "denied", mayHaveCommitted: true })
+    )
+  })
+
+  it("reports that a terminal answer did not commit after only retryable misses", async () => {
+    vi.useFakeTimers()
+    const { result, deliveries } = setup()
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+    await act(async () =>
+      deliveries[0]?.reject(new RetryableDeliveryError("contention"))
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DELIVERY_RETRY_DELAYS_MS[0])
+    })
+
+    await act(async () =>
+      deliveries[1]?.reject(new TerminalDeliveryError({ kind: "stale-client" }))
+    )
+
+    await expect(receipt.accepted).resolves.toEqual(
+      err({ kind: "stale-client", mayHaveCommitted: false })
+    )
   })
 
   it("queues intent recorded while the head is uncertain behind that head", async () => {
@@ -1629,7 +1697,9 @@ describe("createPredictedRoot — persisted queue", () => {
     await act(async () =>
       deliveries[1]?.reject(new TerminalDeliveryError({ kind: "denied" }))
     )
-    await expect(second.accepted).resolves.toEqual(err({ kind: "denied" }))
+    await expect(second.accepted).resolves.toEqual(
+      err({ kind: "denied", mayHaveCommitted: false })
+    )
     expect(stored()).toBeUndefined()
   })
 
@@ -2026,6 +2096,25 @@ describe("createPredictedRoot — persisted queue", () => {
     expect(onPrediction).not.toHaveBeenCalled()
   })
 
+  it("reports that a restored mutation's terminal answer may have committed", async () => {
+    // The page before the reload may have sent it.
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence } = createMemoryPersistence([restored])
+    const onAcceptance = vi.fn()
+    const { deliveries } = mountPersisted(persistence, {
+      mutationListeners: { onAcceptance },
+    })
+
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "stale-client" }))
+    )
+
+    expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(
+      err({ kind: "stale-client", mayHaveCommitted: true }),
+      { id: restored.mutationId, restored: true }
+    )
+  })
+
   it("delivers a restored mutation once under Strict Mode", async () => {
     const restored = storedEnvelope({ amount: 1 })
     const { persistence } = createMemoryPersistence([restored])
@@ -2324,7 +2413,9 @@ describe("createPredictedRoot — persisted queue", () => {
 
     deliveries[0]?.reject(new TerminalDeliveryError(refusal))
     unmount()
-    await expect(head.accepted).resolves.toEqual(err(refusal))
+    await expect(head.accepted).resolves.toEqual(
+      err({ ...refusal, mayHaveCommitted: false })
+    )
     await act(async () => {})
 
     expect(send).toHaveBeenCalledOnce()

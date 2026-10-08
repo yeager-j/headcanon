@@ -350,7 +350,7 @@ Local prediction failures are returned directly by `mutate`. After a receipt exi
 | `"domain"`             | The server returned the mutation's public refusal, available as `error`.                                                                                                              |
 | `"denied"`             | The server denied access without exposing a reason.                                                                                                                                   |
 | `"undeliverable"`      | The server rejected this delivery: the envelope, its arguments, a reused mutation ID, or a creation time outside the delivery window. `error` contains the executor failure.          |
-| `"stale-client"`       | The server does not know the Server Action this page called, because the page's code is older than the deployed build. The write was never made, and a retry cannot help.             |
+| `"stale-client"`       | The server does not know the Server Action this page called, because the page's code is older than the deployed build. This delivery wrote nothing, and a retry cannot help.          |
 | `"replay-refused"`     | Replay refused a prediction that could still be withdrawn; `error` contains the predictor's refusal.                                                                                  |
 | `"delivery-cancelled"` | The Next binding passed framework control flow, such as a redirect, back to Next.js. This does not prove the write was rolled back: `finalizeAccepted` can redirect after the commit. |
 | `"root-unmounted"`     | The root stopped observing the mutation. `outcome` is `"accepted"` if acceptance was known, otherwise `"unknown"`.                                                                    |
@@ -359,6 +359,19 @@ An `"undeliverable"` delivery wrote nothing, but it does not always prove that t
 
 - `"delivery-expired"`: the envelope is older than the server's maximum delivery age. An earlier delivery of it may have committed if its receipt has since been deleted. Check current data before creating a replacement mutation.
 - `"delivery-from-future"`: the envelope's `createdAt` is too far ahead of the server's clock, usually because the device clock is wrong. Ask the user to correct the clock. The server could admit the same envelope later, for example from another tab.
+
+`"denied"`, `"undeliverable"`, and `"stale-client"` also carry `mayHaveCommitted`. It is `true` when an earlier delivery of the same mutation may have committed: an attempt threw an ordinary error or got no answer within `DELIVERY_WAIT_MS`, so delivery became uncertain, or the root restored the mutation after a reload (see [Keep the queue across a reload](#keep-the-queue-across-a-reload)). The final answer then describes only the last delivery, and the change may exist on the server. It is `false` when every earlier attempt in this page was answered and none committed.
+
+```ts
+onAcceptance(result) {
+  if (result.ok || result.error.kind !== "stale-client") return
+  showNotice(
+    result.error.mayHaveCommitted
+      ? "Your change could not be confirmed. Refresh to check it."
+      : "Refresh to update."
+  )
+}
+```
 
 Show a "Refresh to update" prompt for `"stale-client"`. Only a page reload loads the new build. Each mutation that is still queued is also sent and also fails with `"stale-client"`, one at a time, so the root does not stop. Next.js can keep an action's ID across builds, so an old page can still save some changes after a deploy. Headcanon reports `"stale-client"` only when the server does not know the action's ID.
 

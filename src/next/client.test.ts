@@ -300,7 +300,7 @@ describe("Next action golden path", () => {
     const action = vi.fn<GuardedAction>(async () => ok({ kind: "denied" }))
     const { receipt, result } = mountAction(action)
 
-    const denied = err({ kind: "denied" } as const)
+    const denied = err({ kind: "denied", mayHaveCommitted: false } as const)
     await expect(receipt.accepted).resolves.toEqual(denied)
     await expect(receipt.canonized).resolves.toEqual(denied)
     expect(result.current.value).toBe(0)
@@ -323,6 +323,7 @@ describe("Next action golden path", () => {
       const undeliverable = err({
         kind: "undeliverable",
         error: executorError,
+        mayHaveCommitted: false,
       } as const)
       await expect(receipt.accepted).resolves.toEqual(undeliverable)
       await expect(receipt.canonized).resolves.toEqual(undeliverable)
@@ -338,7 +339,10 @@ describe("Next action golden path", () => {
     })
     const { receipt, result } = mountAction(action)
 
-    const staleClient = err({ kind: "stale-client" } as const)
+    const staleClient = err({
+      kind: "stale-client",
+      mayHaveCommitted: false,
+    } as const)
     await expect(receipt.accepted).resolves.toEqual(staleClient)
     await expect(receipt.canonized).resolves.toEqual(staleClient)
     expect(result.current.value).toBe(0)
@@ -358,7 +362,10 @@ describe("Next action golden path", () => {
     })
     if (!second?.ok) throw new Error("Next action prediction refused")
 
-    const staleClient = err({ kind: "stale-client" } as const)
+    const staleClient = err({
+      kind: "stale-client",
+      mayHaveCommitted: false,
+    } as const)
     await expect(first.accepted).resolves.toEqual(staleClient)
     await expect(second.value.accepted).resolves.toEqual(staleClient)
     await waitFor(() => expect(result.current.status.pending).toBe(0))

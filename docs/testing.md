@@ -253,7 +253,7 @@ Add cases for the behavior your UI exposes:
 - A local refusal leaves the value unchanged and never calls `send`.
 - A server refusal removes the prediction and shows the public refusal.
 - An ordinary delivery error makes delivery uncertain. `retryDelivery()` resends the same mutation ID, and later queued mutations wait while the head remains uncertain.
-- A sender that throws `new TerminalDeliveryError({ kind: "stale-client" })` settles the receipt with that failure and never makes delivery uncertain. Assert the "Refresh to update" prompt your UI shows.
+- A sender that throws `new TerminalDeliveryError({ kind: "stale-client" })` settles the receipt with that failure and never makes delivery uncertain. Assert the "Refresh to update" prompt your UI shows. The receipt adds `mayHaveCommitted: false` on a first attempt; make the sender throw an ordinary error first, then call `retryDelivery()`, to test the `true` case.
 - New canon causes a pending predictor to refuse during replay. Assert the conflict and the resulting visible value.
 - Canon stays behind an accepted stamp. The root eventually stalls; `retryRefresh()` requests data without sending the mutation again.
 
