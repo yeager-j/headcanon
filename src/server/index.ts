@@ -6,13 +6,17 @@ export {
 } from "../core/authority"
 export {
   createMutationBinder,
+  type CommandChecks,
   type MutationBinder,
   type MutationBinderIdentity,
   type MutationBinding,
   type MutationCommand,
+  type OperationBinding,
+  type OperationCommand,
 } from "./binder"
 export {
   acceptMutation,
+  acceptOperation,
   allowAdmission,
   allowMutation,
   allowMutationScreening,
@@ -22,4 +26,6 @@ export {
   type MutationAdmission,
   type MutationCommandDecision,
   type MutationScreening,
+  type OperationAcceptance,
+  type OperationCommandDecision,
 } from "./outcomes"

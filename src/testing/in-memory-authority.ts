@@ -14,7 +14,7 @@ import {
   type MutationAuthorityAdapter,
   type MutationAuthorityAdapterError,
   type MutationAuthorityRequest,
-  type MutationTerminalOutcome,
+  type RecordedTerminalOutcome,
   type StampAccumulator,
   type StoredReceipt,
 } from "../core/authority"
@@ -145,9 +145,9 @@ export function createInMemoryMutationAuthority<
     run: (
       tx: InMemoryTransaction<State>,
       stamp: StampAccumulator
-    ) => Promise<Result<void, MutationAttemptFailure<Refusal>>>
+    ) => Promise<Result<unknown, MutationAttemptFailure<Refusal>>>
   ): Promise<
-    Result<MutationTerminalOutcome<Refusal>, MutationAuthorityAdapterError>
+    Result<RecordedTerminalOutcome<Refusal>, MutationAuthorityAdapterError>
   > => {
     const startedAt = version
     let draft = clone(state)
@@ -162,7 +162,7 @@ export function createInMemoryMutationAuthority<
     const stamp = createStampAccumulator()
     const concurrentUpdate = contention.shift()
 
-    let attempted: Result<void, MutationAttemptFailure<Refusal>>
+    let attempted: Result<unknown, MutationAttemptFailure<Refusal>>
     try {
       attempted = await run(tx, stamp)
     } finally {
@@ -172,7 +172,7 @@ export function createInMemoryMutationAuthority<
     const { stored, terminal } = prepareTerminalOutcome(
       attempted,
       stamp,
-      request.parseRefusal
+      request
     )
     if (attempted.ok && wrote) {
       if (version !== startedAt) throwMutationContention()

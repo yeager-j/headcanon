@@ -5,17 +5,28 @@ import { ok, type Result } from "serializable-result"
 import {
   executePreparedMutation,
   prepareMutationRequest,
+  type AttemptDecision,
   type MutationAuthorityAdapter,
   type MutationExecutorError,
   type MutationTerminalOutcome,
+  type PreparedMutationRequest,
   type ProtocolIdentity,
+  type RecordedTerminalOutcome,
+  type StampAccumulator,
 } from "../../core/authority"
 import type { InvalidationPublisher } from "../../core/invalidation"
+import {
+  operationRegistry,
+  type AnyOperationDefinition,
+  type OperationActionOutcome,
+  type OperationRefusalOf,
+} from "../../core/operation"
 import type {
   AnyMutationDefinition,
   AnyProtocolDefinition,
   MutationRefusalOf,
 } from "../../core/protocol"
+import type { AcceptedStamp } from "../../core/revisions"
 import {
   assertValidBindings,
   type AnyMutationBinding,
@@ -23,9 +34,15 @@ import {
   type MutationBinder,
   type MutationBinding,
   type MutationCommand,
+  type OperationBinding,
+  type OperationCommand,
   type ValidBindings,
 } from "../../server/binder"
-import { parseMutationRefusal } from "../../server/refusal"
+import type {
+  MutationAdmission,
+  MutationScreening,
+} from "../../server/outcomes"
+import { parseStoredValue } from "../../server/refusal"
 import { finalizeStamp } from "./revalidation"
 
 /**
@@ -141,61 +158,223 @@ export function createNextMutationAction<
     if (!binding) {
       throw new Error(`Missing mutation binding: ${prepared.value.mutation}`)
     }
-    const actor = await binder.actor()
-    const screening = await binding.command.screen({
-      executor: binder.authority.preflight,
-      actor,
-      args: structuredClone(prepared.value.args),
-    })
-    if (screening.kind === "denied") return ok(screening)
 
-    const outcome = await executePreparedMutation<
+    return deliverCommand<Transaction, Actor, Preflight, Refusal>({
+      prepared: prepared.value,
+      binder,
+      command: binding.command,
+      parseRefusal: (value) =>
+        parseStoredValue<Refusal>(
+          binding.mutation.refusal,
+          value,
+          "Mutation refusal"
+        ),
+      invalidations: options.invalidations,
+    })
+  }
+}
+
+/**
+ * Creates one Server Action for one operation: a write outside a protocol
+ * whose receipt makes every delivery of one submission commit at most once.
+ *
+ * The binding must be made by `binder`; the action rejects one from another
+ * binder when it is created. Each call parses its untrusted envelope, derives
+ * the actor, screens, and runs `admit` and `execute` in the authority's
+ * transaction attempts, exactly as `createNextMutationAction` does. Receipts,
+ * the delivery window, denials, and contention work the same way. A
+ * redelivery of a recorded submission runs `screen` and returns the recorded
+ * outcome, result included, without running the command again; the same
+ * mutation ID with other arguments returns `mutation-id-reused`.
+ *
+ * After acceptance the action runs `finalizeAccepted` with the recorded
+ * result, then expires the stamp's cache tags, refreshes the invoking route,
+ * and publishes invalidations, also when the outcome is recovered from a
+ * receipt. To redirect from the server, wrap the action and call Next's
+ * `redirect()` after an accepted outcome.
+ * @param options The binder, one operation binding made by it, and optionally an invalidation publisher.
+ * @returns An operation-branded Server Action returning terminal outcomes (`accepted` with the result, `refused`, or `denied`) or typed executor failures.
+ * @throws Error at creation when the binding was made by another binder.
+ * @throws Error when a command's acceptance does not match its stamp, or its result does not match the result schema; the attempt rolls back and no receipt is recorded.
+ * @example
+ * ```ts
+ * "use server"
+ * export const createRunAction = createNextOperationAction({
+ *   binder: runsBinder,
+ *   binding: createRunBinding,
+ * })
+ * ```
+ */
+export function createNextOperationAction<
+  const Operation extends AnyOperationDefinition,
+  Transaction,
+  Actor,
+  Preflight,
+  Screened,
+  Evidence,
+>(options: {
+  readonly binder: MutationBinder<Transaction, Actor, Preflight>
+  readonly binding: OperationBinding<
+    Operation,
+    OperationCommand<
+      Operation,
+      Actor,
+      Preflight,
+      Transaction,
+      Screened,
+      Evidence
+    >
+  >
+  /** Publishes accepted stamps to other clients; omit it without realtime. */
+  readonly invalidations?: InvalidationPublisher
+}) {
+  type Refusal = OperationRefusalOf<Operation>
+
+  const { binder, binding } = options
+  if (binding.binder !== binder) {
+    throw new Error(
+      `Operation binding was made by another binder: ${binding.operation.name}`
+    )
+  }
+  const registry = operationRegistry(binding.operation)
+
+  return async (
+    envelope: unknown
+  ): Promise<OperationActionOutcome<Operation>> => {
+    const prepared = await prepareMutationRequest(registry, envelope)
+    if (!prepared.ok) return prepared
+
+    const outcome = await deliverCommand<
+      Transaction,
+      Actor,
+      Preflight,
+      Refusal
+    >({
+      prepared: prepared.value,
+      binder,
+      command: binding.command as DeliveredCommand<
+        Transaction,
+        Actor,
+        Preflight,
+        Refusal
+      >,
+      parseRefusal: (value) =>
+        parseStoredValue<Refusal>(
+          binding.operation.refusal,
+          value,
+          "Mutation refusal"
+        ),
+      parseResult: (value) =>
+        parseStoredValue(binding.operation.result, value, "Operation result"),
+      invalidations: options.invalidations,
+    })
+    // `parseResult` gives every accepted outcome its parsed result.
+    return outcome as OperationActionOutcome<Operation>
+  }
+}
+
+/** The erased command shape the shared delivery runs, for a mutation or an operation. */
+interface DeliveredCommand<Transaction, Actor, Preflight, Refusal> {
+  readonly screen: (context: {
+    readonly executor: Preflight
+    readonly actor: Actor
+    readonly args: unknown
+  }) => MutationScreening<unknown> | Promise<MutationScreening<unknown>>
+  readonly admit: (context: {
+    readonly tx: Transaction
+    readonly actor: Actor
+    readonly args: unknown
+  }) => MutationAdmission<unknown> | Promise<MutationAdmission<unknown>>
+  readonly execute: (context: {
+    readonly tx: Transaction
+    readonly actor: Actor
+    readonly args: unknown
+    readonly evidence: unknown
+    readonly stamp: StampAccumulator
+    readonly mutationId: string
+  }) => AttemptDecision<Refusal> | Promise<AttemptDecision<Refusal>>
+  readonly finalizeAccepted?: (context: {
+    readonly actor: Actor
+    readonly args: unknown
+    readonly stamp: AcceptedStamp
+    readonly result?: unknown
+    readonly screened: unknown
+  }) => void | Promise<void>
+}
+
+/**
+ * Delivers one prepared request through its command: derive the actor,
+ * screen, execute in the authority, then finalize an acceptance. The one
+ * home of the lifecycle order both generated actions document.
+ */
+async function deliverCommand<Transaction, Actor, Preflight, Refusal>(options: {
+  readonly prepared: PreparedMutationRequest
+  readonly binder: MutationBinder<Transaction, Actor, Preflight>
+  readonly command: DeliveredCommand<Transaction, Actor, Preflight, Refusal>
+  readonly parseRefusal: (value: unknown) => Refusal
+  readonly parseResult?: (value: unknown) => unknown
+  readonly invalidations: InvalidationPublisher | undefined
+}): Promise<Result<RecordedTerminalOutcome<Refusal>, MutationExecutorError>> {
+  const { prepared, binder, command } = options
+
+  const actor = await binder.actor()
+  const screening = await command.screen({
+    executor: binder.authority.preflight,
+    actor,
+    args: structuredClone(prepared.args),
+  })
+  if (screening.kind === "denied") return ok(screening)
+
+  const outcome = await executePreparedMutation<
+    Transaction,
+    Actor,
+    Refusal,
+    Preflight
+  >({
+    prepared,
+    actor,
+    authority: binder.authority as MutationAuthorityAdapter<
       Transaction,
       Actor,
       Refusal,
       Preflight
-    >({
-      prepared: prepared.value,
-      actor,
-      authority: binder.authority as MutationAuthorityAdapter<
-        Transaction,
-        Actor,
-        Refusal,
-        Preflight
-      >,
-      parseRefusal: (value) =>
-        parseMutationRefusal<Refusal>(binding.mutation.refusal, value),
-      run: async (tx, stamp, attemptArgs) => {
-        const admitted = await binding.command.admit({
-          tx,
-          actor,
-          args: attemptArgs,
-        })
-        if (admitted.kind === "denied") return admitted
+    >,
+    parseRefusal: options.parseRefusal,
+    parseResult: options.parseResult,
+    run: async (tx, stamp, attemptArgs) => {
+      const admitted = await command.admit({ tx, actor, args: attemptArgs })
+      if (admitted.kind === "denied") return admitted
 
-        return binding.command.execute({
-          tx,
-          actor,
-          args: attemptArgs,
-          evidence: admitted.evidence,
-          stamp,
-          mutationId: prepared.value.mutationId,
-        })
-      },
-    })
-    if (!outcome.ok || outcome.value.kind !== "accepted") return outcome
-
-    const { stamp } = outcome.value
-    try {
-      await binding.command.finalizeAccepted?.({
+      return command.execute({
+        tx,
         actor,
-        args: structuredClone(prepared.value.args),
+        args: attemptArgs,
+        evidence: admitted.evidence,
         stamp,
-        screened: screening.screened,
+        mutationId: prepared.mutationId,
       })
-    } finally {
-      await finalizeStamp(stamp, updateTag, refresh, options.invalidations)
-    }
-    return outcome
+    },
+  })
+  if (!outcome.ok || outcome.value.kind !== "accepted") return outcome
+
+  const accepted = outcome.value
+  try {
+    await command.finalizeAccepted?.({
+      actor,
+      args: structuredClone(prepared.args),
+      stamp: accepted.stamp,
+      ...("result" in accepted
+        ? { result: structuredClone(accepted.result) }
+        : {}),
+      screened: screening.screened,
+    })
+  } finally {
+    await finalizeStamp(
+      accepted.stamp,
+      updateTag,
+      refresh,
+      options.invalidations
+    )
   }
+  return outcome
 }

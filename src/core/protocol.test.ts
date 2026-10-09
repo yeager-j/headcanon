@@ -261,7 +261,7 @@ describe("defineMutation", () => {
   it("gives a mutation with no refusal cases a schema that rejects every value", () => {
     for (const stored of [undefined, null, "refused", { code: "refused" }]) {
       expect(increment.refusal["~standard"].validate(stored)).toEqual({
-        issues: [{ message: "This mutation declares no refusal cases" }],
+        issues: [{ message: "This definition declares no refusal cases" }],
       })
     }
 

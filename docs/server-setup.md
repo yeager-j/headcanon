@@ -337,6 +337,154 @@ A delivery-age refusal proves only that this delivery wrote nothing. After clean
 
 Keep stored refusal values readable across deployments for as long as their receipts exist. Replayed refusals are checked against the current mutation's refusal schema; incompatible or malformed stored outcomes throw instead of executing the mutation again.
 
+## Run an operation outside a protocol
+
+Some writes are not predicted: the client cannot know their result until the server answers. Creating a record whose ID the server makes, joining a group, and archiving a record are examples. Write each one as an **operation**. An operation gets the same receipt as a mutation, so a second delivery of one submission returns the first result and writes nothing.
+
+A plain Server Action cannot tell a second delivery from a new request. A browser resends a Server Action when the network fails, and that includes a response lost after the commit. A user taps again after an error. Without a receipt, a create runs twice and a join reports an error for a change that was saved.
+
+### Define the operation
+
+Put the definition in a shared module, next to your protocol. It is client-safe:
+
+```ts
+// lib/runs/operations.ts
+import { defineOperation } from "headcanon"
+import { z } from "zod"
+
+export const createRun = defineOperation({
+  name: "run.create.v1",
+  args: z.object({ name: z.string().trim().min(1) }),
+  result: z.object({ runId: z.uuid() }),
+  refusal: z.enum(["too-many-runs"]),
+})
+```
+
+The name is part of every receipt's identity. Version it, and change the version when the arguments or the result change shape. Arguments must be in parsed form, as for a mutation. Omit `result` when an acceptance returns nothing, and omit `refusal` when the command has no public refusals. Result and refusal schemas must validate synchronously, and their values must be JSON serializable.
+
+### Bind the command
+
+Bind the command with `bindOperation` on the binder you already have. It has the same steps as a mutation's command: `screen`, `admit`, `execute`, and optional `finalizeAccepted`.
+
+```ts
+// lib/runs/commands/create-run.ts
+import "server-only"
+
+import { runs } from "@/lib/db/schema"
+import {
+  acceptOperation,
+  allowAdmission,
+  allowScreening,
+} from "headcanon/server"
+
+import { runsBinder } from "../binder"
+import { createRun } from "../operations"
+import { runAxis } from "../protocol"
+
+export const createRunBinding = runsBinder.bindOperation(createRun, {
+  screen: () => allowScreening(),
+  admit: () => allowAdmission(),
+  execute: async ({ tx, actor, args, stamp }) => {
+    const runId = crypto.randomUUID()
+    await tx.insert(runs).values({
+      id: runId,
+      ownerId: actor.userId,
+      name: args.name,
+      revision: 1,
+    })
+
+    stamp.record(runAxis.of(runId), 1)
+    return acceptOperation({ runId })
+  },
+})
+```
+
+`acceptOperation(result)` accepts with the result. Call it with no argument when the operation declares no result, and pass `{ unchanged: true }` as the second argument when the command changes nothing. `refuseMutation` and `denyMutation` work as they do for mutations. The rules of [Write and stamp in one transaction](#write-and-stamp-in-one-transaction) apply: an accepted operation must record each axis it advances.
+
+Make new row IDs on the server, as above. The mutation ID is an idempotency key only: it belongs to the client, and a client can choose any value.
+
+The result schema parses the result before the receipt records it. A result that the schema rejects throws, and the attempt rolls back with no receipt.
+
+### Export the action
+
+```ts
+// lib/runs/actions.ts
+"use server"
+
+import { createNextOperationAction } from "headcanon/next/server"
+
+import { runsBinder } from "./binder"
+import { createRunBinding } from "./commands/create-run"
+
+export const createRunAction = createNextOperationAction({
+  binder: runsBinder,
+  binding: createRunBinding,
+})
+```
+
+Give the action the binder that made the binding. Each operation has its own action.
+
+The action returns the same outcomes as a mutation's action. An accepted outcome also carries `result`:
+
+| Delivery                                   | What the action returns                                                                                    |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| A new submission                           | The command's outcome: `accepted` with `result`, `refused`, or `denied`. The receipt records it.           |
+| The same envelope again                    | The recorded outcome, result included. The command does not run again; `screen` and finalization do.       |
+| The same mutation ID with other arguments  | `mutation-id-reused`. Nothing is written.                                                                  |
+| The same mutation ID from another actor    | That actor's own execution. Receipts are scoped to the actor, so it never receives another actor's result. |
+| A new envelope outside the delivery window | `delivery-expired` or `delivery-from-future`, as in [Limit delivery age](#limit-delivery-age).             |
+
+After acceptance, the action runs `finalizeAccepted`, expires cache tags for the stamp, refreshes the invoking route, and publishes invalidations, as in [Run work after acceptance](#run-work-after-acceptance). `finalizeAccepted` also receives the recorded `result`. You do not call `finalizeExternalActionCommit` yourself.
+
+### Redirect after an operation
+
+To redirect from the server, wrap the action and call `redirect()` after an accepted outcome:
+
+```ts
+// lib/runs/actions.ts
+"use server"
+
+import { createNextOperationAction } from "headcanon/next/server"
+import { redirect } from "next/navigation"
+
+import { runsBinder } from "./binder"
+import { createRunBinding } from "./commands/create-run"
+
+const createRunOperation = createNextOperationAction({
+  binder: runsBinder,
+  binding: createRunBinding,
+})
+
+export async function createRunAction(envelope: unknown) {
+  const outcome = await createRunOperation(envelope)
+  if (outcome.ok && outcome.value.kind === "accepted") {
+    redirect(`/runs/${outcome.value.result.runId}`)
+  }
+  return outcome
+}
+```
+
+A redelivery of an accepted submission returns the same result, so it redirects to the same run. To redirect from the client instead, read `result` from the accepted outcome.
+
+### Keep one key per submission in the browser
+
+The receipt works only when every delivery of one submission carries the same envelope. The browser must:
+
+- Make one envelope when the user submits: a new `mutationId` (a UUID) and `createdAt`. `createOperationEnvelope(operation, args)` from `headcanon` makes one.
+- Send that same envelope again for every retry, until the server answers. A redelivery must keep the mutation ID, the arguments, and `createdAt`.
+- Make a new envelope only after an answer (accepted, refused, or denied), or when the user deliberately discards the submission. A new mutation ID while the first one may have committed can write twice.
+- Not send other arguments with a held mutation ID. The action refuses them as `mutation-id-reused`.
+
+Keep the envelope with the form instance, not with one button click. To survive a page reload, store it, for example in `sessionStorage`, before the first send.
+
+### Receipts for operations
+
+Operations use the receipt table, the delivery window, and `deleteExpiredReceipts()` exactly as mutations do. An operation's receipt also stores its result, so keep results small and free of secrets. Keep stored results readable by the current result schema for as long as their receipts exist, as for refusals.
+
+A receipt makes one submission commit at most once. It does not make an action unique for a user: two tabs, or a discarded submission, make two submissions. Use a database constraint when a rule such as "one active run per player" must hold.
+
+The protocol ID `headcanon:operation` is reserved for operations. `defineProtocol` throws for it.
+
 ## Further reading
 
 - [Getting started](getting-started.md) — the complete note editor.

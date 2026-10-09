@@ -156,7 +156,10 @@ class AttemptRollback<Refusal> extends Error {
   }
 }
 
-/** Runs one command attempt in a savepoint whose writes roll back when the command is refused or denied. */
+/**
+ * Runs one command attempt in a savepoint whose writes roll back when the
+ * command is refused or denied. An accepted attempt's result is its `ok` value.
+ */
 async function runAttemptInSavepoint<
   QueryResult extends PgQueryResultHKT,
   Schema extends Record<string, unknown>,
@@ -166,19 +169,21 @@ async function runAttemptInSavepoint<
   run: (
     tx: DrizzleMutationTransaction<QueryResult, Schema>,
     stamp: StampAccumulator
-  ) => Promise<Result<void, MutationAttemptFailure<Refusal>>>,
+  ) => Promise<Result<unknown, MutationAttemptFailure<Refusal>>>,
   stamp: StampAccumulator
-): Promise<Result<void, MutationAttemptFailure<Refusal>>> {
+): Promise<Result<unknown, MutationAttemptFailure<Refusal>>> {
   try {
-    await tx.transaction(async (attemptTx) => {
+    const result = await tx.transaction(async (attemptTx) => {
       const attempted = await run(attemptTx, stamp)
       if (!attempted.ok) throw new AttemptRollback(attempted.error)
+
+      return attempted.value
     })
+    return ok(result)
   } catch (error) {
     if (error instanceof AttemptRollback) return err(error.failure)
     throw error
   }
-  return ok(undefined)
 }
 
 async function findReceipt<
@@ -363,7 +368,7 @@ export function createDrizzleMutationAuthority<
             const { stored, terminal } = prepareTerminalOutcome(
               attempted,
               stamp,
-              request.parseRefusal
+              request
             )
             await insertReceipt(
               tx,

@@ -32,6 +32,18 @@ export {
   type ProtocolInvocation,
 } from "./core/protocol"
 export {
+  createOperationEnvelope,
+  defineOperation,
+  type AnyOperationDefinition,
+  type OperationActionOutcome,
+  type OperationArgsOf,
+  type OperationDefinition,
+  type OperationEnvelope,
+  type OperationRefusalOf,
+  type OperationResultOf,
+  type OperationTerminalOutcome,
+} from "./core/operation"
+export {
   type MutationEnvelope,
   type MutationExecutorError,
   type MutationTerminalOutcome,
