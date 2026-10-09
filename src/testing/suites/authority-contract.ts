@@ -10,14 +10,19 @@ import {
   executePreparedMutation,
   prepareMutationRequest,
   throwMutationContention,
-  type MutationAcceptance,
-  type MutationAttemptFailure,
+  type AdmissionRegistry,
+  type AttemptDecision,
   type MutationAuthorityAdapter,
   type MutationDeliveryAgeError,
   type MutationExecutorError,
-  type MutationTerminalOutcome,
+  type RecordedTerminalOutcome,
 } from "../../core/authority"
-import { defineMutation, defineProtocol } from "../../core/protocol"
+import { defineOperation, operationRegistry } from "../../core/operation"
+import {
+  defineMutation,
+  defineProtocol,
+  OPERATION_PROTOCOL_ID,
+} from "../../core/protocol"
 import { axisId, revisionAt, type AcceptedStamp } from "../../core/revisions"
 import {
   createInMemoryMutationAuthority,
@@ -129,6 +134,7 @@ export interface MutationAuthorityContractHarness<Transaction, Preflight> {
 
 const CONTRACT_PROTOCOL = "headcanon.authority-contract.v1"
 const CONTRACT_MUTATION = "authority-contract.apply"
+const CONTRACT_OPERATION = "authority-contract.operation"
 const CONTRACT_ACTOR = "contract-actor"
 const CONTRACT_AXES = Object.keys(
   MUTATION_AUTHORITY_CONTRACT_AXES
@@ -139,6 +145,7 @@ const CONTRACT_BEHAVIORS = [
   "refuse",
   "throw",
   "mutate-args-when-zero",
+  "accept-invalid-result",
 ] as const
 
 interface ContractArgs {
@@ -194,6 +201,48 @@ const contractProtocol = defineProtocol({
   mutations: [contractMutation],
 })
 
+/** The result the contract's operation accepts with: never empty. */
+interface ContractResult {
+  readonly effect: string
+  /** The `primary` value the attempt read before its writes. */
+  readonly primary: number
+}
+
+function isContractResult(value: unknown): value is ContractResult {
+  return (
+    isPlainRecord(value) &&
+    hasExactKeys(value, ["effect", "primary"]) &&
+    typeof value.effect === "string" &&
+    Number.isSafeInteger(value.primary)
+  )
+}
+
+const contractResultSchema: StandardSchemaV1<unknown, ContractResult> = {
+  "~standard": {
+    version: 1,
+    vendor: "headcanon",
+    validate(value: unknown) {
+      return isContractResult(value)
+        ? { value }
+        : { issues: [{ message: "Invalid authority contract result" }] }
+    },
+  },
+}
+
+const contractOperation = defineOperation({
+  name: CONTRACT_OPERATION,
+  args: contractArgsSchema,
+  result: contractResultSchema,
+})
+
+function parseContractResult(value: unknown): ContractResult {
+  const parsed = contractResultSchema["~standard"].validate(value)
+  if ("then" in parsed || parsed.issues) {
+    throw new Error("Invalid authority contract result")
+  }
+  return parsed.value
+}
+
 function parseContractRefusal(
   value: unknown
 ): MutationAuthorityContractRefusal {
@@ -220,6 +269,48 @@ function contractEnvelope(
   }
 }
 
+function operationEnvelope(sequence: number, args: ContractArgs) {
+  return {
+    ...contractEnvelope(sequence, args),
+    protocol: OPERATION_PROTOCOL_ID,
+    invocation: { name: CONTRACT_OPERATION, args },
+  }
+}
+
+/** What differs between delivering the contract's mutation and its operation. */
+interface ContractVariant {
+  readonly registry: AdmissionRegistry
+  readonly parseResult: ((value: unknown) => ContractResult) | undefined
+  accept(
+    args: ContractArgs,
+    primary: number
+  ): AttemptDecision<MutationAuthorityContractRefusal>
+}
+
+const MUTATION_VARIANT: ContractVariant = {
+  registry: contractProtocol,
+  parseResult: undefined,
+  accept: () => ({ kind: "accepted" }),
+}
+
+const OPERATION_VARIANT: ContractVariant = {
+  registry: operationRegistry(contractOperation),
+  parseResult: parseContractResult,
+  accept: (args, primary) => ({
+    kind: "accepted",
+    result:
+      args.behavior === "accept-invalid-result"
+        ? { effect: args.effect }
+        : { effect: args.effect, primary },
+  }),
+}
+
+function contractVariant(envelope: unknown): ContractVariant {
+  return isPlainRecord(envelope) && envelope.protocol === OPERATION_PROTOCOL_ID
+    ? OPERATION_VARIANT
+    : MUTATION_VARIANT
+}
+
 function contractArgs(overrides: Partial<ContractArgs> = {}): ContractArgs {
   return {
     amount: 1,
@@ -232,7 +323,7 @@ function contractArgs(overrides: Partial<ContractArgs> = {}): ContractArgs {
 }
 
 type ContractOutcome = Result<
-  MutationTerminalOutcome<MutationAuthorityContractRefusal>,
+  RecordedTerminalOutcome<MutationAuthorityContractRefusal>,
   MutationExecutorError
 >
 
@@ -242,6 +333,8 @@ interface ContractDriver {
     options?: {
       /** Whether the request carries the contract's refusal parser. */
       readonly parseRefusal?: boolean
+      /** Whether an operation's request carries the contract's result parser. */
+      readonly parseResult?: boolean
       /** Runs inside each attempt after its writes. */
       readonly afterWrites?: () => Promise<void>
     }
@@ -280,7 +373,8 @@ async function createDriver<Transaction, Preflight>(
 
   return {
     async execute(envelope, options = {}) {
-      const prepared = await prepareMutationRequest(contractProtocol, envelope)
+      const variant = contractVariant(envelope)
+      const prepared = await prepareMutationRequest(variant.registry, envelope)
       if (!prepared.ok) return prepared
       const { mutationId } = prepared.value
 
@@ -290,14 +384,13 @@ async function createDriver<Transaction, Preflight>(
         authority: fixture.authority,
         parseRefusal:
           options.parseRefusal === false ? undefined : parseContractRefusal,
+        parseResult:
+          options.parseResult === false ? undefined : variant.parseResult,
         async run(
           tx,
           stamp,
           parsedArgs
-        ): Promise<
-          | MutationAcceptance
-          | MutationAttemptFailure<MutationAuthorityContractRefusal>
-        > {
+        ): Promise<AttemptDecision<MutationAuthorityContractRefusal>> {
           attempts.set(mutationId, (attempts.get(mutationId) ?? 0) + 1)
           const args = parsedArgs as ContractArgs
           const current = await fixture.load(tx)
@@ -337,7 +430,7 @@ async function createDriver<Transaction, Preflight>(
           if (args.behavior === "accept-unchanged") {
             return { kind: "accepted", unchanged: true }
           }
-          return { kind: "accepted" }
+          return variant.accept(args, primary)
         },
       })
     },
@@ -458,7 +551,7 @@ function deliveryWindowCases<Transaction, Preflight>(
 
 function requireTerminal(
   result: ContractOutcome
-): MutationTerminalOutcome<MutationAuthorityContractRefusal> {
+): RecordedTerminalOutcome<MutationAuthorityContractRefusal> {
   if (!result.ok) {
     throw new Error(`Expected terminal outcome, received ${result.error.code}`)
   }
@@ -742,6 +835,81 @@ export function mutationAuthorityContractCases<Transaction, Preflight>(
 
         expect(duplicate).toEqual(first)
         expect(contract.attemptCount(envelope.mutationId)).toBe(1)
+      },
+    },
+    {
+      name: "records an operation's result and replays the same result",
+      async run() {
+        const contract = await createDriver(harness)
+        const envelope = operationEnvelope(
+          40,
+          contractArgs({ effect: "operation-result" })
+        )
+
+        const first = requireTerminal(await contract.execute(envelope))
+        const replay = requireTerminal(
+          await contract.execute(structuredClone(envelope))
+        )
+
+        const expected = {
+          kind: "accepted",
+          stamp: { revisions: { [primary]: 1 } },
+          result: { effect: "operation-result", primary: 0 },
+        }
+        expect(first).toEqual(expected)
+        expect(replay).toEqual(expected)
+        expect(contract.attemptCount(envelope.mutationId)).toBe(1)
+      },
+    },
+    {
+      name: "rolls back an operation whose result its schema rejects",
+      async run() {
+        const contract = await createDriver(harness)
+        const envelope = operationEnvelope(
+          41,
+          contractArgs({
+            behavior: "accept-invalid-result",
+            effect: "invalid-result",
+          })
+        )
+
+        await expect(contract.execute(envelope)).rejects.toThrow()
+        expect(await contract.hasReceipt(envelope.mutationId)).toBe(false)
+        expect(await contract.read()).toEqual(initial)
+      },
+    },
+    {
+      name: "fails closed replaying a stored result without a result parser",
+      async run() {
+        const contract = await createDriver(harness)
+        const envelope = operationEnvelope(
+          42,
+          contractArgs({ effect: "unparsed-result" })
+        )
+
+        requireAccepted(await contract.execute(envelope))
+        await expect(
+          contract.execute(envelope, { parseResult: false })
+        ).rejects.toThrow()
+      },
+    },
+    {
+      name: "refuses an operation that reuses a mutation's ID and arguments",
+      async run() {
+        const contract = await createDriver(harness)
+        const args = contractArgs({ effect: "shared-identity" })
+        const mutation = contractEnvelope(43, args)
+        const operation = {
+          ...operationEnvelope(43, args),
+          createdAt: mutation.createdAt,
+        }
+
+        requireAccepted(await contract.execute(mutation))
+
+        expect(await contract.execute(operation)).toEqual(
+          err({ code: "mutation-id-reused", mutationId: mutation.mutationId })
+        )
+        expect((await contract.read()).effects).toEqual(["shared-identity"])
       },
     },
     {

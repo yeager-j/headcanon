@@ -2,6 +2,12 @@ import type {
   MutationAuthorityAdapter,
   StampAccumulator,
 } from "../core/authority"
+import type {
+  AnyOperationDefinition,
+  OperationArgsOf,
+  OperationRefusalOf,
+  OperationResultOf,
+} from "../core/operation"
 import {
   findMutation,
   type AnyMutationDefinition,
@@ -15,6 +21,7 @@ import type {
   MutationAdmission,
   MutationCommandDecision,
   MutationScreening,
+  OperationCommandDecision,
 } from "./outcomes"
 
 type MutationArgs<Mutation extends AnyMutationDefinition> = Mutation extends (
@@ -23,9 +30,12 @@ type MutationArgs<Mutation extends AnyMutationDefinition> = Mutation extends (
   ? Args
   : never
 
-/** One app-owned command bound to a client-safe mutation definition. */
-export interface MutationCommand<
-  Mutation extends AnyMutationDefinition,
+/**
+ * The two checks every command runs before it writes: `screen` once per
+ * delivery, `admit` once per transaction attempt.
+ */
+export interface CommandChecks<
+  Args,
   Actor,
   Preflight,
   Transaction,
@@ -41,7 +51,7 @@ export interface MutationCommand<
     /** The authority's preflight executor, which reads committed state only. */
     readonly executor: Preflight
     readonly actor: Actor
-    readonly args: MutationArgs<Mutation>
+    readonly args: Args
   }) => MutationScreening<Screened> | Promise<MutationScreening<Screened>>
   /**
    * Runs at the start of each transaction attempt, so it runs again after
@@ -52,8 +62,26 @@ export interface MutationCommand<
   readonly admit: (context: {
     readonly tx: Transaction
     readonly actor: Actor
-    readonly args: MutationArgs<Mutation>
+    readonly args: Args
   }) => MutationAdmission<Evidence> | Promise<MutationAdmission<Evidence>>
+}
+
+/** One app-owned command bound to a client-safe mutation definition. */
+export interface MutationCommand<
+  Mutation extends AnyMutationDefinition,
+  Actor,
+  Preflight,
+  Transaction,
+  Screened,
+  Evidence,
+> extends CommandChecks<
+  MutationArgs<Mutation>,
+  Actor,
+  Preflight,
+  Transaction,
+  Screened,
+  Evidence
+> {
   /**
    * Runs after `admit` in the same attempt. Write domain rows through `tx`,
    * record each axis the attempt advances on `stamp`, and return
@@ -88,6 +116,67 @@ export interface MutationCommand<
   }) => void | Promise<void>
 }
 
+/** One app-owned command bound to a client-safe operation definition. */
+export interface OperationCommand<
+  Operation extends AnyOperationDefinition,
+  Actor,
+  Preflight,
+  Transaction,
+  Screened,
+  Evidence,
+> extends CommandChecks<
+  OperationArgsOf<Operation>,
+  Actor,
+  Preflight,
+  Transaction,
+  Screened,
+  Evidence
+> {
+  /**
+   * Runs after `admit` in the same attempt. Write domain rows through `tx`,
+   * record each axis the attempt advances on `stamp`, and return
+   * `acceptOperation(result)`, `refuseMutation`, or `denyMutation`. An
+   * acceptance that records no axis throws and records no receipt, unless
+   * it passes `{ unchanged: true }`. A result its schema rejects throws and
+   * rolls the attempt back.
+   */
+  readonly execute: (
+    context: {
+      readonly tx: Transaction
+      readonly actor: Actor
+      readonly args: OperationArgsOf<Operation>
+      /** The evidence `admit` returned in this attempt. */
+      readonly evidence: Evidence
+      /** Records each axis revision this attempt advances. */
+      readonly stamp: StampAccumulator
+    } & MutationContext
+  ) =>
+    | OperationCommandDecision<
+        OperationResultOf<Operation>,
+        OperationRefusalOf<Operation>
+      >
+    | Promise<
+        OperationCommandDecision<
+          OperationResultOf<Operation>,
+          OperationRefusalOf<Operation>
+        >
+      >
+  /**
+   * Runs after every accepted delivery, including recovery from a stored
+   * receipt, and before the action expires cache tags, refreshes, or
+   * publishes invalidations. Implementations must be repeat-safe.
+   */
+  readonly finalizeAccepted?: (context: {
+    readonly actor: Actor
+    readonly args: OperationArgsOf<Operation>
+    readonly stamp: AcceptedStamp
+    /** The recorded result, as every delivery of this submission returns it. */
+    readonly result: OperationResultOf<Operation>
+    /** The value `screen` returned for this delivery. */
+    readonly screened: Screened
+  }) => void | Promise<void>
+}
+
 declare const BINDER: unique symbol
 
 /**
@@ -96,6 +185,19 @@ declare const BINDER: unique symbol
  */
 export interface MutationBinderIdentity {
   readonly [BINDER]: true
+}
+
+/** The association between one operation and its application command. */
+export interface OperationBinding<
+  Operation extends AnyOperationDefinition,
+  Command = unknown,
+> {
+  /** The operation's shared definition. */
+  readonly operation: Operation
+  /** The application command that runs this operation. */
+  readonly command: Command
+  /** The binder that made this binding; only its action accepts the binding. */
+  readonly binder: MutationBinderIdentity
 }
 
 /** Definition-keyed association between one mutation and its application command. */
@@ -167,6 +269,37 @@ export interface MutationBinder<
       >
     >
   >
+  /**
+   * Binds one operation to its command, typed like `bind`. Give the binding
+   * to `createNextOperationAction` with this same binder.
+   */
+  readonly bindOperation: <
+    const Operation extends AnyOperationDefinition,
+    Screened,
+    Evidence,
+  >(
+    operation: Operation,
+    command: OperationCommand<
+      NoInfer<Operation>,
+      Actor,
+      Preflight,
+      Transaction,
+      Screened,
+      Evidence
+    >
+  ) => NoInfer<
+    OperationBinding<
+      Operation,
+      OperationCommand<
+        Operation,
+        Actor,
+        Preflight,
+        Transaction,
+        Screened,
+        Evidence
+      >
+    >
+  >
 }
 
 /**
@@ -204,12 +337,15 @@ export function createMutationBinder<
   type Binder = MutationBinder<Transaction, Actor, Preflight>
   const bind: Binder["bind"] = (mutation, command) =>
     Object.freeze({ mutation, command, binder })
+  const bindOperation: Binder["bindOperation"] = (operation, command) =>
+    Object.freeze({ operation, command, binder })
   // The brand has no runtime key, so the object is asserted to carry it.
   const binder = Object.freeze({
     actor: context.actor,
     // AcceptsActor proved that every Actor is an AuthorityActor.
     authority: context.authority as Binder["authority"],
     bind,
+    bindOperation,
   }) as Binder
   return binder
 }

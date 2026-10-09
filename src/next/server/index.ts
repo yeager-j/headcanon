@@ -8,4 +8,4 @@ export {
   finalizeExternalActionCommit,
   MAX_CACHED_CANON_AXES,
 } from "./revalidation"
-export { createNextMutationAction } from "./action"
+export { createNextMutationAction, createNextOperationAction } from "./action"

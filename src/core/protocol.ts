@@ -9,20 +9,27 @@ export interface MutationInvocation<Name extends string, Args, Error = never> {
   readonly __error?: Error
 }
 
-/** The refusal schema type of a mutation that declares no refusal cases. */
-type NoRefusalSchema = StandardSchemaV1<never, never>
+/**
+ * The envelope `protocol` of every operation. It is reserved: no protocol may
+ * use it, so an operation and a mutation never share receipt identity.
+ */
+export const OPERATION_PROTOCOL_ID = "headcanon:operation"
+
+/** The refusal schema type of a definition that declares no refusal cases. */
+export type NoRefusalSchema = StandardSchemaV1<never, never>
 
 /**
  * The refusal schema {@link defineMutation} gives a mutation that declares
- * none. It rejects every value, so a stored refusal for such a mutation fails
- * closed like any other invalid stored refusal.
+ * none, and `defineOperation` an operation. It rejects every value, so a
+ * stored refusal for such a definition fails closed like any other invalid
+ * stored refusal.
  */
-const NO_REFUSALS: NoRefusalSchema = Object.freeze({
+export const NO_REFUSALS: NoRefusalSchema = Object.freeze({
   "~standard": Object.freeze({
     version: 1,
     vendor: "headcanon",
     validate: () => ({
-      issues: [{ message: "This mutation declares no refusal cases" }],
+      issues: [{ message: "This definition declares no refusal cases" }],
     }),
   }),
 })
@@ -36,11 +43,11 @@ const NO_REFUSALS: NoRefusalSchema = Object.freeze({
  * unchanged, so the types require output to be valid input and authority
  * rejects arguments its schema changes.
  */
-type ParsedFormSchema<Schema extends StandardSchemaV1> =
+export type ParsedFormSchema<Schema extends StandardSchemaV1> =
   StandardSchemaV1.InferOutput<Schema> extends StandardSchemaV1.InferInput<Schema>
     ? unknown
     : {
-        readonly "~headcanon": "A mutation argument schema's output must be a valid input"
+        readonly "~headcanon": "An argument schema's output must be a valid input"
       }
 
 /** Package-owned mutation identity, passed to `predict` and to a command's `execute`. */
@@ -190,8 +197,8 @@ export type ProtocolInvocation<Protocol> =
  * @param name Untrusted or trusted mutation name.
  * @returns The mutation definition with that name, or `undefined`.
  */
-export function findMutation<Mutation extends AnyMutationDefinition>(
-  protocol: ProtocolDefinition<string, readonly Mutation[]>,
+export function findMutation<Mutation extends { readonly name: string }>(
+  protocol: { readonly mutations: readonly Mutation[] },
   name: unknown
 ): Mutation | undefined {
   return protocol.mutations.find((mutation) => mutation.name === name)
@@ -280,7 +287,7 @@ export function defineMutation<
  *
  * @param definition Stable protocol ID and closed mutation registry.
  * @returns A frozen protocol definition.
- * @throws Error when a mutation is malformed or two mutations share a name; these are configuration errors, not request refusals.
+ * @throws Error when the ID is the reserved `headcanon:operation`, a mutation is malformed, or two mutations share a name; these are configuration errors, not request refusals.
  */
 export function defineProtocol<
   const Id extends string,
@@ -289,6 +296,10 @@ export function defineProtocol<
   readonly id: Id
   readonly mutations: Mutations & OneStateMutations<Mutations>
 }): ProtocolDefinition<Id, Mutations> {
+  if (definition.id === OPERATION_PROTOCOL_ID) {
+    throw new Error(`Reserved protocol ID: ${OPERATION_PROTOCOL_ID}`)
+  }
+
   const mutations = Object.freeze([
     ...definition.mutations,
   ]) as unknown as Mutations

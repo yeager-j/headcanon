@@ -9,6 +9,7 @@ import {
   type MutationDeliveryAgeError,
 } from "../core/authority"
 import type { InvalidationSubscription } from "../core/invalidation"
+import { OPERATION_PROTOCOL_ID } from "../core/protocol"
 import type { AxisId } from "../core/revisions"
 import type { InMemoryReader, InMemoryTransaction } from "./in-memory-authority"
 import { createInMemoryInvalidationAdapter } from "./in-memory-invalidation"
@@ -119,6 +120,71 @@ const authorityMutants: ReadonlyArray<{
   readonly breaks: (fixture: Fixture) => Fixture
   readonly caughtBy: string
 }> = [
+  {
+    flaw: "drops an accepted attempt's result before recording it",
+    breaks: (fixture) =>
+      withAuthority(fixture, {
+        execute: (request, run) =>
+          fixture.authority.execute(request, async (tx, stamp) => {
+            const attempted = await run(tx, stamp)
+            return attempted.ok ? ok(undefined) : attempted
+          }),
+      }),
+    caughtBy: "records an operation's result and replays the same result",
+  },
+  {
+    flaw: "records a result its schema rejects",
+    breaks: (fixture) =>
+      withAuthority(fixture, {
+        execute: (request, run) => {
+          const { parseResult } = request
+          const lenient = parseResult
+            ? (value: unknown) => {
+                try {
+                  return parseResult(value)
+                } catch {
+                  return value
+                }
+              }
+            : undefined
+
+          return fixture.authority.execute(
+            { ...request, parseResult: lenient },
+            run
+          )
+        },
+      }),
+    caughtBy: "rolls back an operation whose result its schema rejects",
+  },
+  {
+    flaw: "replays a stored result without a result parser",
+    breaks: (fixture) =>
+      withAuthority(fixture, {
+        execute: (request, run) =>
+          fixture.authority.execute(
+            {
+              ...request,
+              parseResult: request.parseResult ?? ((value) => value),
+            },
+            run
+          ),
+      }),
+    caughtBy: "fails closed replaying a stored result without a result parser",
+  },
+  {
+    flaw: "keys an operation's receipt apart from a mutation's with the same ID",
+    breaks: (fixture) =>
+      withAuthority(fixture, {
+        execute: (request, run) =>
+          fixture.authority.execute(
+            request.protocol === OPERATION_PROTOCOL_ID
+              ? { ...request, mutationId: crypto.randomUUID() }
+              : request,
+            run
+          ),
+      }),
+    caughtBy: "refuses an operation that reuses a mutation's ID and arguments",
+  },
   {
     flaw: "reruns a redelivered mutation instead of replaying its receipt",
     breaks: (fixture) =>

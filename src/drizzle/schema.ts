@@ -14,11 +14,16 @@ import type { StoredTerminalOutcome } from "../core/authority"
 // Schema tooling such as drizzle-kit loads this entry, so at runtime it imports
 // only drizzle-orm: import anything else as a type.
 
-/** The durable terminal outcome stored per mutation, as serialized JSON. */
+/**
+ * The durable terminal outcome stored per mutation or operation, as
+ * serialized JSON. An operation's accepted outcome also holds its result.
+ */
 export type StoredMutationTerminalOutcome = StoredTerminalOutcome
 
 /**
  * Durable authority outcomes keyed by trusted actor scope and mutation UUID.
+ * Mutations and operations share it: `protocol` holds an operation's
+ * reserved ID, `headcanon:operation`.
  * The adapter writes each receipt once and never updates it. `created_at` is
  * the database clock reading that admitted the mutation; it is indexed for
  * `deleteExpiredReceipts` on the Drizzle authority.

@@ -175,6 +175,32 @@ This is an in-memory state store, not a Drizzle client. Commands that call `tx.s
 
 The default attempt limit is two; pass `maxAttempts` to change it. The delivery window uses `Date.now()` and the same `maxDeliveryAgeMs` and `clockSkewToleranceMs` options as the Drizzle adapter, so `vi.setSystemTime()` can move an envelope out of it. Queue one `contendNext` call per attempt to test exhaustion; each queued update is consumed by one attempt, even if that attempt refuses. State uses `structuredClone` by default; provide `clone` when your fixture needs another copying strategy.
 
+### Test an operation
+
+An [operation](server-setup.md#run-an-operation-outside-a-protocol) binds to the same binder. Build its envelope with `createOperationEnvelope`, and deliver the same envelope twice to check its receipt:
+
+```ts
+import { createOperationEnvelope } from "headcanon"
+import { createNextOperationAction } from "headcanon/next/server"
+
+it("creates one run for two deliveries of one submission", async () => {
+  const { authority, binder } = createRunsFixture()
+  const action = createNextOperationAction({
+    binder,
+    binding: bindCreateRun(binder),
+  })
+  const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+
+  const first = await action(envelope)
+  const second = await action(envelope)
+
+  expect(second).toEqual(first)
+  expect(authority.read().runs).toHaveLength(1)
+})
+```
+
+Also check that the same `mutationId` with other arguments returns `mutation-id-reused`, and that a refusal replays as the same refusal. The action needs the `next/cache` mock above.
+
 ## Test prediction, acceptance, and canonization separately
 
 The root keeps an accepted prediction until canon covers its revisions. Use a controlled sender to test each stage:
