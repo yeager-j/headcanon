@@ -453,6 +453,120 @@ Know the limits:
 
 To use another store, such as `localStorage` or a store in memory, pass any object with a `key` string and synchronous `load()` and `save(envelopes)` methods. A `save` that throws must leave the stored value unchanged. An asynchronous store, such as IndexedDB, is not supported. A store that several tabs share, such as `localStorage`, acts like two roots with one key: each tab overwrites the other's queue.
 
+## Submit an operation
+
+An [operation](server-setup.md#run-an-operation-outside-a-protocol) is a write outside a protocol, such as creating a run. Nothing predicts it: the form waits for the server's answer, which can carry a result. `createNextOperationHook` keeps one envelope per submission, so a retry after a lost response returns the first answer instead of writing twice.
+
+Create the hook once, outside your components:
+
+```ts
+// lib/runs/hooks.ts
+"use client"
+
+import { createNextOperationHook } from "headcanon/next/client"
+
+import { createRunAction } from "./actions"
+import { createRun } from "./operations"
+
+export const useCreateRun = createNextOperationHook({
+  operation: createRun,
+  action: createRunAction,
+})
+```
+
+Call it once per form:
+
+```tsx
+// components/new-run-form.tsx
+"use client"
+
+import { useCreateRun } from "@/lib/runs/hooks"
+import { sessionStoragePersistence } from "headcanon/react"
+import { useRouter } from "next/navigation"
+
+export function NewRunForm({ playerId }: { playerId: string }) {
+  const router = useRouter()
+  const createRun = useCreateRun({
+    persistence: sessionStoragePersistence(`new-run:${playerId}`),
+    onSettled: (answer) => {
+      if (answer.ok) router.push(`/runs/${answer.value.runId}`)
+    },
+  })
+
+  async function submit(formData: FormData) {
+    const outcome = await createRun.run({ name: String(formData.get("name")) })
+    if (!outcome.ok && outcome.error.kind === "refused") {
+      showNotice("You have too many runs.")
+    }
+  }
+
+  return (
+    <form action={submit}>
+      <input name="name" defaultValue={createRun.pending?.args.name} />
+      <button disabled={createRun.status === "sending"}>Make the run</button>
+      {createRun.status === "unconfirmed" && (
+        <p>
+          Not saved yet.{" "}
+          <button type="button" onClick={() => createRun.retry()}>
+            Try again
+          </button>
+          <button type="button" onClick={createRun.discard}>
+            Start over
+          </button>
+        </p>
+      )}
+    </form>
+  )
+}
+```
+
+`showNotice` is an application-owned helper.
+
+### How the hook keeps one key
+
+The hook holds at most one submission:
+
+| Call                                | What happens                                                                                               |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `run(args)` with nothing held       | Makes a new envelope (mutation ID and `createdAt`), stores it if `persistence` is set, and sends it.       |
+| `run(args)` with the same arguments | Retries the held submission. It never makes a second envelope.                                             |
+| `run(args)` with other arguments    | Returns `pending-submission` and sends nothing, until `retry()` or `discard()`.                            |
+| `retry()`                           | Sends the held envelope again: same mutation ID, arguments, and `createdAt`. Joins a call still in flight. |
+| `discard()`                         | Forgets the held submission. A delivery of it may still commit; its answer no longer changes the hook.     |
+
+Exhausted contention on the server resends the same envelope after a short backoff. Any answer from the server ends the submission: the next `run` makes a new envelope.
+
+`discard()` is the one way to make a new envelope while a submission may have committed. Offer it as a deliberate choice, such as "Start over", and expect that the discarded submission may also have been saved.
+
+### Read the status and the answer
+
+`status` is `"idle"`, `"sending"`, `"unconfirmed"`, or `"settled"`. `pending` holds the held submission's `args`, `restored`, and `mayHaveCommitted` while one is held. `outcome` holds the last answer while `settled`.
+
+`run()` and `retry()` resolve with the server's answer, or with `unconfirmed` after `DELIVERY_WAIT_MS` (10 seconds) or a failed call. They do not reject, except to pass on Next.js control flow, such as a `redirect()` from the server. A form Action that awaits `run()` therefore ends within the wait. The submission stays held, and an answer that arrives later still settles it.
+
+Put navigation and other effects of an answer in `onSettled`. It receives each answer once: from `run`, from `retry`, or later than both, also after a page load. An answer that arrives while no hook with the key is mounted is delivered once to the next one that mounts.
+
+| Answer or result              | Meaning                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------- |
+| `ok(result)`                  | The operation was accepted. A retry gets the same result.                             |
+| `refused`                     | The command refused with a public refusal. A retry gets the same refusal.             |
+| `denied`                      | Screening or admission denied the submission.                                         |
+| `undeliverable`               | The executor refused this delivery, for example `delivery-expired`. It wrote nothing. |
+| `stale-client`                | The page is older than the deployed build. Reload it.                                 |
+| `unconfirmed` (not an answer) | No answer yet. The submission is still held: offer `retry()` and `discard()`.         |
+| `pending-submission` (local)  | Other arguments while a submission is held. Nothing was sent.                         |
+| `no-submission` (local)       | `retry()` with nothing held and no answer. Nothing was sent.                          |
+
+`denied`, `undeliverable`, and `stale-client` carry `mayHaveCommitted`, as in [Handle terminal failures](#handle-terminal-failures).
+
+### Keep the submission across a reload
+
+Without `persistence`, the held submission lives only in memory, and a page reload loses it. A user who reloads and submits again then makes a new envelope, and a submission that committed before the reload can be written twice. Pass `persistence` to keep the held envelope in `sessionStorage`. The hook stores it before the first send and removes it when the server answers or the user discards it.
+
+A restored submission is `unconfirmed`, with `pending.restored` set. The hook never sends it on its own: show the user what was submitted and offer `retry()` and `discard()`. The hook checks a stored value as a root checks its queue, and drops anything that is not one envelope of this operation.
+
+Hooks of one factory with the same key share one submission, also across a remount. Use each key with one factory only, and do not share a key with a predicted root.
+
 ## Use an observed root for read-only views
 
 `createNextObservedRoot` uses the same freshness and invalidation handling without a mutation queue:

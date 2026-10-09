@@ -464,11 +464,11 @@ export async function createRunAction(envelope: unknown) {
 }
 ```
 
-A redelivery of an accepted submission returns the same result, so it redirects to the same run. To redirect from the client instead, read `result` from the accepted outcome.
+A redelivery of an accepted submission returns the same result, so it redirects to the same run. To redirect from the client instead, navigate from the operation hook's `onSettled`.
 
 ### Keep one key per submission in the browser
 
-The receipt works only when every delivery of one submission carries the same envelope. The browser must:
+The receipt works only when every delivery of one submission carries the same envelope. In a Next.js app, `createNextOperationHook` does this for you; see [Submit an operation](react.md#submit-an-operation). Without the hook, the browser must:
 
 - Make one envelope when the user submits: a new `mutationId` (a UUID) and `createdAt`. `createOperationEnvelope(operation, args)` from `headcanon` makes one.
 - Send that same envelope again for every retry, until the server answers. A redelivery must keep the mutation ID, the arguments, and `createdAt`.

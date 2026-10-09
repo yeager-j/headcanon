@@ -206,9 +206,13 @@ function parseStoredQueue<Invocation>(
  * so they must pass the schema now, in the parsed form the authority admits:
  * a schema that coerces or fills in a value would give the predictor
  * arguments its schema never produced. An asynchronous schema cannot answer
- * in time and counts as a refusal.
+ * in time and counts as a refusal. An operation hook checks what it restores
+ * the same way, so the form it shows holds arguments the server admits.
  */
-function hasValidArguments(schema: StandardSchemaV1, args: unknown): boolean {
+export function hasValidArguments(
+  schema: StandardSchemaV1,
+  args: unknown
+): boolean {
   // A schema or the canonical check can throw on stored data, for example
   // on nesting deep enough to exhaust the stack. That drops the entry.
   try {

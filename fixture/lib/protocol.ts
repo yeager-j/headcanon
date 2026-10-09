@@ -34,7 +34,8 @@ const addItemArgsSchema: StandardSchemaV1<{ text: string }> = {
   },
 }
 
-const fixtureRefusalSchema: StandardSchemaV1<FixtureRefusal> = {
+/** Parses the fixture's one refusal, for the mutation and the operation. */
+export const fixtureRefusalSchema: StandardSchemaV1<FixtureRefusal> = {
   "~standard": {
     version: 1,
     vendor: "headcanon-fixture",
