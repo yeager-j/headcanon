@@ -25,9 +25,9 @@ import {
   type MutationErrorOf,
   type MutationInvocation,
   type MutationRefusalOf,
-  type MutationState,
   type ProtocolInvocation,
   type ProtocolMutation,
+  type ProtocolState,
 } from "../core/protocol"
 import type { AcceptedStamp, AxisId, Canon } from "../core/revisions"
 import {
@@ -50,7 +50,7 @@ import {
 } from "./refresh"
 
 /** The one state type every mutation of a protocol predicts. */
-export type StateOf<Protocol> = MutationState<ProtocolMutation<Protocol>>
+export type StateOf<Protocol> = ProtocolState<Protocol>
 
 /**
  * A protocol's internal ledger error union: predictor errors plus

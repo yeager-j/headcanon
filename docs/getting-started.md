@@ -92,6 +92,8 @@ The mutation defines its inputs, public refusal values, and a **predictor**: a f
 
 Keep the predictor pure. It can run again when newer server data arrives, so it must not write data, make requests, or produce side effects.
 
+The protocol's state type comes from its predictors. A protocol with no mutations yet has no predictor to read it from, so declare the state yourself: `defineProtocol<NoteState>()({ id: "notes.v1", mutations: [] })`. The root and the action then work with an empty list, and each mutation you add later must predict `NoteState`.
+
 `noteAxis` is an **axis family**. `noteAxis.of(noteId)` gives each note a stable address, `notes/<noteId>`, for revision tracking. The server write and data loader must use the same address. `of` throws if the ID is not a UUID. `noteAxis.parse(axis)` reads the note ID back from an address; [Realtime](realtime.md) uses it to check the axes a browser asks for.
 
 ## 4. Connect Headcanon to your server

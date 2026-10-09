@@ -352,9 +352,16 @@ export function createMutationBinder<
 
 export type AnyMutationBinding = MutationBinding<AnyMutationDefinition>
 
+/**
+ * The union of mutations a command list binds; `never` for an empty list.
+ * `extends infer` makes the check distribute over each binding, so an empty
+ * list binds no mutation instead of an unknown one.
+ */
 export type BoundMutation<Commands extends readonly AnyMutationBinding[]> =
-  Commands[number] extends MutationBinding<infer Mutation, unknown>
-    ? Mutation
+  Commands[number] extends infer Binding
+    ? Binding extends MutationBinding<infer Mutation, unknown>
+      ? Mutation
+      : never
     : never
 
 type CompleteBindings<
