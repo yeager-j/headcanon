@@ -4,6 +4,7 @@
 // one envelope until the server answers. Not a package entry; the Next
 // binding (`headcanon/next/client`) supplies its sender.
 import {
+  startTransition,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -332,8 +333,8 @@ function createOperationCell<Operation extends AnyOperationDefinition>(
   let outcome: AnswerOf<Operation> | undefined
   let undelivered: AnswerOf<Operation> | undefined
   let restored = false
-  let onSettled: ((answer: AnswerOf<Operation>) => void) | undefined
-  let mounts = 0
+  /** The mounted hooks' answer listeners, in mount order; the last one hears answers. */
+  const settledListeners: Array<(answer: AnswerOf<Operation>) => void> = []
   let snapshot: Snapshot<Operation> = IDLE
   const listeners = new Set<() => void>()
 
@@ -376,7 +377,8 @@ function createOperationCell<Operation extends AnyOperationDefinition>(
     storage.save(undefined)
     publish()
 
-    if (onSettled) onSettled(answer)
+    const listener = settledListeners.at(-1)
+    if (listener) listener(answer)
     else undelivered = answer
   }
 
@@ -429,8 +431,17 @@ function createOperationCell<Operation extends AnyOperationDefinition>(
     try {
       rethrowControlFlow(error)
     } catch (controlFlow) {
-      for (const waiter of delivery.waiters) waiter.reject(controlFlow)
-      delivery.waiters.clear()
+      // Framework control flow (a redirect, say) must reach the framework.
+      // A waiting `run` or `retry` carries it; once every wait has expired,
+      // a fresh transition does, while a hook is mounted to receive it.
+      if (delivery.waiters.size > 0) {
+        for (const waiter of delivery.waiters) waiter.reject(controlFlow)
+        delivery.waiters.clear()
+      } else if (settledListeners.length > 0) {
+        startTransition(() => {
+          throw controlFlow
+        })
+      }
       release(submission)
       return
     }
@@ -531,7 +542,9 @@ function createOperationCell<Operation extends AnyOperationDefinition>(
   }
 
   const retire = () => {
-    if (mounts === 0 && !held && !undelivered) registration.release()
+    if (settledListeners.length === 0 && !held && !undelivered) {
+      registration.release()
+    }
   }
 
   return {
@@ -545,8 +558,7 @@ function createOperationCell<Operation extends AnyOperationDefinition>(
       // released the cell; register it again so its key finds it.
       registration.register()
       restore()
-      mounts += 1
-      onSettled = listener
+      settledListeners.push(listener)
 
       if (undelivered) {
         const answer = undelivered
@@ -555,8 +567,7 @@ function createOperationCell<Operation extends AnyOperationDefinition>(
       }
 
       return () => {
-        mounts -= 1
-        if (onSettled === listener) onSettled = undefined
+        settledListeners.splice(settledListeners.indexOf(listener), 1)
         retire()
       }
     },

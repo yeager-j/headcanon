@@ -324,6 +324,53 @@ describe("createOperationHook", () => {
     expect(storedEnvelopes()).toBeUndefined()
   })
 
+  it("passes control flow that arrives after the wait to React", async () => {
+    const redirect = new ControlFlowError("NEXT_REDIRECT")
+    const propagated = vi.fn()
+    const captureRedirect = (event: ErrorEvent) => {
+      if (event.error !== redirect) return
+      event.preventDefault()
+      propagated(event.error)
+    }
+    window.addEventListener("error", captureRedirect)
+    try {
+      const { calls, send } = createDeferredSender()
+      const useOperation = createOperationHook(
+        { operation: createRun, send },
+        rethrowControlFlow
+      )
+      const { result } = mountOperation(useOperation)
+
+      let outcome: Promise<unknown> = Promise.resolve()
+      act(() => {
+        outcome = result.current.run({ name: "Emerald" })
+      })
+      await act(async () => vi.advanceTimersByTime(DELIVERY_WAIT_MS))
+      expect(await outcome).toEqual(
+        err({ kind: "unconfirmed", mayHaveCommitted: true })
+      )
+
+      await calls[0]!.fail(redirect)
+
+      expect(propagated).toHaveBeenCalledWith(redirect)
+      expect(result.current.status).toBe("idle")
+    } finally {
+      window.removeEventListener("error", captureRedirect)
+    }
+  })
+
+  it("exposes frozen pending arguments", () => {
+    const { send } = createDeferredSender()
+    const useOperation = createOperationHook({ operation: createRun, send })
+    const { result } = mountOperation(useOperation)
+
+    act(() => {
+      void result.current.run({ name: "Emerald" })
+    })
+
+    expect(Object.isFrozen(result.current.pending?.args)).toBe(true)
+  })
+
   it("answers retry without a held submission without sending", async () => {
     const { send } = createDeferredSender()
     const useOperation = createOperationHook({ operation: createRun, send })
@@ -454,6 +501,26 @@ describe("operation persistence", () => {
     expect(other.result.current.status).toBe("sending")
     expect(other.result.current.pending?.args).toEqual({ name: "Emerald" })
     expect(calls).toHaveLength(1)
+  })
+
+  it("gives answers to the hook still mounted when a later one with its key unmounts", async () => {
+    const { calls, send } = createDeferredSender()
+    const useOperation = createOperationHook({ operation: createRun, send })
+    const persistence = sessionStoragePersistence(PERSISTENCE_KEY)
+    const firstSettled = vi.fn()
+    const first = mountOperation(useOperation, {
+      persistence,
+      onSettled: firstSettled,
+    })
+    const second = mountOperation(useOperation, { persistence })
+    act(() => {
+      void first.result.current.run({ name: "Emerald" })
+    })
+
+    second.unmount()
+    await calls[0]!.answer(ok({ runId: "run-1" }))
+
+    expect(firstSettled).toHaveBeenCalledExactlyOnceWith(ok({ runId: "run-1" }))
   })
 
   it("delivers an answer that arrived while no hook was mounted on the next mount", async () => {
