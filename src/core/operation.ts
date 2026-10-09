@@ -9,6 +9,7 @@ import type {
   ProtocolIdentity,
 } from "./authority"
 import {
+  deepFreeze,
   NO_REFUSALS,
   OPERATION_PROTOCOL_ID,
   type MutationInvocation,
@@ -117,7 +118,9 @@ export type OperationEnvelope<Operation extends AnyOperationDefinition> =
  * schema whose output is not a valid input is a compile error. Omit `result`
  * when an acceptance returns nothing, and `refusal` when the command has no
  * public refusal cases. Result and refusal schemas must validate
- * synchronously, and their values must be JSON serializable. Version the name
+ * synchronously, and their values must be JSON serializable. A result
+ * schema's output must be a valid input, as an argument schema's must: the
+ * command returns the output, and the receipt parses it again on replay. Version the name
  * (`"run.create.v1"`) and change it when the arguments or result change
  * shape: a receipt replays only to a delivery with the same name.
  * @param definition Stable name and the argument, result, and refusal schemas.
@@ -141,7 +144,7 @@ export function defineOperation<
   readonly name: Name
   readonly args: ArgsSchema & ParsedFormSchema<ArgsSchema>
   /** Schema for the result an acceptance returns. Omit it when there is none. */
-  readonly result?: ResultSchema
+  readonly result?: ResultSchema & ParsedFormSchema<ResultSchema>
   /** Schema for the public refusals. Omit it when there are none. */
   readonly refusal?: RefusalSchema
 }): OperationDefinition<Name, ArgsSchema, ResultSchema, RefusalSchema> {
@@ -167,7 +170,8 @@ export function operationRegistry(
 
 /**
  * Builds the envelope for one submission of an operation: a fresh mutation ID
- * and the current time, unless given. Build it once, when the user submits,
+ * and the current time, unless given. Its arguments are a deeply frozen copy.
+ * Build it once, when the user submits,
  * and send this same envelope on every retry until the action answers. A new
  * envelope for a submission that may have committed can write twice.
  * @param operation The operation to submit.
@@ -196,7 +200,7 @@ export function createOperationEnvelope<
     createdAt: identity.createdAt ?? Date.now(),
     invocation: Object.freeze({
       name: operation.name,
-      args: structuredClone(args),
+      args: deepFreeze(structuredClone(args)),
     }),
   })
 }

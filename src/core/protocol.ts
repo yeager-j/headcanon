@@ -47,7 +47,7 @@ export type ParsedFormSchema<Schema extends StandardSchemaV1> =
   StandardSchemaV1.InferOutput<Schema> extends StandardSchemaV1.InferInput<Schema>
     ? unknown
     : {
-        readonly "~headcanon": "An argument schema's output must be a valid input"
+        readonly "~headcanon": "This schema's output must be a valid input"
       }
 
 /** Package-owned mutation identity, passed to `predict` and to a command's `execute`. */
@@ -204,7 +204,8 @@ export function findMutation<Mutation extends { readonly name: string }>(
   return protocol.mutations.find((mutation) => mutation.name === name)
 }
 
-function deepFreeze<Value>(value: Value): Value {
+/** Freezes `value` and everything it holds. Not a package export. */
+export function deepFreeze<Value>(value: Value): Value {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value)
     for (const key of Reflect.ownKeys(value)) {

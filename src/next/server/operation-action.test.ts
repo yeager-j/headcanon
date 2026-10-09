@@ -194,6 +194,38 @@ describe("createNextOperationAction", () => {
     expect(nextCache.updateTag).toHaveBeenCalledTimes(2)
   })
 
+  it("gives finalization its own copy of the result", async () => {
+    const authority = createInMemoryMutationAuthority<Runs, Actor, unknown>({
+      initialState: EMPTY_RUNS,
+      scope: (actor) => actor.id,
+    })
+    const binder = createMutationBinder({
+      actor: () => ({ id: "player-1" }),
+      authority,
+    })
+    const action = createNextOperationAction({
+      binder,
+      binding: binder.bindOperation(createRun, {
+        screen: () => allowScreening(),
+        admit: () => allowAdmission(),
+        execute: ({ stamp }) => {
+          stamp.record(runsAxis, 1)
+          return acceptOperation({ runId: "run-1" })
+        },
+        finalizeAccepted: ({ result }) => {
+          ;(result as { runId: string }).runId = "changed"
+        },
+      }),
+    })
+    const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+
+    const first = await action(envelope)
+    const replay = await action(envelope)
+
+    expect(acceptedResult(first)).toEqual({ runId: "run-1" })
+    expect(replay).toEqual(first)
+  })
+
   it("refuses a reused mutation ID with other arguments and writes nothing", async () => {
     const { action, authority, executed } = createHarness()
     const envelope = createOperationEnvelope(createRun, { name: "Emerald" })

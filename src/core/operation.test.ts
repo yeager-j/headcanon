@@ -85,6 +85,23 @@ describe("defineOperation", () => {
     )
   })
 
+  it("requires a result schema whose output is a valid input", () => {
+    const parsesNumberFromText: StandardSchemaV1<string, number> = {
+      "~standard": {
+        version: 1,
+        vendor: "headcanon-test",
+        validate: (value) => ({ value: Number(value) }),
+      },
+    }
+
+    defineOperation({
+      name: "run.count.v1",
+      args: nameArgs,
+      // @ts-expect-error — the receipt parses the command's number as text.
+      result: parsesNumberFromText,
+    })
+  })
+
   it("returns a frozen definition and rejects an empty name", () => {
     expect(Object.isFrozen(createRun)).toBe(true)
     expect(() => defineOperation({ name: "", args: nameArgs })).toThrow(
@@ -110,6 +127,20 @@ describe("createOperationEnvelope", () => {
     })
     expect(Object.isFrozen(envelope)).toBe(true)
     expect(Object.isFrozen(envelope.invocation)).toBe(true)
+    expect(Object.isFrozen(envelope.invocation.args)).toBe(true)
+  })
+
+  it("freezes nested arguments, so a retry cannot send other ones", () => {
+    const tagged = defineOperation({
+      name: "run.tag.v1",
+      args: schema((value): value is { readonly tags: string[] } =>
+        Array.isArray((value as { tags?: unknown } | null)?.tags)
+      ),
+    })
+    const envelope = createOperationEnvelope(tagged, { tags: ["a"] })
+
+    expect(() => envelope.invocation.args.tags.push("b")).toThrow(TypeError)
+    expect(envelope.invocation.args.tags).toEqual(["a"])
   })
 
   it("mints a fresh mutation ID and the current time by default", () => {

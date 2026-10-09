@@ -363,7 +363,9 @@ async function deliverCommand<Transaction, Actor, Preflight, Refusal>(options: {
       actor,
       args: structuredClone(prepared.args),
       stamp: accepted.stamp,
-      ...("result" in accepted ? { result: accepted.result } : {}),
+      ...("result" in accepted
+        ? { result: structuredClone(accepted.result) }
+        : {}),
       screened: screening.screened,
     })
   } finally {
