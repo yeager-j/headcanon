@@ -15,6 +15,13 @@ import type {
   ProtocolIdentity,
 } from "../core/authority"
 import type {
+  AnyOperationDefinition,
+  OperationActionOutcome,
+  OperationEnvelope,
+  OperationRefusalOf,
+  OperationResultOf,
+} from "../core/operation"
+import type {
   AnyProtocolDefinition,
   MutationRefusalOf,
   ProtocolInvocation,
@@ -29,6 +36,11 @@ import {
   type PredictedRootHook,
   type PredictedRootOptions,
 } from "../react"
+import {
+  createOperationHook,
+  type OperationHook,
+  type OperationSender,
+} from "../react/operation"
 import { createPredictedRootHook } from "../react/predicted-root"
 import type { RefreshAdapter } from "../react/refresh"
 
@@ -191,15 +203,7 @@ export function createNextMutationSender<
 > {
   return async (envelope) => {
     const outcome = await callKnownAction(action, envelope)
-    if (!outcome.ok) {
-      if (outcome.error.code === "contention") {
-        throw new RetryableDeliveryError("mutation authority contention")
-      }
-      throw new TerminalDeliveryError({
-        kind: "undeliverable",
-        error: outcome.error,
-      })
-    }
+    if (!outcome.ok) throw deliveryErrorFor(outcome.error)
 
     switch (outcome.value.kind) {
       case "accepted":
@@ -212,16 +216,112 @@ export function createNextMutationSender<
   }
 }
 
+/**
+ * The delivery error for an executor error: exhausted contention asks for the
+ * same envelope again; every other code is a final answer that wrote nothing.
+ */
+function deliveryErrorFor(
+  error: MutationExecutorError
+): RetryableDeliveryError | TerminalDeliveryError {
+  if (error.code === "contention") {
+    return new RetryableDeliveryError("mutation authority contention")
+  }
+  return new TerminalDeliveryError({ kind: "undeliverable", error })
+}
+
 /** Calls `action`, and reports an action the deployed build does not know as a stale client. */
-async function callKnownAction<Protocol extends AnyProtocolDefinition>(
-  action: NextMutationAction<Protocol>,
-  envelope: MutationEnvelope<ProtocolInvocation<Protocol>>
-): ReturnType<NextMutationAction<Protocol>> {
+async function callKnownAction<Envelope, Outcome>(
+  action: (envelope: Envelope) => Promise<Outcome>,
+  envelope: Envelope
+): Promise<Outcome> {
   try {
     return await action(envelope)
   } catch (error) {
     if (!unstable_isUnrecognizedActionError(error)) throw error
     throw new TerminalDeliveryError({ kind: "stale-client" }, { cause: error })
+  }
+}
+
+/**
+ * The Server Action `createNextOperationAction` generates for one operation,
+ * or a wrapper that returns its outcome. Its outcome carries the operation's
+ * identity, so binding another operation's action is a type error.
+ * @param envelope One submission's envelope.
+ * @returns A promise for the terminal outcome or an executor error.
+ */
+export type NextOperationAction<Operation extends AnyOperationDefinition> = (
+  envelope: OperationEnvelope<Operation>
+) => Promise<OperationActionOutcome<Operation>>
+
+/**
+ * Creates the hook that submits one operation through its generated Server
+ * Action. Each mounted hook holds one submission, as a form does: `run`
+ * makes its envelope once, and every retry sends that same envelope until
+ * the action answers, so the operation's receipt returns the first answer
+ * instead of writing twice. New arguments while a submission is held are
+ * refused locally until `retry` or `discard`.
+ *
+ * `run` and `retry` resolve with the action's answer, or with `unconfirmed`
+ * after `DELIVERY_WAIT_MS`; the submission then stays held, and a later
+ * answer goes to `onSettled`. Exhausted contention resends the same envelope
+ * after a short backoff. A server `redirect()` or other framework control
+ * flow ends the submission and is passed on to Next. With `persistence`, the
+ * held submission survives a page load as `unconfirmed`; it is sent again
+ * only by `retry`.
+ * @param options The operation and its generated Server Action.
+ * @returns A hook to call once per form instance.
+ * @example
+ * ```tsx
+ * const useCreateRun = createNextOperationHook({
+ *   operation: createRun,
+ *   action: createRunAction,
+ * })
+ *
+ * function NewRunForm({ playerId }: { playerId: string }) {
+ *   const router = useRouter()
+ *   const createRunForm = useCreateRun({
+ *     persistence: sessionStoragePersistence(`new-run:${playerId}`),
+ *     onSettled: (answer) => {
+ *       if (answer.ok) router.push(`/runs/${answer.value.runId}`)
+ *     },
+ *   })
+ *   // ...
+ * }
+ * ```
+ */
+export function createNextOperationHook<
+  const Operation extends AnyOperationDefinition,
+>(options: {
+  /** The operation's shared definition; it checks a restored submission. */
+  readonly operation: Operation
+  /** The operation's generated Server Action, or a wrapper that returns its outcome. */
+  readonly action: NextOperationAction<Operation>
+}): OperationHook<Operation> {
+  return createOperationHook(
+    {
+      operation: options.operation,
+      send: createNextOperationSender(options.action),
+    },
+    unstable_rethrow
+  )
+}
+
+/** Adapts an operation's Server Action to the operation hook's sender. */
+function createNextOperationSender<Operation extends AnyOperationDefinition>(
+  action: NextOperationAction<Operation>
+): OperationSender<Operation> {
+  return async (envelope) => {
+    const outcome = await callKnownAction(action, envelope)
+    if (!outcome.ok) throw deliveryErrorFor(outcome.error)
+
+    switch (outcome.value.kind) {
+      case "accepted":
+        return ok(outcome.value.result as OperationResultOf<Operation>)
+      case "refused":
+        return err(outcome.value.error as OperationRefusalOf<Operation>)
+      case "denied":
+        throw new TerminalDeliveryError({ kind: "denied" })
+    }
   }
 }
 

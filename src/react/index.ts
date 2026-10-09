@@ -27,6 +27,17 @@ export {
   type ProtocolPredictedRoot,
   type StagedMutation,
 } from "./predicted-root"
+export {
+  type OperationAnswer,
+  type OperationAnswerFailure,
+  type OperationFailure,
+  type OperationHandle,
+  type OperationHook,
+  type OperationHookOptions,
+  type OperationOutcome,
+  type OperationStatus,
+  type PendingOperation,
+} from "./operation"
 export { sessionStoragePersistence, type QueuePersistence } from "./persistence"
 export {
   createPredictedRootContext,

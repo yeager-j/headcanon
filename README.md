@@ -19,6 +19,7 @@ Headcanon handles those cases:
 - **Retry safely.** Stored receipts prevent a retried mutation from applying the same change twice.
 - **Handle refusals.** Rejected changes are removed, with typed results your app can use to explain what happened.
 - **Know when a change is complete.** Track both when the server saves it and when the screen receives confirmed data.
+- **Save writes you cannot predict.** An operation, such as creating a record whose ID the server makes, gets the same receipts: a resent request returns the first result. See [Run an operation outside a protocol](docs/server-setup.md#run-an-operation-outside-a-protocol).
 
 Use Headcanon when your Next.js app needs optimistic updates across Server Actions, database writes, and refreshed page data—and you want a consistent way to coordinate them.
 
@@ -149,20 +150,20 @@ Recovery listeners let you show retry controls when delivery is uncertain or ref
 
 Import each part of Headcanon from the entry for where your code runs. Each entry's full API documentation is the JSDoc in its shipped types; your editor shows it on hover.
 
-| Entry                      | Use it in                                        | Main exports                                                                                                   |
-| -------------------------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `headcanon`                | Shared code for the browser and server           | `defineMutation`, `defineProtocol`, `defineCanon`, `defineAxis`, `acceptedStamp`, `withPollingFallback`        |
-| `headcanon/next/client`    | Next.js client components                        | `createNextPredictedRoot`, `createNextObservedRoot`, `useRouterRefresh`                                        |
-| `headcanon/react`          | React client components without the Next binding | `createPredictedRoot`, `createPredictedRootContext`, `createObservedRoot`, `useSnapshotRefresh`                |
-| `headcanon/server`         | Server commands, with or without Next.js         | `createMutationBinder`, `acceptMutation`, `refuseMutation`, `denyMutation`, `allowScreening`, `allowAdmission` |
-| `headcanon/next/server`    | Next.js Server Actions and loaders               | `createNextMutationAction`, `defineCachedCanon`, `axisCacheTag`, `finalizeExternalActionCommit`                |
-| `headcanon/drizzle`        | The server, with Drizzle and Postgres            | `createDrizzleMutationAuthority`, `matchesPostgresError`                                                       |
-| `headcanon/drizzle-schema` | Your Drizzle schema                              | `headcanonMutationReceipts`                                                                                    |
-| `headcanon/ably/channels`  | Shared Ably configuration                        | `ablyChannelNamespace`                                                                                         |
-| `headcanon/ably/client`    | The browser, with Ably                           | `createAblyAxisInvalidations`                                                                                  |
-| `headcanon/ably/server`    | The server, with Ably                            | `createAblyInvalidationPublisher`, `createAblyAxisTokenRequest`                                                |
-| `headcanon/testing`        | Tests                                            | `createInMemoryMutationAuthority`, `createInMemoryInvalidationAdapter`                                         |
-| `headcanon/testing/react`  | Tests with Vitest and Testing Library            | `verifyRefreshContract`                                                                                        |
+| Entry                      | Use it in                                        | Main exports                                                                                                                      |
+| -------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `headcanon`                | Shared code for the browser and server           | `defineMutation`, `defineProtocol`, `defineOperation`, `defineCanon`, `defineAxis`, `acceptedStamp`, `withPollingFallback`        |
+| `headcanon/next/client`    | Next.js client components                        | `createNextPredictedRoot`, `createNextObservedRoot`, `createNextOperationHook`, `useRouterRefresh`                                |
+| `headcanon/react`          | React client components without the Next binding | `createPredictedRoot`, `createPredictedRootContext`, `createObservedRoot`, `useSnapshotRefresh`                                   |
+| `headcanon/server`         | Server commands, with or without Next.js         | `createMutationBinder`, `acceptMutation`, `acceptOperation`, `refuseMutation`, `denyMutation`, `allowScreening`, `allowAdmission` |
+| `headcanon/next/server`    | Next.js Server Actions and loaders               | `createNextMutationAction`, `createNextOperationAction`, `defineCachedCanon`, `axisCacheTag`, `finalizeExternalActionCommit`      |
+| `headcanon/drizzle`        | The server, with Drizzle and Postgres            | `createDrizzleMutationAuthority`, `matchesPostgresError`                                                                          |
+| `headcanon/drizzle-schema` | Your Drizzle schema                              | `headcanonMutationReceipts`                                                                                                       |
+| `headcanon/ably/channels`  | Shared Ably configuration                        | `ablyChannelNamespace`                                                                                                            |
+| `headcanon/ably/client`    | The browser, with Ably                           | `createAblyAxisInvalidations`                                                                                                     |
+| `headcanon/ably/server`    | The server, with Ably                            | `createAblyInvalidationPublisher`, `createAblyAxisTokenRequest`                                                                   |
+| `headcanon/testing`        | Tests                                            | `createInMemoryMutationAuthority`, `createInMemoryInvalidationAdapter`                                                            |
+| `headcanon/testing/react`  | Tests with Vitest and Testing Library            | `verifyRefreshContract`                                                                                                           |
 
 ## Further reading
 

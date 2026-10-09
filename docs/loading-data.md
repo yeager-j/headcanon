@@ -254,7 +254,7 @@ After acceptance, a generated Server Action runs optional finalization, expires 
 
 Refreshing a route does not by itself prove that the read has caught up. The loader must return covering revisions. Accepted predictions remain visible while the root waits, including when freshness becomes stalled.
 
-For writes outside generated actions, persist the data and revisions first, then announce the committed stamp using the helper for your server context:
+A write from a Server Action that a user starts, such as creating a record, belongs in an [operation](server-setup.md#run-an-operation-outside-a-protocol): its generated action finalizes the stamp, and its receipt keeps a second delivery from writing twice. For other writes outside generated actions, persist the data and revisions first, then announce the committed stamp using the helper for your server context:
 
 | Write context                               | Helper from `headcanon/next/server` | What it does                                                                      |
 | ------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------------------- |
