@@ -138,6 +138,12 @@ type OneStateMutations<Mutations extends readonly AnyMutationDefinition[]> = [
   ? unknown
   : never
 
+/** Requires every mutation in a registry to predict the declared `State`. */
+type DeclaredStateMutations<
+  Mutations extends readonly AnyMutationDefinition[],
+  State,
+> = [Mutations[number]] extends [MutationForState<State>] ? unknown : never
+
 /** Extracts the serializable invocation produced by a mutation definition. */
 export type InvocationOf<Mutation> = Mutation extends (
   args: never
@@ -162,20 +168,43 @@ export type MutationErrorOf<Mutation> =
     ? Error
     : never
 
-/** A stable protocol ID and its immutable, uniquely named mutation list. */
+declare const protocolState: unique symbol
+
+/**
+ * A stable protocol ID and its immutable, uniquely named mutation list.
+ * `State` is the state every mutation predicts: declared with
+ * `defineProtocol<State>()`, or inferred from the predictors.
+ */
 export interface ProtocolDefinition<
   Id extends string,
   Mutations extends readonly AnyMutationDefinition[],
+  State = MutationState<Mutations[number]>,
 > {
   readonly id: Id
   readonly mutations: Mutations
+  /** Type-only carrier of the protocol's state; never present at runtime. */
+  readonly [protocolState]?: State
 }
 
-/** Any protocol definition: the constraint for code generic over protocols. */
+/**
+ * Any protocol definition: the constraint for code generic over protocols.
+ * Its state is `unknown`, so a protocol with a declared state fits it.
+ */
 export type AnyProtocolDefinition = ProtocolDefinition<
   string,
-  readonly AnyMutationDefinition[]
+  readonly AnyMutationDefinition[],
+  unknown
 >
+
+/** The state a protocol's mutations predict. */
+export type ProtocolState<Protocol> =
+  Protocol extends ProtocolDefinition<
+    string,
+    readonly AnyMutationDefinition[],
+    infer State
+  >
+    ? State
+    : never
 
 /** The union of every mutation definition a protocol registers. */
 export type ProtocolMutation<Protocol> =
@@ -278,25 +307,15 @@ export function defineMutation<
   >
 }
 
-/**
- * Registers a closed set of mutations under one stable protocol ID.
- *
- * Pass the same protocol to the predicted root and to the mutation action.
- * The returned protocol holds a frozen copy of the mutation list. TypeScript
- * requires every mutation to predict the same state type, whether the list is
- * an inline tuple or a predeclared array.
- *
- * @param definition Stable protocol ID and closed mutation registry.
- * @returns A frozen protocol definition.
- * @throws Error when the ID is the reserved `headcanon:operation`, a mutation is malformed, or two mutations share a name; these are configuration errors, not request refusals.
- */
-export function defineProtocol<
-  const Id extends string,
-  const Mutations extends readonly AnyMutationDefinition[],
+/** Checks a protocol's mutations, then freezes it. */
+function createProtocol<
+  Id extends string,
+  Mutations extends readonly AnyMutationDefinition[],
+  State,
 >(definition: {
   readonly id: Id
-  readonly mutations: Mutations & OneStateMutations<Mutations>
-}): ProtocolDefinition<Id, Mutations> {
+  readonly mutations: Mutations
+}): ProtocolDefinition<Id, Mutations, State> {
   if (definition.id === OPERATION_PROTOCOL_ID) {
     throw new Error(`Reserved protocol ID: ${OPERATION_PROTOCOL_ID}`)
   }
@@ -321,4 +340,50 @@ export function defineProtocol<
   }
 
   return Object.freeze({ id: definition.id, mutations })
+}
+
+/**
+ * Registers a closed set of mutations under one stable protocol ID.
+ *
+ * Pass the same protocol to the predicted root and to the mutation action.
+ * The returned protocol holds a frozen copy of the mutation list. TypeScript
+ * requires every mutation to predict the same state type, whether the list is
+ * an inline tuple or a predeclared array.
+ *
+ * Call it with a state type and no arguments to declare the protocol's state
+ * yourself: `defineProtocol<RunState>()({ id, mutations })`. Every predictor
+ * must then accept and return that state. Declare it when the protocol has no
+ * mutations yet, since there is no predictor to infer it from.
+ *
+ * @param definition Stable protocol ID and closed mutation registry.
+ * @returns A frozen protocol definition; with a state type and no arguments, a function that takes the definition and returns it.
+ * @throws Error when the ID is the reserved `headcanon:operation`, a mutation is malformed, or two mutations share a name; these are configuration errors, not request refusals.
+ * @example
+ * ```ts
+ * // A protocol whose first mutation comes later.
+ * export const runProtocol = defineProtocol<RunState>()({
+ *   id: "run.v1",
+ *   mutations: [],
+ * })
+ * ```
+ */
+export function defineProtocol<State>(): <
+  const Id extends string,
+  const Mutations extends readonly AnyMutationDefinition[],
+>(definition: {
+  readonly id: Id
+  readonly mutations: Mutations & DeclaredStateMutations<Mutations, State>
+}) => ProtocolDefinition<Id, Mutations, State>
+export function defineProtocol<
+  const Id extends string,
+  const Mutations extends readonly AnyMutationDefinition[],
+>(definition: {
+  readonly id: Id
+  readonly mutations: Mutations & OneStateMutations<Mutations>
+}): ProtocolDefinition<Id, Mutations>
+export function defineProtocol(definition?: {
+  readonly id: string
+  readonly mutations: readonly AnyMutationDefinition[]
+}): unknown {
+  return definition === undefined ? createProtocol : createProtocol(definition)
 }
