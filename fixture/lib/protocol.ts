@@ -47,19 +47,28 @@ export const fixtureRefusalSchema: StandardSchemaV1<FixtureRefusal> = {
   },
 }
 
+/** Appends a checked item to the fixture's state. */
+export function applyAddItem(
+  state: FixtureState,
+  effect: { readonly text: string }
+): FixtureState {
+  return { items: [...state.items, effect.text] }
+}
+
 /**
- * Appends one item. The predictor and the authority both refuse a duplicate,
- * so the fixture can reach a local refusal, an authority refusal, and a
- * replay conflict.
+ * Appends one item. The predictor and the authority run the same `check`, so
+ * both refuse a duplicate, and the fixture can reach a local refusal, an
+ * authority refusal, and a replay conflict.
  */
 export const addItem = defineMutation({
   name: "item.add",
   args: addItemArgsSchema,
   refusal: fixtureRefusalSchema,
-  predict(state: FixtureState, args) {
-    if (state.items.includes(args.text)) return err("item-refused" as const)
-    return ok({ items: [...state.items, args.text] })
+  check(state: FixtureState, args) {
+    if (state.items.includes(args.text)) return err("item-refused")
+    return ok({ text: args.text })
   },
+  apply: applyAddItem,
 })
 
 /**

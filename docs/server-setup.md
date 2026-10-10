@@ -86,12 +86,11 @@ import {
   allowAdmission,
   allowScreening,
   denyMutation,
-  refuseMutation,
   throwMutationContention,
 } from "headcanon/server"
 
 import { notesBinder } from "../binder"
-import { isValidTitle, noteAxis, renameNote } from "../protocol"
+import { noteAxis, renameNote } from "../protocol"
 
 export const renameNoteBinding = notesBinder.bind(renameNote, {
   screen: async ({ executor, actor, args }) => {
@@ -109,23 +108,19 @@ export const renameNoteBinding = notesBinder.bind(renameNote, {
       .from(notes)
       .where(and(eq(notes.id, args.noteId), eq(notes.ownerId, actor.userId)))
 
-    return note ? allowAdmission(note) : denyMutation()
+    return note ? allowAdmission({ state: note }) : denyMutation()
   },
 
-  execute: async ({ tx, actor, args, evidence, stamp }) => {
-    if (!isValidTitle(args.title)) {
-      return refuseMutation("invalid-title")
-    }
-
-    const nextRevision = evidence.revision + 1
+  execute: async ({ tx, actor, args, state, effect, stamp }) => {
+    const nextRevision = state.revision + 1
     const [updated] = await tx
       .update(notes)
-      .set({ title: args.title, revision: nextRevision })
+      .set({ title: effect.title, revision: nextRevision })
       .where(
         and(
           eq(notes.id, args.noteId),
           eq(notes.ownerId, actor.userId),
-          eq(notes.revision, evidence.revision)
+          eq(notes.revision, state.revision)
         )
       )
       .returning({ id: notes.id })
@@ -142,7 +137,23 @@ Write command members in lifecycle order: `screen`, `admit`, `execute`, then opt
 
 `allowScreening(value)` passes `value` to `finalizeAccepted` as `screened`. `allowAdmission(value)` passes `value` to `execute` as `evidence`. Call either with no argument when the next step needs no value; it then receives `undefined`.
 
-Command modules import from `headcanon/server`, which loads no Next.js code. A non-Next server, such as a Route Handler or a worker, can use the same binder and commands. Only the action module imports `headcanon/next/server`.
+Command modules import from `headcanon/server`, which loads no Next.js code. A non-Next server, such as a Route Handler or a worker, can use the same binder and commands. For a mutation defined by `check` and `apply`, such a runner must run the mutation's `check` over the admitted state before `execute`, as `createNextMutationAction` does. Only the action module imports `headcanon/next/server`.
+
+### Run the mutation's check before execute
+
+`renameNote` is defined by `check` and `apply` (see [Define the mutation](getting-started.md#3-define-the-mutation)). For such a mutation, `admit` must return `allowAdmission({ state })`, where `state` is the mutation's state read through `tx`. The note row above has every field of `NoteState`, so it can be the state. Put any other value that `execute` needs beside `state`; `execute` receives the whole object as `evidence`.
+
+After `admit` allows the attempt, Headcanon runs the mutation's `check` over `state`, with the same arguments and mutation ID as the predictor:
+
+| `check` returns   | What the action does                                                                                |
+| ----------------- | --------------------------------------------------------------------------------------------------- |
+| `err(refusal)`    | Records the refusal, as `refuseMutation(refusal)` does. `execute` does not run.                     |
+| `ok(unchanged())` | Accepts with an empty stamp, as `acceptMutation({ unchanged: true })` does. `execute` does not run. |
+| `ok(effect)`      | Runs `execute` with `state` and `effect`.                                                           |
+
+So the browser and the server always apply the same rules, and `execute` never sees a refusal or a change that does nothing. The definition keeps `check` but not `apply`. To use `apply` in `execute`, export it from the protocol module on its own. `execute` still checks what only the server knows. It can return `refuseMutation` with any value of the mutation's refusal schema, or `denyMutation`.
+
+Some commands do not fit this form. For example, a command that reads only part of the state cannot give `check` the whole state. Define that mutation with `predict` instead. Its `admit` returns any evidence, and its `execute` must repeat every rule the write needs, because the server does not run the predictor.
 
 ### Why screening and admission are separate
 
@@ -165,7 +176,7 @@ Admission alone does not lock the data it reads. The example also checks ownersh
 | An update depends on a row's current revision.                | No revision check is needed just to return a stored result.                                                      | Read the revision used by `execute` to guard the write. A contention retry reads it again.                                 |
 | A post-commit projection needs context from before the write. | Return that context with `allowScreening(...)` so `finalizeAccepted` receives it as `screened`.                  | Read any data needed for the write separately. Attempt evidence is not passed to finalization.                             |
 
-Use both steps when a permission controls access to stored outcomes and new writes. Keep conditions that a successful mutation changes, such as an order's draft status, in the transaction path so they do not block recovery of that success. `admit` can allow or deny; public business-rule refusals belong in `execute`.
+Use both steps when a permission controls access to stored outcomes and new writes. Keep conditions that a successful mutation changes, such as an order's draft status, in the transaction path so they do not block recovery of that success. `admit` can allow or deny; public business-rule refusals belong in the mutation's `check`, or in `execute`.
 
 ### Choose the right outcome
 
@@ -180,9 +191,9 @@ Use both steps when a permission controls access to stored outcomes and new writ
 
 The generated action returns denials as `ok({ kind: "denied" })`, without a reason. It also denies an envelope made for another actor; see [Deny envelopes made for another actor](#deny-envelopes-made-for-another-actor). `createNextPredictedRoot` maps that outcome to a terminal mutation failure. You do not need to throw Next.js `forbidden()` for this path.
 
-Give a mutation a `refusal` schema when its command can return `refuseMutation(error)`. If the command has no public refusal cases, omit `refusal`: the mutation's refusal type is then `never`, and a stored refusal for it throws instead of replaying. Refusal schemas must validate synchronously, and their values must be JSON serializable. Keep secrets and internal error details out of public refusals.
+Give a mutation a `refusal` schema when its `check` or its command can refuse. If the command has no public refusal cases, omit `refusal`: the mutation's refusal type is then `never`, and a stored refusal for it throws instead of replaying. Refusal schemas must validate synchronously, and their values must be JSON serializable. Keep secrets and internal error details out of public refusals.
 
-The action validates arguments before deriving the actor or running commands. It does not run the client predictor on the server, so repeat all business rules needed for a valid write. Arguments must already be in their schema's parsed form; the action rejects parsing that changes them. Normalize inputs before creating the invocation. Canonicalization accepts shared object references only while their expanded JSON stays within its limits: 10,000 values (including containers), 100 nested property/index steps, and 1,048,576 UTF-16 code units of JSON. These limits also include the protocol and invocation wrapper when deriving receipt identity. Exceeding a limit returns an `invalid-json-value` error with reason `resource-limit`, wrapped as `canonical-invocation` for parsed arguments; raw arguments that fail the parsed-form comparison return `invalid-arguments`.
+The action validates arguments before deriving the actor or running commands. For a mutation defined by `check` and `apply`, it runs `check` before `execute`. It never runs a `predict` function on the server, so a command for such a mutation must repeat all business rules needed for a valid write. Arguments must already be in their schema's parsed form; the action rejects parsing that changes them. Normalize inputs before creating the invocation. Canonicalization accepts shared object references only while their expanded JSON stays within its limits: 10,000 values (including containers), 100 nested property/index steps, and 1,048,576 UTF-16 code units of JSON. These limits also include the protocol and invocation wrapper when deriving receipt identity. Exceeding a limit returns an `invalid-json-value` error with reason `resource-limit`, wrapped as `canonical-invocation` for parsed arguments; raw arguments that fail the parsed-form comparison return `invalid-arguments`.
 
 ## Export the Server Action
 
@@ -219,7 +230,7 @@ When a guarded update affects no row, call `throwMutationContention()`. The adap
 
 Record every revision the successful transaction advances with `stamp.record(axis, revision)`. Recording a stamp does not update your database: your command must persist the revision itself. If one command changes several independently tracked records, record each affected axis.
 
-An accepted command must record at least one axis. If `execute` returns `acceptMutation()` with an empty stamp, the authority throws, rolls the transaction back, and records no receipt. Without this check, the client would end the prediction before refreshed data arrives, and the old value would show again. When a command accepts and changes nothing, return `acceptMutation({ unchanged: true })` and record no axis. A command that records an axis and also returns `unchanged: true` throws too.
+An accepted command must record at least one axis. If `execute` returns `acceptMutation()` with an empty stamp, the authority throws, rolls the transaction back, and records no receipt. Without this check, the client would end the prediction before refreshed data arrives, and the old value would show again. When a command accepts and changes nothing, return `acceptMutation({ unchanged: true })` and record no axis. For a mutation defined by `check` and `apply`, `check` returns `ok(unchanged())` instead, and `execute` does not run. A command that records an axis and also returns `unchanged: true` throws too.
 
 Use stable axis names and increasing, non-negative safe integers. Loaders must read the displayed values and their revisions together. Missing or incorrect revisions can prevent the client from recognizing that a saved mutation has reached the screen.
 

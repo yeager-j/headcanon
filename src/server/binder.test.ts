@@ -17,7 +17,14 @@ import {
   type MutationRefusalOf,
 } from "../core/protocol"
 import { axisId } from "../core/revisions"
-import { createInMemoryMutationAuthority } from "../testing"
+import {
+  createInMemoryMutationAuthority,
+} from "../testing"
+import {
+  assertValidBindings,
+  type AnyMutationBinding,
+  type CompleteBindings,
+} from "./binder"
 
 type NoteState = {
   id: string
@@ -94,5 +101,70 @@ describe("binding a mutation that declares no refusal cases", () => {
         return refuseMutation("invalid-title")
       },
     })
+  })
+})
+
+describe("naming the mutations an incomplete binding list gets wrong", () => {
+  const archiveNote = defineMutation({
+    name: "notes.archive",
+    args: titleSchema,
+    predict: (state: NoteState) => ok(state),
+  })
+  const pinNote = defineMutation({
+    name: "notes.pin",
+    args: titleSchema,
+    predict: (state: NoteState) => ok(state),
+  })
+  const noteProtocol = defineProtocol({
+    id: "notes.full.v1",
+    mutations: [renameNote, archiveNote, pinNote],
+  })
+
+  const binder = notesBinder()
+  const command = {
+    screen: () => allowScreening(),
+    admit: () => allowAdmission(),
+    execute: () => acceptMutation({ unchanged: true }),
+  }
+  const renameBinding = binder.bind(renameNote, command)
+  const archiveBinding = binder.bind(archiveNote, command)
+  const pinBinding = binder.bind(pinNote, command)
+
+  type NotesBindings<
+    Protocol,
+    Commands extends readonly AnyMutationBinding[],
+  > = CompleteBindings<Protocol, Commands>
+
+  it("names each unbound mutation", () => {
+    expectTypeOf<
+      NotesBindings<typeof noteProtocol, readonly [typeof renameBinding]>
+    >().toEqualTypeOf<{
+      readonly __missingMutationBinding: "notes.archive" | "notes.pin"
+    }>()
+    expect(() =>
+      assertValidBindings(noteProtocol, binder, [renameBinding])
+    ).toThrow("missing [notes.archive, notes.pin]")
+  })
+
+  it("names each mutation the protocol does not have", () => {
+    expectTypeOf<
+      NotesBindings<
+        typeof notesProtocol,
+        readonly [
+          typeof renameBinding,
+          typeof archiveBinding,
+          typeof pinBinding,
+        ]
+      >
+    >().toEqualTypeOf<{
+      readonly __unknownMutationBinding: "notes.archive" | "notes.pin"
+    }>()
+    expect(() =>
+      assertValidBindings(notesProtocol, binder, [
+        renameBinding,
+        archiveBinding,
+        pinBinding,
+      ])
+    ).toThrow("does not use the protocol definition: notes.archive")
   })
 })

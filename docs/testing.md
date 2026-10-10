@@ -8,7 +8,7 @@ This guide uses Vitest and the note protocol from [Getting started](getting-star
 
 | What you want to check                                                           | Where to test it                                               |
 | -------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| A predicted value or local refusal                                               | Call the mutation's `predict` function directly.               |
+| A predicted value or local refusal                                               | Call the mutation's `check`, `apply`, or `predict` directly.   |
 | Permissions, database writes, revision increments, and stored outcomes           | Run your server commands against an isolated test database.    |
 | Pending UI, acceptance, canonization, and recovery controls                      | Render a root or component with controlled delivery and canon. |
 | How a view responds to remote revisions                                          | Use the in-memory invalidation adapter.                        |
@@ -55,11 +55,12 @@ The contract entry supports Vitest `^4.1.6` and Testing Library `^16.3.2`. Impor
 
 ## Test a predictor directly
 
-A predictor takes the current value, parsed arguments, and a mutation context. Test its successful result, refusal cases, and whether it leaves the input unchanged:
+A predictor takes the current value, parsed arguments, and a mutation context. A mutation defined by `check` and `apply` has a `predict` too: it runs `check`, then `apply`. Test its successful result, refusal cases, and whether it leaves the input unchanged:
 
 ```ts
 // lib/notes/protocol.test.ts
 import { renameNote } from "@/lib/notes/protocol"
+import { unchanged } from "headcanon"
 import { err, ok } from "serializable-result"
 import { expect, it } from "vitest"
 
@@ -91,7 +92,20 @@ it("refuses an empty title", () => {
     )
   ).toEqual(err("invalid-title"))
 })
+
+it("checks the effect, and an unchanged title", () => {
+  const state = { id: noteId, ownerId, title: "Before" }
+
+  expect(renameNote.check(state, { noteId, title: "After" }, context)).toEqual(
+    ok({ title: "After" })
+  )
+  expect(renameNote.check(state, { noteId, title: "Before" }, context)).toEqual(
+    ok(unchanged())
+  )
+})
 ```
+
+The server runs the same `check`, so a test of `check` covers the rules on both sides. The server's command tests then need only the rules that `execute` adds.
 
 Calling `predict` directly does not validate arguments through the mutation's schema. Test malformed wire inputs at the Server Action boundary as well. For predictors that create IDs, use `context.mutationId` and check that replay with the same context produces the same result.
 
@@ -107,6 +121,7 @@ Check the returned outcome, committed rows, revisions, and receipts together:
 | The envelope's `scope` is not the actor's                | `ok({ kind: "denied" })` before screening; no receipt lookup, no receipt, and no write.                                                                                                      |
 | Screening denies access                                  | `ok({ kind: "denied" })`; no receipt and no write.                                                                                                                                           |
 | Transaction-time admission denies access                 | Recorded denial; no domain write.                                                                                                                                                            |
+| `check` refuses, or returns `unchanged()`                | A recorded refusal, or an acceptance with an empty stamp. `execute` does not run.                                                                                                            |
 | A command refuses after making tentative writes          | Domain writes roll back; the refusal is recorded.                                                                                                                                            |
 | A command accepts                                        | Writes, revision increments, and the receipt commit together. Its stamp contains every affected axis.                                                                                        |
 | A command accepts without recording an axis              | The action throws; no receipt and no write. `acceptMutation({ unchanged: true })` accepts with an empty stamp instead.                                                                       |
@@ -163,7 +178,7 @@ export function createNotesFixture(initialState: StoredNote) {
 }
 ```
 
-Create a new fixture for each test. Bind fixture commands with this binder and pass the same binder to `createNextMutationAction`. Its preflight executor has `read()`; its transaction has `read()` and `write(nextState)`. Commands still check permissions, advance revisions, and record their stamps.
+Create a new fixture for each test. Bind fixture commands with this binder and pass the same binder to `createNextMutationAction`. Its preflight executor has `read()`; its transaction has `read()` and `write(nextState)`. Commands still check permissions, advance revisions, and record their stamps. A command for a mutation defined by `check` and `apply` admits with `allowAdmission({ state: tx.read() })`.
 
 This is an in-memory state store, not a Drizzle client. Commands that call `tx.select()` or `tx.update()` need a real test database or an application storage interface with its own test implementation. A replacement fixture command does not verify your production SQL.
 

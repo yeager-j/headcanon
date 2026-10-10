@@ -21,16 +21,20 @@ import {
   type OperationActionOutcome,
   type OperationRefusalOf,
 } from "../../core/operation"
-import type {
-  AnyMutationDefinition,
-  AnyProtocolDefinition,
-  MutationRefusalOf,
+import {
+  isCheckedMutation,
+  isUnchanged,
+  type AnyMutationDefinition,
+  type AnyProtocolDefinition,
+  type MutationContext,
+  type MutationRefusalOf,
 } from "../../core/protocol"
 import type { AcceptedStamp } from "../../core/revisions"
 import {
   assertValidBindings,
   type AnyMutationBinding,
   type BoundMutation,
+  type CompleteBindings,
   type MutationBinder,
   type MutationBinding,
   type MutationCommand,
@@ -38,9 +42,11 @@ import {
   type OperationCommand,
   type ValidBindings,
 } from "../../server/binder"
-import type {
-  MutationAdmission,
-  MutationScreening,
+import {
+  acceptMutation,
+  refuseMutation,
+  type MutationAdmission,
+  type MutationScreening,
 } from "../../server/outcomes"
 import { parseStoredValue } from "../../server/refusal"
 import { finalizeStamp } from "./revalidation"
@@ -86,6 +92,10 @@ type RuntimeBinding<Actor, Preflight, Transaction, Refusal> = MutationBinding<
  * `scope` is not the authority's `scope(actor)`, before any receipt lookup or
  * command. It runs `screen` before it claims a receipt, and runs `admit`
  * and `execute` inside the authority's transaction attempts, which may repeat.
+ * For a mutation defined by `check` and `apply`, it runs `check` over the
+ * state `admit` returned, and runs `execute` only when `check` returns an
+ * effect: a refusal is recorded, and `unchanged()` accepts with an empty
+ * stamp.
  * When no receipt exists and the envelope's `createdAt` is outside the
  * authority's delivery window, it returns `delivery-expired` or
  * `delivery-from-future` after `screen`, without admitting or recording it.
@@ -126,10 +136,10 @@ export function createNextMutationAction<
   Preflight,
   const Commands extends readonly AnyMutationBinding[],
 >(options: {
-  readonly protocol: Protocol
+  readonly protocol: Protocol & CompleteBindings<Protocol, Commands>
   readonly binder: MutationBinder<Transaction, Actor, Preflight>
   readonly commands: Commands &
-    ValidBindings<Protocol, Commands, Actor, Preflight, Transaction>
+    ValidBindings<Commands, Actor, Preflight, Transaction>
   /** Publishes accepted stamps to other clients; omit it without realtime. */
   readonly invalidations?: InvalidationPublisher
 }) {
@@ -165,7 +175,7 @@ export function createNextMutationAction<
     return deliverCommand<Transaction, Actor, Preflight, Refusal>({
       prepared: prepared.value,
       binder,
-      command: binding.command,
+      command: deliveredMutationCommand(binding),
       parseRefusal: (value) =>
         parseStoredValue<Refusal>(
           binding.mutation.refusal,
@@ -303,6 +313,58 @@ interface DeliveredCommand<Transaction, Actor, Preflight, Refusal> {
     readonly result?: unknown
     readonly screened: unknown
   }) => void | Promise<void>
+}
+
+/** The `execute` of a checked mutation's command, as the delivery calls it. */
+type CheckedExecute<Transaction, Actor, Preflight, Refusal> = (
+  context: Parameters<
+    DeliveredCommand<Transaction, Actor, Preflight, Refusal>["execute"]
+  >[0] & {
+    readonly state: unknown
+    readonly effect: unknown
+  }
+) => AttemptDecision<Refusal> | Promise<AttemptDecision<Refusal>>
+
+/** A checked mutation's `check`, as the delivery calls it. */
+type RuntimeCheck<Refusal> = (
+  state: unknown,
+  args: unknown,
+  context: MutationContext
+) => Result<unknown, Refusal>
+
+/**
+ * The command the delivery runs for one mutation binding. For a mutation
+ * defined by `check` and `apply`, `execute` first runs `check` over the state
+ * `admit` returned. A refusal is refused and `unchanged()` is accepted with
+ * an empty stamp, without the command's `execute`; an effect runs it.
+ */
+function deliveredMutationCommand<Transaction, Actor, Preflight, Refusal>(
+  binding: RuntimeBinding<Actor, Preflight, Transaction, Refusal>
+): DeliveredCommand<Transaction, Actor, Preflight, Refusal> {
+  const { mutation, command } = binding
+  if (!isCheckedMutation(mutation)) return command
+
+  const check = mutation.check as RuntimeCheck<Refusal>
+  const execute = command.execute as CheckedExecute<
+    Transaction,
+    Actor,
+    Preflight,
+    Refusal
+  >
+
+  return {
+    ...command,
+    execute: (context) => {
+      const { state } = context.evidence as { readonly state: unknown }
+      const checked = check(state, context.args, {
+        mutationId: context.mutationId,
+      })
+      if (!checked.ok) return refuseMutation(checked.error)
+      if (isUnchanged(checked.value)) return acceptMutation({ unchanged: true })
+
+      return execute({ ...context, state, effect: checked.value })
+    },
+  }
 }
 
 /**
