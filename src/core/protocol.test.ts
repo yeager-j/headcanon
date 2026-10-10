@@ -1,16 +1,24 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-import { ok, type Result } from "serializable-result"
+import { err, ok, type Result } from "serializable-result"
 import { describe, expect, expectTypeOf, it } from "vitest"
 
 import {
   defineMutation,
   defineProtocol,
+  unchanged,
   type MutationInvocation,
   type MutationRefusalOf,
   type ProtocolInvocation,
 } from ".."
 import { prepareMutationRequest } from "./authority"
-import { findMutation, type MutationErrorOf } from "./protocol"
+import {
+  findMutation,
+  isCheckedMutation,
+  isUnchanged,
+  type MutationEffectOf,
+  type MutationErrorOf,
+  type MutationState,
+} from "./protocol"
 
 type AmountArgs = { readonly amount: number }
 
@@ -118,9 +126,9 @@ function rejectInvalidProtocolsAtCompileTime() {
       validate: (value) => ({ value: String(value) }),
     },
   }
+  // @ts-expect-error — parsed output must be a valid input to re-parse.
   defineMutation({
     name: "counter.transformed",
-    // @ts-expect-error — parsed output must be a valid input to re-parse.
     args: numberToString,
     predict: (state: number) => ok(state),
   })
@@ -276,6 +284,133 @@ describe("defineMutation", () => {
   it("gives every definition the same enumerable members", () => {
     expect(Object.keys(increment)).toEqual(Object.keys(correlated))
     expect(Object.keys(increment)).toContain("refusal")
+  })
+})
+
+describe("defineMutation with check and apply", () => {
+  type Ledger = { readonly total: number; readonly entries: number }
+  type Deposit = { amount: number }
+
+  const applyDeposit = (ledger: Ledger, effect: Deposit) => ({
+    total: ledger.total + effect.amount,
+    entries: ledger.entries + 1,
+  })
+  const deposit = defineMutation({
+    name: "ledger.deposit",
+    args: amountSchema,
+    refusal: authorityRefusalSchema,
+    check(ledger: Ledger, args) {
+      if (args.amount < 0) return err({ code: "authoritative" })
+      if (args.amount === 0) return ok(unchanged())
+      return ok({ amount: args.amount })
+    },
+    apply: applyDeposit,
+  })
+  const context = { mutationId: "mutation-1" }
+  const ledger: Ledger = Object.freeze({ total: 10, entries: 1 })
+
+  it("derives a predictor that runs check, then apply on the effect", () => {
+    const args = deposit({ amount: 5 }).args
+
+    expect(deposit.predict(ledger, args, context)).toEqual(
+      ok(applyDeposit(ledger, { amount: 5 }))
+    )
+    expect(deposit.predict(ledger, args, context)).toEqual(
+      ok({ total: 15, entries: 2 })
+    )
+  })
+
+  it("predicts the same state for unchanged() and returns check's refusal", () => {
+    const kept = deposit.predict(ledger, { amount: 0 }, context)
+
+    expect(kept).toEqual(ok(ledger))
+    expect(kept.ok && kept.value).toBe(ledger)
+    expect(deposit.predict(ledger, { amount: -1 }, context)).toEqual(
+      err({ code: "authoritative" })
+    )
+  })
+
+  it("passes the mutation context to check", () => {
+    const seen: string[] = []
+    const stamped = defineMutation({
+      name: "ledger.stamped",
+      args: amountSchema,
+      check(_ledger: Ledger, _args, { mutationId }) {
+        seen.push(mutationId)
+        return ok(unchanged())
+      },
+      apply: (ledger: Ledger) => ledger,
+    })
+
+    stamped.predict(ledger, { amount: 1 }, context)
+
+    expect(seen).toEqual(["mutation-1"])
+  })
+
+  it("exposes check, and types the refusal as the prediction error", () => {
+    expect(isCheckedMutation(deposit)).toBe(true)
+    expect(isCheckedMutation(increment)).toBe(false)
+    expect(deposit.check(ledger, { amount: 0 }, context)).toEqual(
+      ok(unchanged())
+    )
+    expect(Object.keys(deposit)).toEqual([...Object.keys(increment), "check"])
+
+    expectTypeOf<MutationState<typeof deposit>>().toEqualTypeOf<Ledger>()
+    expectTypeOf<MutationEffectOf<typeof deposit>>().toEqualTypeOf<Deposit>()
+    expectTypeOf<
+      MutationRefusalOf<typeof deposit>
+    >().toEqualTypeOf<AuthorityRefusal>()
+    expectTypeOf<
+      MutationErrorOf<typeof deposit>
+    >().toEqualTypeOf<AuthorityRefusal>()
+  })
+
+  it("keeps Function.prototype.apply on the callable definition", () => {
+    expect(Object.hasOwn(deposit, "apply")).toBe(false)
+    expect(deposit.apply).toBe(Function.prototype.apply)
+    expect(deposit.apply(undefined, [{ amount: 1 }])).toEqual(
+      deposit({ amount: 1 })
+    )
+  })
+
+  it("registers in a protocol beside predict mutations of the same state", () => {
+    const withdraw = defineMutation({
+      name: "ledger.withdraw",
+      args: amountSchema,
+      predict: (ledger: Ledger, args) =>
+        ok({ ...ledger, total: ledger.total - args.amount }),
+    })
+
+    expect(
+      defineProtocol({ id: "test.ledger.v1", mutations: [deposit, withdraw] })
+        .mutations
+    ).toEqual([deposit, withdraw])
+  })
+
+  it("rejects a refusal the schema does not define at compile time", () => {
+    // @ts-expect-error — check refuses with a value outside the refusal schema.
+    defineMutation({
+      name: "ledger.undeclared",
+      args: amountSchema,
+      refusal: authorityRefusalSchema,
+      check: () => err("overdrawn"),
+      apply: (ledger: Ledger) => ledger,
+    })
+  })
+
+  it("recognizes only the unchanged() sentinel", () => {
+    expect(isUnchanged(unchanged())).toBe(true)
+    expect(unchanged()).toBe(unchanged())
+    expect(Object.isFrozen(unchanged())).toBe(true)
+    for (const value of [
+      undefined,
+      null,
+      {},
+      { unchanged: true },
+      "unchanged",
+    ]) {
+      expect(isUnchanged(value)).toBe(false)
+    }
   })
 })
 

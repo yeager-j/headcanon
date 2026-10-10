@@ -10,6 +10,7 @@ import {
   axisId,
   defineMutation,
   defineProtocol,
+  unchanged,
   type InvalidationPublisher,
 } from "../.."
 import type { MutationAuthorityAdapter } from "../../core/authority"
@@ -1157,5 +1158,254 @@ describe("Next mutation action for a mutation with no refusal cases", () => {
     expect(duplicate).toEqual(first)
     expect(authority.receiptCount()).toBe(1)
     expect(nextCache.updateTag).not.toHaveBeenCalled()
+  })
+})
+
+describe("Next mutation action for a mutation defined by check and apply", () => {
+  type AddEffect = { readonly next: number }
+
+  const add = defineMutation({
+    name: "next.add",
+    args: incrementSchema,
+    refusal: rejectionSchema,
+    check(count: number, args) {
+      if (args.amount < 0) return err({ code: "refused" })
+      if (args.amount === 0) return ok(unchanged())
+      return ok({ next: count + args.amount })
+    },
+    apply: (_count: number, effect: AddEffect) => effect.next,
+  })
+  const addProtocol = defineProtocol({
+    id: "test.next-server.add.v1",
+    mutations: [add],
+  })
+
+  type AddCommand = MutationCommand<
+    typeof add,
+    string,
+    CounterPreflight,
+    CounterTx,
+    undefined,
+    { readonly state: number }
+  >
+
+  function addEnvelope(amount: number) {
+    return {
+      protocol: addProtocol.id,
+      scope: "actor",
+      mutationId: "0e9c7a52-3b1d-4f6e-8a2c-5d4b3a291f08",
+      createdAt: Date.now(),
+      invocation: add({ amount }),
+    }
+  }
+
+  function createAuthority() {
+    return createInMemoryMutationAuthority<number, string, unknown>({
+      initialState: 0,
+      scope: (actor) => actor,
+    })
+  }
+
+  const writeEffect: AddCommand["execute"] = ({ tx, effect, stamp }) => {
+    tx.write(effect.next)
+    stamp.record(axisId("counter/value"), effect.next)
+    return acceptMutation()
+  }
+
+  function addAction(
+    authority: CounterAuthority,
+    execute: AddCommand["execute"] = writeEffect
+  ) {
+    const binder = createMutationBinder({ actor: () => "actor", authority })
+    return createNextMutationAction({
+      protocol: addProtocol,
+      binder,
+      commands: [
+        binder.bind(add, {
+          screen: () => allowScreening(),
+          admit: ({ tx }) => allowAdmission({ state: tx.read() }),
+          execute,
+        }),
+      ],
+    })
+  }
+
+  it("runs execute with the admitted state and the effect check returned", async () => {
+    const authority = createAuthority()
+    authority.replace(4)
+    const execute = vi.fn(writeEffect)
+
+    const result = await addAction(authority, execute)(addEnvelope(3))
+
+    expect(result).toEqual(
+      ok({ kind: "accepted", stamp: { revisions: { "counter/value": 7 } } })
+    )
+    expect(execute).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        args: { amount: 3 },
+        evidence: { state: 4 },
+        state: 4,
+        effect: { next: 7 },
+        mutationId: addEnvelope(3).mutationId,
+      })
+    )
+    expect(authority.read()).toBe(7)
+  })
+
+  it("records a refusal from check without running execute, and replays it", async () => {
+    const authority = createAuthority()
+    const execute = vi.fn(writeEffect)
+    const deliver = addAction(authority, execute)
+
+    const first = await deliver(addEnvelope(-1))
+    const duplicate = await deliver(addEnvelope(-1))
+
+    expect(first).toEqual(ok({ kind: "refused", error: { code: "refused" } }))
+    expect(duplicate).toEqual(first)
+    expect(execute).not.toHaveBeenCalled()
+    expect(authority.receiptCount()).toBe(1)
+    expect(authority.read()).toBe(0)
+  })
+
+  it("accepts unchanged() with an empty stamp without running execute", async () => {
+    const authority = createAuthority()
+    const execute = vi.fn(writeEffect)
+
+    const result = await addAction(authority, execute)(addEnvelope(0))
+
+    expect(result).toEqual(ok({ kind: "accepted", stamp: { revisions: {} } }))
+    expect(execute).not.toHaveBeenCalled()
+    expect(authority.receiptCount()).toBe(1)
+    expect(nextCache.updateTag).not.toHaveBeenCalled()
+  })
+
+  it("lets execute refuse or deny for a rule only the server knows", async () => {
+    await expect(
+      addAction(createAuthority(), () => refuseMutation({ code: "refused" }))(
+        addEnvelope(1)
+      )
+    ).resolves.toEqual(ok({ kind: "refused", error: { code: "refused" } }))
+    await expect(
+      addAction(createAuthority(), () => denyMutation())(addEnvelope(1))
+    ).resolves.toEqual(ok({ kind: "denied" }))
+  })
+
+  it("checks the state each contention attempt admits", async () => {
+    const authority = createAuthority()
+    const effects: number[] = []
+    authority.contendNext((current) => current + 10)
+
+    await addAction(authority, (context) => {
+      effects.push(context.effect.next)
+      return writeEffect(context)
+    })(addEnvelope(1))
+
+    expect(effects).toEqual([1, 11])
+    expect(authority.read()).toBe(11)
+  })
+
+  it("passes the envelope's mutation ID to check", async () => {
+    const identify = defineMutation({
+      name: "next.identify",
+      args: incrementSchema,
+      check: (_count: number, _args, { mutationId }) => ok({ mutationId }),
+      apply: (count: number) => count,
+    })
+    const binder = createMutationBinder({
+      actor: () => "actor",
+      authority: createAuthority(),
+    })
+    const execute = vi.fn(() => acceptMutation({ unchanged: true }))
+    const identifyProtocol = defineProtocol({
+      id: "test.identify.v1",
+      mutations: [identify],
+    })
+    const deliver = createNextMutationAction({
+      protocol: identifyProtocol,
+      binder,
+      commands: [
+        binder.bind(identify, {
+          screen: () => allowScreening(),
+          admit: ({ tx }) => allowAdmission({ state: tx.read() }),
+          execute,
+        }),
+      ],
+    })
+    const envelope = { ...addEnvelope(1), protocol: "test.identify.v1" }
+
+    await deliver({ ...envelope, invocation: identify({ amount: 1 }) })
+
+    expect(execute).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        effect: { mutationId: envelope.mutationId },
+      })
+    )
+  })
+
+  it("fails closed when check refuses with a value the refusal schema rejects", async () => {
+    const corrupt = defineMutation({
+      name: "next.corrupt",
+      args: incrementSchema,
+      refusal: rejectionSchema,
+      check: () => err({ code: "other" } as unknown as Rejection),
+      apply: (count: number) => count,
+    })
+    const authority = createAuthority()
+    const binder = createMutationBinder({ actor: () => "actor", authority })
+    const corruptProtocol = defineProtocol({
+      id: "test.corrupt.v1",
+      mutations: [corrupt],
+    })
+    const deliver = createNextMutationAction({
+      protocol: corruptProtocol,
+      binder,
+      commands: [
+        binder.bind(corrupt, {
+          screen: () => allowScreening(),
+          admit: ({ tx }) => allowAdmission({ state: tx.read() }),
+          execute: () => acceptMutation({ unchanged: true }),
+        }),
+      ],
+    })
+
+    await expect(
+      deliver({
+        ...addEnvelope(1),
+        protocol: "test.corrupt.v1",
+        invocation: corrupt({ amount: 1 }),
+      })
+    ).rejects.toThrow("Invalid stored mutation refusal")
+    expect(authority.receiptCount()).toBe(0)
+  })
+
+  it("types the admitted state, the effect, and the full refusal schema", () => {
+    const binder = createMutationBinder({
+      actor: () => "actor",
+      authority: createAuthority(),
+    })
+
+    binder.bind(add, {
+      screen: () => allowScreening(),
+      admit: ({ tx }) => allowAdmission({ state: tx.read(), read: true }),
+      execute: ({ state, effect, evidence }) => {
+        expectTypeOf(state).toEqualTypeOf<number>()
+        expectTypeOf(effect).toEqualTypeOf<{ next: number }>()
+        expectTypeOf(evidence).toEqualTypeOf<{ state: number; read: boolean }>()
+        // The refusal keeps its literal type without `as const`.
+        return refuseMutation({ code: "refused" })
+      },
+    })
+    binder.bind(add, {
+      screen: () => allowScreening(),
+      // @ts-expect-error — a checked mutation's evidence must hold its state.
+      admit: ({ tx }) => allowAdmission(tx.read()),
+      execute: () => acceptMutation(),
+    })
+    binder.bind(add, {
+      screen: () => allowScreening(),
+      // @ts-expect-error — the state must be the mutation's state type.
+      admit: () => allowAdmission({ state: "zero" }),
+      execute: () => acceptMutation(),
+    })
   })
 })

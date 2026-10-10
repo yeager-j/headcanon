@@ -1,5 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-import type { Result } from "serializable-result"
+import { ok, type Result } from "serializable-result"
 
 /** Serializable intent produced by a named mutation's invocation factory. */
 export interface MutationInvocation<Name extends string, Args, Error = never> {
@@ -50,7 +50,7 @@ export type ParsedFormSchema<Schema extends StandardSchemaV1> =
         readonly "~headcanon": "This schema's output must be a valid input"
       }
 
-/** Package-owned mutation identity, passed to `predict` and to a command's `execute`. */
+/** Package-owned mutation identity, passed to `predict`, `check`, and a command's `execute`. */
 export interface MutationContext {
   /** The mutation ID carried by the invocation's envelope. */
   readonly mutationId: string
@@ -98,6 +98,106 @@ export type MutationDefinition<
    * that declares no refusal cases has one that rejects every value.
    */
   readonly refusal: RefusalSchema
+}
+
+// `Symbol.for`, so two loaded copies of this module agree on the brand.
+const UNCHANGED: unique symbol = Symbol.for("headcanon.unchanged")
+
+/**
+ * What a mutation's `check` returns, inside `ok`, when the invocation accepts
+ * and changes nothing. Make it with {@link unchanged}.
+ */
+export interface Unchanged {
+  readonly [UNCHANGED]: true
+}
+
+const UNCHANGED_VALUE: Unchanged = Object.freeze({ [UNCHANGED]: true as const })
+
+/**
+ * Returns the sentinel a mutation's `check` puts inside `ok` when the
+ * invocation accepts and changes nothing. The predictor then keeps the state
+ * as it is, and the server accepts with an empty stamp without running
+ * `execute`.
+ * @returns The one frozen {@link Unchanged} value.
+ * @example
+ * ```ts
+ * check(note: NoteState, args) {
+ *   if (note.title === args.title) return ok(unchanged())
+ *   return ok({ title: args.title })
+ * }
+ * ```
+ */
+export function unchanged(): Unchanged {
+  return UNCHANGED_VALUE
+}
+
+/** `true` when a `check` result's value is the {@link unchanged} sentinel. */
+export function isUnchanged(value: unknown): value is Unchanged {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Partial<Unchanged>)[UNCHANGED] === true
+  )
+}
+
+/**
+ * A mutation defined by `check` and `apply`. It is a
+ * {@link MutationDefinition} whose `predict` runs `check`, then `apply` on the
+ * effect. The server runs the same `check` over the admitted state before the
+ * command's `execute`, so the predictor and the server decide the same way.
+ * Its prediction error is its refusal: `check` refuses only with values the
+ * refusal schema defines. It exposes `check` but not `apply`, so
+ * `Function.prototype.apply` still works on the callable definition.
+ * @param args Arguments in the schema's parsed (output) form.
+ * @returns A frozen, serializable named mutation invocation.
+ */
+export type CheckedMutationDefinition<
+  Name extends string,
+  Schema extends StandardSchemaV1,
+  State,
+  Effect,
+  RefusalSchema extends StandardSchemaV1 = NoRefusalSchema,
+> = MutationDefinition<
+  Name,
+  Schema,
+  State,
+  StandardSchemaV1.InferOutput<RefusalSchema>,
+  RefusalSchema
+> & {
+  /**
+   * Decides the invocation over a state: a refusal, {@link unchanged}, or
+   * the effect `apply` makes into the next state. Pure and deterministic.
+   */
+  readonly check: (
+    state: State,
+    args: StandardSchemaV1.InferOutput<Schema>,
+    context: MutationContext
+  ) => Result<Effect | Unchanged, StandardSchemaV1.InferOutput<RefusalSchema>>
+}
+
+/**
+ * The erased shape every {@link CheckedMutationDefinition} satisfies. The
+ * binder and the action tell a checked mutation apart by it.
+ */
+export interface AnyCheckedMutationDefinition extends AnyMutationDefinition {
+  readonly check: (...args: never[]) => Result<unknown, unknown>
+}
+
+/** Extracts the effect a checked mutation's `check` hands to `apply`. */
+export type MutationEffectOf<Mutation> = Mutation extends {
+  readonly check: (...args: never[]) => Result<infer Checked, unknown>
+}
+  ? Exclude<Checked, Unchanged>
+  : never
+
+/** `true` when a mutation was defined by `check` and `apply`. */
+export function isCheckedMutation(
+  mutation: AnyMutationDefinition
+): mutation is AnyCheckedMutationDefinition {
+  return (
+    typeof (mutation as Partial<AnyCheckedMutationDefinition>).check ===
+    "function"
+  )
 }
 
 /**
@@ -255,18 +355,72 @@ export function deepFreeze<Value>(value: Value): Value {
  * parsed (output) form; the server parses them again at the trust boundary
  * and refuses them unless parsing leaves them unchanged, so the predictor and
  * the server command always see the same value. A schema whose output is not
- * a valid input is a compile error. `predict` must be pure and deterministic
- * because pending invocations are replayed over later authoritative canons.
- * If `refusal` is supplied, its output schema defines the structured error
- * that may be stored and reproduced from a receipt. Without it, the mutation
- * declares no refusal cases: its refusal type is `never`, and a stored
- * refusal for it fails closed on replay. The definition is read
- * once: later changes to the passed object do not affect the factory.
+ * a valid input is a compile error. If `refusal` is supplied, its output
+ * schema defines the structured error that may be stored and reproduced from
+ * a receipt. Without it, the mutation declares no refusal cases: its refusal
+ * type is `never`, and a stored refusal for it fails closed on replay. The
+ * definition is read once: later changes to the passed object do not affect
+ * the factory.
  *
- * @param definition Stable name, argument schema, pure predictor, and optional refusal schema.
+ * Give it `check` and `apply`, or `predict`. `check` decides the invocation
+ * over a state: a refusal, {@link unchanged}, or an effect. `apply` makes the
+ * next state from the effect. The predictor is `check`, then `apply`, and the
+ * server runs the same `check` before the command's `execute`, which receives
+ * only the checked effect. The definition does not keep `apply`; export it
+ * on its own to reuse it in the command. Use `predict` for a mutation that
+ * does not fit that split, such as one whose command reads only part of the
+ * state. Every one of these functions must be pure and deterministic,
+ * because pending invocations are replayed over later authoritative canons.
+ *
+ * @param definition Stable name, argument schema, optional refusal schema, and either `check` and `apply` or a pure `predict`.
  * @returns A frozen callable mutation definition with stable wire metadata.
  * @throws An error from `structuredClone` when called with arguments that are not plain data.
+ * @example
+ * ```ts
+ * export const renameNote = defineMutation({
+ *   name: "notes.rename",
+ *   args: z.object({ noteId: z.uuid(), title: z.string() }),
+ *   refusal: z.literal("invalid-title"),
+ *   check(note: NoteState, args) {
+ *     if (!isValidTitle(args.title)) return err("invalid-title")
+ *     if (note.title === args.title) return ok(unchanged())
+ *     return ok({ title: args.title })
+ *   },
+ *   apply: (note: NoteState, effect: { title: string }) => ({
+ *     ...note,
+ *     ...effect,
+ *   }),
+ * })
+ * ```
  */
+export function defineMutation<
+  const Name extends string,
+  Schema extends StandardSchemaV1,
+  State,
+  Effect,
+  RefusalSchema extends StandardSchemaV1 = NoRefusalSchema,
+>(definition: {
+  readonly name: Name
+  readonly args: Schema & ParsedFormSchema<Schema>
+  /**
+   * Schema for the authority refusals a receipt stores and replays. Omit it
+   * when the mutation has no refusal cases.
+   */
+  readonly refusal?: RefusalSchema
+  /**
+   * Decides the invocation over a state: `err(refusal)`, `ok(unchanged())`,
+   * or `ok(effect)`.
+   */
+  readonly check: (
+    state: State,
+    args: StandardSchemaV1.InferOutput<Schema>,
+    context: MutationContext
+  ) => Result<Effect | Unchanged, StandardSchemaV1.InferOutput<RefusalSchema>>
+  // NoInfer: the state comes from the annotated parameters. A returned object
+  // literal would otherwise win inference with its own, narrower type.
+  /** Makes the next state from a checked effect. */
+  readonly apply: (state: State, effect: Effect) => NoInfer<State>
+}): CheckedMutationDefinition<Name, Schema, State, Effect, RefusalSchema>
 export function defineMutation<
   const Name extends string,
   Schema extends StandardSchemaV1,
@@ -286,25 +440,52 @@ export function defineMutation<
     args: StandardSchemaV1.InferOutput<Schema>,
     context: MutationContext
   ) => Result<State, PredictionError>
-}): MutationDefinition<Name, Schema, State, PredictionError, RefusalSchema> {
-  const { name, args: schema, refusal, predict } = definition
-  const invoke = (args: StandardSchemaV1.InferOutput<Schema>) =>
+}): MutationDefinition<Name, Schema, State, PredictionError, RefusalSchema>
+export function defineMutation(definition: {
+  readonly name: string
+  readonly args: StandardSchemaV1
+  readonly refusal?: StandardSchemaV1
+  readonly predict?: ErasedPredictor
+  readonly check?: ErasedPredictor
+  readonly apply?: (state: unknown, effect: unknown) => unknown
+}): AnyMutationDefinition {
+  const { name, args: schema, refusal, check, apply } = definition
+  const invoke = (args: unknown) =>
     Object.freeze({ name, args: deepFreeze(structuredClone(args)) })
+  const behavior =
+    check && apply
+      ? { predict: checkThenApply(check, apply), check }
+      : { predict: definition.predict }
 
   Object.defineProperties(invoke, {
     name: { value: name, enumerable: true },
     args: { value: schema, enumerable: true },
     refusal: { value: refusal ?? NO_REFUSALS, enumerable: true },
-    predict: { value: predict, enumerable: true },
   })
+  Object.assign(invoke, behavior)
 
-  return Object.freeze(invoke) as MutationDefinition<
-    Name,
-    Schema,
-    State,
-    PredictionError,
-    RefusalSchema
-  >
+  // `defineProperties` and `assign` added every member the type names.
+  return Object.freeze(invoke) as unknown as AnyMutationDefinition
+}
+
+type ErasedPredictor = (
+  state: unknown,
+  args: unknown,
+  context: MutationContext
+) => Result<unknown, unknown>
+
+/** The predictor of a checked mutation: `check`, then `apply` on the effect. */
+function checkThenApply(
+  check: ErasedPredictor,
+  apply: (state: unknown, effect: unknown) => unknown
+): ErasedPredictor {
+  return (state, args, context) => {
+    const checked = check(state, args, context)
+    if (!checked.ok) return checked
+    if (isUnchanged(checked.value)) return ok(state)
+
+    return ok(apply(state, checked.value))
+  }
 }
 
 /** Checks a protocol's mutations, then freezes it. */

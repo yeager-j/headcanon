@@ -22,7 +22,9 @@ export {
 export {
   defineMutation,
   defineProtocol,
+  unchanged,
   type AnyMutationDefinition,
+  type CheckedMutationDefinition,
   type MutationContext,
   type MutationDefinition,
   type MutationErrorOf,
@@ -30,6 +32,7 @@ export {
   type MutationRefusalOf,
   type ProtocolDefinition,
   type ProtocolInvocation,
+  type Unchanged,
 } from "./core/protocol"
 export {
   createOperationEnvelope,

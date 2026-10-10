@@ -10,10 +10,13 @@ import type {
 } from "../core/operation"
 import {
   findMutation,
+  type AnyCheckedMutationDefinition,
   type AnyMutationDefinition,
   type AnyProtocolDefinition,
   type MutationContext,
+  type MutationEffectOf,
   type MutationRefusalOf,
+  type MutationState,
   type ProtocolMutation,
 } from "../core/protocol"
 import type { AcceptedStamp } from "../core/revisions"
@@ -66,7 +69,16 @@ export interface CommandChecks<
   }) => MutationAdmission<Evidence> | Promise<MutationAdmission<Evidence>>
 }
 
-/** One app-owned command bound to a client-safe mutation definition. */
+/**
+ * One app-owned command bound to a client-safe mutation definition.
+ *
+ * For a mutation defined by `check` and `apply`, `admit` returns
+ * `allowAdmission({ state })` with the mutation's state read through `tx`.
+ * The action then runs the mutation's `check` over that state: a refusal is
+ * recorded, and `unchanged()` accepts with an empty stamp, both without
+ * running `execute`. `execute` receives the admitted `state` and the checked
+ * `effect`.
+ */
 export interface MutationCommand<
   Mutation extends AnyMutationDefinition,
   Actor,
@@ -83,11 +95,27 @@ export interface MutationCommand<
   Evidence
 > {
   /**
-   * Runs after `admit` in the same attempt. Write domain rows through `tx`,
-   * record each axis the attempt advances on `stamp`, and return
-   * `acceptMutation`, `refuseMutation`, or `denyMutation`. An acceptance
-   * that records no axis throws and records no receipt, unless it is
-   * `acceptMutation({ unchanged: true })`.
+   * Runs at the start of each transaction attempt, so it runs again after
+   * contention; read and write only through `tx`. Return
+   * `allowAdmission` or `denyMutation`; a denial is recorded and
+   * replays on redelivery. For a mutation defined by `check` and `apply`,
+   * the evidence must hold the mutation's `state`, beside anything else
+   * `execute` needs.
+   */
+  readonly admit: (context: {
+    readonly tx: Transaction
+    readonly actor: Actor
+    readonly args: MutationArgs<Mutation>
+  }) =>
+    | MutationAdmission<Evidence & CheckedAdmission<Mutation>>
+    | Promise<MutationAdmission<Evidence & CheckedAdmission<Mutation>>>
+  /**
+   * Runs after `admit` in the same attempt; for a mutation defined by `check`
+   * and `apply`, only after `check` returned an effect. Write domain rows
+   * through `tx`, record each axis the attempt advances on `stamp`, and
+   * return `acceptMutation`, `refuseMutation`, or `denyMutation`. An
+   * acceptance that records no axis throws and records no receipt, unless it
+   * is `acceptMutation({ unchanged: true })`.
    */
   readonly execute: (
     context: {
@@ -98,7 +126,8 @@ export interface MutationCommand<
       readonly evidence: Evidence
       /** Records each axis revision this attempt advances. */
       readonly stamp: StampAccumulator
-    } & MutationContext
+    } & CheckedExecution<Mutation, Evidence> &
+      MutationContext
   ) =>
     | MutationCommandDecision<MutationRefusalOf<Mutation>>
     | Promise<MutationCommandDecision<MutationRefusalOf<Mutation>>>
@@ -115,6 +144,33 @@ export interface MutationCommand<
     readonly screened: Screened
   }) => void | Promise<void>
 }
+
+/**
+ * What a checked mutation's `admit` evidence must hold: the state `check`
+ * runs over. Nothing for a mutation defined by `predict`.
+ */
+type CheckedAdmission<Mutation extends AnyMutationDefinition> = [
+  Mutation,
+] extends [AnyCheckedMutationDefinition]
+  ? { readonly state: MutationState<Mutation> }
+  : unknown
+
+/**
+ * What a checked mutation's `execute` receives beside the common context.
+ * Nothing for a mutation defined by `predict`.
+ */
+type CheckedExecution<Mutation extends AnyMutationDefinition, Evidence> = [
+  Mutation,
+] extends [AnyCheckedMutationDefinition]
+  ? {
+      /** The state `admit` returned, which `check` accepted. */
+      readonly state: Evidence extends { readonly state: infer State }
+        ? State
+        : never
+      /** The effect `check` returned for that state. */
+      readonly effect: MutationEffectOf<Mutation>
+    }
+  : unknown
 
 /** One app-owned command bound to a client-safe operation definition. */
 export interface OperationCommand<
@@ -364,15 +420,41 @@ export type BoundMutation<Commands extends readonly AnyMutationBinding[]> =
       : never
     : never
 
+/** The names of a union of mutations. */
+type MutationName<Mutation> = Mutation extends { readonly name: infer Name }
+  ? Name
+  : never
+
+type MissingMutation<
+  Protocol,
+  Commands extends readonly AnyMutationBinding[],
+> = Exclude<ProtocolMutation<Protocol>, BoundMutation<Commands>>
+
+type UnknownMutation<
+  Protocol,
+  Commands extends readonly AnyMutationBinding[],
+> = Exclude<BoundMutation<Commands>, ProtocolMutation<Protocol>>
+
+/**
+ * Requires a command list to bind exactly the protocol's mutations. A
+ * failure's marker names each missing or unknown mutation in its type.
+ */
 type CompleteBindings<
   Protocol,
   Commands extends readonly AnyMutationBinding[],
-> =
-  Exclude<ProtocolMutation<Protocol>, BoundMutation<Commands>> extends never
-    ? Exclude<BoundMutation<Commands>, ProtocolMutation<Protocol>> extends never
-      ? unknown
-      : { readonly __unknownMutationBinding: never }
-    : { readonly __missingMutationBinding: never }
+> = [MissingMutation<Protocol, Commands>] extends [never]
+  ? [UnknownMutation<Protocol, Commands>] extends [never]
+    ? unknown
+    : {
+        readonly __unknownMutationBinding: MutationName<
+          UnknownMutation<Protocol, Commands>
+        >
+      }
+  : {
+      readonly __missingMutationBinding: MutationName<
+        MissingMutation<Protocol, Commands>
+      >
+    }
 
 /** `true` when `T` is a union of more than one member. */
 type IsUnion<T, U = T> = T extends unknown

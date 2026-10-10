@@ -51,7 +51,12 @@ Create a module that both the browser and server can import:
 
 ```ts
 // lib/notes/protocol.ts
-import { defineAxis, defineMutation, defineProtocol } from "headcanon"
+import {
+  defineAxis,
+  defineMutation,
+  defineProtocol,
+  unchanged,
+} from "headcanon"
 import { err, ok } from "serializable-result"
 import { z } from "zod"
 
@@ -74,13 +79,16 @@ export const renameNote = defineMutation({
     title: z.string(),
   }),
   refusal: z.literal("invalid-title"),
-  predict(state: NoteState, args) {
-    if (!isValidTitle(args.title)) {
-      return err("invalid-title" as const)
-    }
+  check(note: NoteState, args) {
+    if (!isValidTitle(args.title)) return err("invalid-title")
+    if (note.title === args.title) return ok(unchanged())
 
-    return ok({ ...state, title: args.title })
+    return ok({ title: args.title })
   },
+  apply: (note: NoteState, effect: { title: string }) => ({
+    ...note,
+    title: effect.title,
+  }),
 })
 
 export const notesProtocol = defineProtocol({
@@ -89,9 +97,16 @@ export const notesProtocol = defineProtocol({
 })
 ```
 
-The mutation defines its inputs, public refusal values, and a **predictor**: a function that calculates the state the user should see immediately.
+The mutation defines its inputs, its public refusal values, and two functions:
 
-Keep the predictor pure. It can run again when newer server data arrives, so it must not write data, make requests, or produce side effects.
+- **`check`** decides whether the change is allowed for a state. It returns a refusal, `unchanged()` when the change does nothing, or an **effect**: the facts the change needs.
+- **`apply`** makes the next state from the effect.
+
+Together they are the mutation's **predictor**: `check`, then `apply`. The predictor calculates the state the user sees immediately. The server runs the same `check` before it saves, so the browser and the server refuse the same changes.
+
+Keep both functions pure. They can run again when newer server data arrives, so they must not write data, make requests, or produce side effects.
+
+A mutation that does not fit this split can give a `predict(state, args)` function instead, which returns the next state or a refusal. The server then does not run it; the command repeats the rules itself.
 
 The protocol's state type comes from its predictors. A protocol with no mutations yet has no predictor to read it from, so declare the state yourself: `defineProtocol<NoteState>()({ id: "notes.v1", mutations: [] })`. The root and the action then work with an empty list, and each mutation you add later must predict `NoteState`.
 
@@ -127,7 +142,7 @@ The server derives the user's identity from `requireActor()`. The browser never 
 
 ## 5. Implement the Server Action
 
-Bind the mutation to a command that checks ownership, validates the title, and saves the change:
+Bind the mutation to a command that checks ownership and saves the change:
 
 ```ts
 // lib/notes/actions.ts
@@ -141,12 +156,11 @@ import {
   allowAdmission,
   allowScreening,
   denyMutation,
-  refuseMutation,
   throwMutationContention,
 } from "headcanon/server"
 
 import { notesBinder } from "./binder"
-import { isValidTitle, noteAxis, notesProtocol, renameNote } from "./protocol"
+import { noteAxis, notesProtocol, renameNote } from "./protocol"
 
 export const applyNotesMutation = createNextMutationAction({
   protocol: notesProtocol,
@@ -172,27 +186,23 @@ export const applyNotesMutation = createNextMutationAction({
             and(eq(notes.id, args.noteId), eq(notes.ownerId, actor.userId))
           )
 
-        return note ? allowAdmission(note) : denyMutation()
+        return note ? allowAdmission({ state: note }) : denyMutation()
       },
 
-      execute: async ({ tx, actor, args, evidence, stamp }) => {
-        if (!isValidTitle(args.title)) {
-          return refuseMutation("invalid-title")
-        }
-
-        const nextRevision = evidence.revision + 1
+      execute: async ({ tx, actor, args, state, effect, stamp }) => {
+        const nextRevision = state.revision + 1
 
         const [updated] = await tx
           .update(notes)
           .set({
-            title: args.title,
+            title: effect.title,
             revision: nextRevision,
           })
           .where(
             and(
               eq(notes.id, args.noteId),
               eq(notes.ownerId, actor.userId),
-              eq(notes.revision, evidence.revision)
+              eq(notes.revision, state.revision)
             )
           )
           .returning({ id: notes.id })
@@ -212,8 +222,10 @@ export const applyNotesMutation = createNextMutationAction({
 The command has three stages:
 
 - **`screen`** checks access before Headcanon looks up or creates a receipt.
-- **`admit`** checks access again inside the transaction and passes the current note to `execute` as `evidence`.
+- **`admit`** checks access again inside the transaction and returns the current note as `state`.
 - **`execute`** saves the title and records the new revision.
+
+Between `admit` and `execute`, Headcanon runs the mutation's `check` over that `state`. An invalid title is refused, and an unchanged title is accepted without a write. Both happen without `execute`, so `execute` receives only an allowed `effect`.
 
 `screen` and `admit` protect different moments. In this example both check ownership, but `screen` controls access to the request's outcome and `admit` controls the write.
 
@@ -364,7 +376,7 @@ Start your application and open `/notes/<your-note-id>`.
 
 1. Enter a new title and select **Rename**. The heading changes immediately.
 2. Reload the page. The saved title remains.
-3. Try an empty title. The predictor refuses it and the editor shows an error.
+3. Try an empty title. The predictor refuses it and the editor shows an error. The server's `check` would refuse it too.
 4. Make two valid edits quickly. Headcanon sends them in order and keeps pending changes visible as server data arrives.
 
 A successful change passes through three milestones:
