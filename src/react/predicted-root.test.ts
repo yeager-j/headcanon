@@ -9,9 +9,11 @@ import {
   StrictMode,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useState,
   type ReactNode,
 } from "react"
+import { createRoot } from "react-dom/client"
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -1650,6 +1652,7 @@ interface MountPersistedOptions {
   readonly scope?: string
   readonly strict?: boolean
   readonly mutationListeners?: MutationStageListeners<CounterError>
+  readonly mountedMutationListeners?: MutationStageListeners<CounterError>
 }
 
 /** Mounts a root as a fresh page would: a new hook, sender, and ledger. */
@@ -1660,6 +1663,7 @@ function mountPersisted(
     scope = "actor",
     strict,
     mutationListeners,
+    mountedMutationListeners,
   }: MountPersistedOptions = {}
 ) {
   const controlled = createControlledSender()
@@ -1677,7 +1681,10 @@ function mountPersisted(
     : undefined
   const rendered = renderHook(
     ({ currentCanon }: { currentCanon: Canon<number> }) =>
-      useCounterPredictions({ canon: currentCanon }),
+      useCounterPredictions({
+        canon: currentCanon,
+        mutationListeners: mountedMutationListeners,
+      }),
     { initialProps: { currentCanon: initialCanon }, wrapper }
   )
 
@@ -3427,6 +3434,549 @@ describe("createPredictedRoot — Activity and a later root", () => {
     await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
     expect(deliveries[1]?.envelope.invocation.args.amount).toBe(2)
     act(() => deliveries[1]?.resolve(ok(stamp(2))))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Per-mount mutation listeners
+// ---------------------------------------------------------------------------
+
+/** A root whose mounted listeners come from its props, so a test can re-render them. */
+function setupMountedListeners(
+  factoryListeners?: MutationStageListeners<CounterError>,
+  persistence?: QueuePersistence
+) {
+  const controlled = createControlledSender()
+  const useCounterPredictions = createPredictedRoot({
+    protocol: counterProtocol,
+    scope: () => "actor",
+    send: controlled.send,
+    refresh: useNoRefresh,
+    mutationListeners: factoryListeners,
+    persistence,
+  })
+  const initialCanon = canon(0, 0)
+  const mount = (listeners?: MutationStageListeners<CounterError>) =>
+    renderHook(
+      ({
+        mutationListeners,
+      }: {
+        mutationListeners?: MutationStageListeners<CounterError>
+      }) => useCounterPredictions({ canon: initialCanon, mutationListeners }),
+      { initialProps: { mutationListeners: listeners } }
+    )
+
+  return { ...controlled, mount }
+}
+
+describe("createPredictedRoot — per-mount mutation listeners", () => {
+  it("reports a restored mutation's failure to the mounted root's listener", async () => {
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence } = createMemoryPersistence([restored])
+    const onAcceptance = vi.fn()
+    const { deliveries } = mountPersisted(persistence, {
+      mountedMutationListeners: { onAcceptance },
+    })
+
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+    )
+
+    expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(
+      err({ kind: "denied", mayHaveCommitted: true }),
+      { id: restored.mutationId, restored: true }
+    )
+  })
+
+  it("replaces the factory's listeners one stage at a time", async () => {
+    const factoryPrediction = vi.fn()
+    const factoryAcceptance = vi.fn()
+    const factoryCanonization = vi.fn()
+    const mountedAcceptance = vi.fn()
+    const { mount, deliveries } = setupMountedListeners({
+      onPrediction: factoryPrediction,
+      onAcceptance: factoryAcceptance,
+      onCanonization: factoryCanonization,
+    })
+    const { result } = mount({ onAcceptance: mountedAcceptance })
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+    await act(async () =>
+      deliveries[0]?.resolve(err({ code: "prediction-refused" }))
+    )
+    await receipt.canonized
+
+    const refusal = err({
+      kind: "domain" as const,
+      error: { code: "prediction-refused" as const },
+    })
+    const mutation = { id: receipt.id, restored: false }
+    expect(factoryPrediction).toHaveBeenCalledExactlyOnceWith(ok(receipt))
+    expect(mountedAcceptance).toHaveBeenCalledExactlyOnceWith(refusal, mutation)
+    expect(factoryAcceptance).not.toHaveBeenCalled()
+    expect(factoryCanonization).toHaveBeenCalledExactlyOnceWith(
+      refusal,
+      mutation
+    )
+  })
+
+  it("lets a mutate call's own stage replace both for that call", async () => {
+    const factoryAcceptance = vi.fn()
+    const mountedAcceptance = vi.fn()
+    const callAcceptance = vi.fn()
+    const { mount, deliveries } = setupMountedListeners({
+      onAcceptance: factoryAcceptance,
+    })
+    const { result } = mount({ onAcceptance: mountedAcceptance })
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }), {
+        onAcceptance: callAcceptance,
+      })
+    })
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    await receipt.accepted
+
+    expect(callAcceptance).toHaveBeenCalledExactlyOnceWith(ok(stamp(1)), {
+      id: receipt.id,
+      restored: false,
+    })
+    expect(mountedAcceptance).not.toHaveBeenCalled()
+    expect(factoryAcceptance).not.toHaveBeenCalled()
+  })
+
+  it("calls the latest render's listener when a pending or restored receipt settles", async () => {
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence } = createMemoryPersistence([restored])
+    const earlier = vi.fn()
+    const later = vi.fn()
+    const { mount, deliveries } = setupMountedListeners(undefined, persistence)
+    const { result, rerender } = mount({ onAcceptance: earlier })
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 2 }))
+    })
+    rerender({ mutationListeners: { onAcceptance: later } })
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    await act(async () => deliveries[1]?.resolve(ok(stamp(2))))
+    await receipt.accepted
+
+    expect(earlier).not.toHaveBeenCalled()
+    expect(later.mock.calls).toEqual([
+      [ok(stamp(1)), { id: restored.mutationId, restored: true }],
+      [ok(stamp(2)), { id: receipt.id, restored: false }],
+    ])
+  })
+
+  it("gives a descendant's layout effect the listeners of the same commit", () => {
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      scope: () => "actor",
+      send: createControlledSender().send,
+      refresh: useNoRefresh,
+    })
+    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+      name: "CounterRoot",
+    })
+    const initialCanon = canon(0, 0)
+    function RefuseOnAttempt({ attempt }: { readonly attempt: number }) {
+      const { mutate } = CounterRoot.useRoot()
+      useLayoutEffect(() => {
+        if (attempt > 0) mutate(add({ amount: 1, refuseAt: 0 }))
+      }, [attempt, mutate])
+      return null
+    }
+    const page = (
+      onPrediction: MutationStageListeners<CounterError>["onPrediction"],
+      attempt: number
+    ) =>
+      createElement(CounterRoot.Provider, {
+        canon: initialCanon,
+        mutationListeners: { onPrediction },
+        children: createElement(RefuseOnAttempt, { attempt }),
+      })
+    const earlier = vi.fn()
+    const later = vi.fn()
+
+    const view = render(page(earlier, 0))
+    view.rerender(page(later, 1))
+
+    expect(later).toHaveBeenCalledExactlyOnceWith(
+      err({ code: "prediction-refused" })
+    )
+    expect(earlier).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A refusal or a server failure refreshes canon
+// ---------------------------------------------------------------------------
+
+/** A factory whose refresh carrier counts its requests and completes each at once. */
+function createRefreshCountingFactory(persistence?: QueuePersistence) {
+  const controlled = createControlledSender()
+  const refetch = vi.fn(async () => undefined)
+  const useCountedRefresh = () => useSnapshotRefresh(refetch)
+  const useCounterPredictions = createPredictedRoot({
+    protocol: counterProtocol,
+    scope: () => "actor",
+    send: controlled.send,
+    refresh: useCountedRefresh,
+    persistence,
+  })
+  const mount = (initialCanon = canon(0, 0)) =>
+    renderHook(
+      ({ currentCanon }: { currentCanon: Canon<number> }) =>
+        useCounterPredictions({ canon: currentCanon }),
+      { initialProps: { currentCanon: initialCanon } }
+    )
+
+  return { ...controlled, refetch, mount, useCounterPredictions }
+}
+
+const undeliverable = new TerminalDeliveryError({
+  kind: "undeliverable",
+  error: { code: "invalid-envelope", reason: "invalid-protocol" },
+})
+
+describe("createPredictedRoot — refresh after a failure", () => {
+  it("refreshes once when the local prediction refuses", async () => {
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result } = mount()
+
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+
+    expect(refetch).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("current")
+  })
+
+  it.each([
+    [
+      "a domain refusal",
+      (delivery?: ControlledDelivery) =>
+        delivery?.resolve(err({ code: "prediction-refused" })),
+    ],
+    [
+      "a denial",
+      (delivery?: ControlledDelivery) =>
+        delivery?.reject(new TerminalDeliveryError({ kind: "denied" })),
+    ],
+    [
+      "an undeliverable answer",
+      (delivery?: ControlledDelivery) => delivery?.reject(undeliverable),
+    ],
+  ])("refreshes once after %s", async (_, answer) => {
+    const { mount, refetch, deliveries } = createRefreshCountingFactory()
+    const { result } = mount()
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+
+    await act(async () => answer(deliveries[0]))
+
+    expect(refetch).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("current")
+  })
+
+  it("does not refresh after a stale-client answer", async () => {
+    const { mount, refetch, deliveries } = createRefreshCountingFactory()
+    const { result } = mount()
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "stale-client" }))
+    )
+
+    await expect(receipt.accepted).resolves.toEqual(
+      err({ kind: "stale-client", mayHaveCommitted: false })
+    )
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("does not refresh when newer canon withdraws a refused prediction", async () => {
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result, rerender } = mount()
+    let withdrawn!: MutationReceipt<CounterError>
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+      withdrawn = mutate(result, add({ amount: 1, refuseAt: 11 }))
+    })
+
+    rerender({ currentCanon: canon(10, 10) })
+    await act(async () => {})
+
+    await expect(withdrawn.accepted).resolves.toEqual(
+      err({
+        kind: "replay-refused",
+        error: { code: "prediction-refused" },
+      })
+    )
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("does not refresh when delivery passes control flow to the framework", async () => {
+    const signal = new Error("framework control flow")
+    const captureSignal = (event: ErrorEvent) => {
+      if (event.error === signal) event.preventDefault()
+    }
+    window.addEventListener("error", captureSignal)
+    try {
+      const { deliveries, send } = createControlledSender()
+      const refetch = vi.fn(async () => undefined)
+      const useCountedRefresh = () => useSnapshotRefresh(refetch)
+      const usePredictions = createPredictedRootHook(
+        {
+          protocol: counterProtocol,
+          scope: () => "actor",
+          send,
+          refresh: useCountedRefresh,
+        },
+        (error) => {
+          if (error === signal) throw error
+        }
+      )
+      const initialCanon = canon(0, 0)
+      const { result } = renderHook(() =>
+        usePredictions({ canon: initialCanon })
+      )
+      let receipt!: MutationReceipt<CounterError>
+      act(() => {
+        receipt = mutate(result, add({ amount: 1 }))
+      })
+
+      await act(async () => deliveries[0]?.reject(signal))
+
+      await expect(receipt.accepted).resolves.toEqual(
+        err({ kind: "delivery-cancelled" })
+      )
+      expect(refetch).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener("error", captureSignal)
+    }
+  })
+
+  it("does not refresh when the root unmounts", async () => {
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result, unmount } = mount()
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+
+    unmount()
+
+    await expect(receipt.accepted).resolves.toEqual(
+      err({ kind: "root-unmounted", outcome: "unknown" })
+    )
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("does not refresh an unmounted root when its continued queue fails", async () => {
+    const { persistence } = createMemoryPersistence()
+    const { mount, refetch, deliveries } =
+      createRefreshCountingFactory(persistence)
+    const { result, unmount } = mount()
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+    unmount()
+    await act(async () => {})
+
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+    )
+
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("refreshes after a restored mutation fails, with no listener", async () => {
+    const { persistence } = createMemoryPersistence([
+      storedEnvelope({ amount: 1 }),
+    ])
+    const { mount, refetch, deliveries } =
+      createRefreshCountingFactory(persistence)
+    mount()
+
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+    )
+
+    expect(refetch).toHaveBeenCalledOnce()
+  })
+
+  it("refreshes the root that continues a queue when a mutation it holds no receipt for fails", async () => {
+    // A debounced save fired after its root unmounted; a later root with
+    // the same key now observes the queue.
+    const { persistence } = createMemoryPersistence()
+    const { mount, refetch, deliveries } =
+      createRefreshCountingFactory(persistence)
+    const firstVisit = mount()
+    const staleMutate = firstVisit.result.current.mutate
+    firstVisit.unmount()
+    await act(async () => {})
+    act(() => {
+      acceptedLocally(staleMutate(add({ amount: 1 })))
+    })
+    mount()
+
+    await act(async () =>
+      deliveries[0]?.resolve(err({ code: "prediction-refused" }))
+    )
+
+    expect(refetch).toHaveBeenCalledOnce()
+  })
+
+  it("holds a refusal made offline until the browser is online", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false)
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result } = mount()
+
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    expect(refetch).not.toHaveBeenCalled()
+
+    onLine.mockReturnValue(true)
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+    expect(refetch).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("current")
+  })
+
+  it("refreshes once for several refusals made offline", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false)
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result } = mount()
+
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    onLine.mockReturnValue(true)
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+
+    expect(refetch).toHaveBeenCalledOnce()
+  })
+
+  it("does not refresh for a refusal made offline once the root unmounts", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false)
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result, unmount } = mount()
+
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    unmount()
+    onLine.mockReturnValue(true)
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("refreshes a root whose continued queue fails before the root subscribes", async () => {
+    // The answer arrives in the commit that mounts the later root: after it
+    // rendered, before its effects run.
+    const { persistence } = createMemoryPersistence()
+    const { mount, refetch, deliveries, useCounterPredictions } =
+      createRefreshCountingFactory(persistence)
+    const firstVisit = mount()
+    act(() => {
+      mutate(firstVisit.result, add({ amount: 1 }))
+    })
+    firstVisit.unmount()
+    await act(async () => {})
+    const initialCanon = canon(0, 0)
+    function DeniesOnCommit() {
+      useLayoutEffect(() => {
+        deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+      }, [])
+      return null
+    }
+    function LaterVisit() {
+      useCounterPredictions({ canon: initialCanon })
+      return createElement(DeniesOnCommit)
+    }
+
+    // Outside `act`, React runs passive effects in a later task, as a
+    // browser does, so the answer settles before the root subscribes.
+    const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    const wasActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = false
+    const reactRoot = createRoot(document.createElement("div"))
+    try {
+      reactRoot.render(createElement(LaterVisit))
+      await vi.waitFor(() => expect(refetch).toHaveBeenCalledOnce())
+    } finally {
+      reactRoot.unmount()
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = wasActEnvironment
+    }
+  })
+
+  it("refreshes for a refusal made offline when a hidden root is shown again online", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false)
+    const { refetch, useCounterPredictions } = createRefreshCountingFactory()
+    const initialCanon = canon(0, 0)
+    const roots = new Map<string, ReturnType<typeof useCounterPredictions>>()
+    function Counter() {
+      roots.set("counter", useCounterPredictions({ canon: initialCanon }))
+      return null
+    }
+    const shown = (mode: "visible" | "hidden") =>
+      createElement(Activity, { mode, children: createElement(Counter) })
+    const view = render(shown("visible"))
+
+    await act(async () => {
+      roots.get("counter")?.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    view.rerender(shown("hidden"))
+    await act(async () => {})
+    onLine.mockReturnValue(true)
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+    expect(refetch).not.toHaveBeenCalled()
+
+    view.rerender(shown("visible"))
+    await act(async () => {})
+    expect(refetch).toHaveBeenCalledOnce()
+  })
+
+  it("refreshes once for several failures in one event", async () => {
+    const { mount, refetch, deliveries } = createRefreshCountingFactory()
+    const { result } = mount()
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+
+    await act(async () => {
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+      result.current.mutate(add({ amount: 1, refuseAt: 1 }))
+      result.current.mutate(add({ amount: 1, refuseAt: 1 }))
+    })
+
+    expect(refetch).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("current")
   })
 })
 

@@ -717,6 +717,21 @@ describe("subscription gaps", () => {
     return { ...rendered, signalGap }
   }
 
+  it("shares one refresh between the root's own gaps and the transport's", async () => {
+    const request = vi.fn(async () => undefined)
+    const { result, signalGap: signalTransportGap } = setupGap(request)
+
+    act(() => {
+      result.current.signalGap()
+      result.current.signalGap()
+    })
+    signalTransportGap()
+    await flushMicrotasks()
+
+    expect(request).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("current")
+  })
+
   it("keeps a gap open after a failed refresh and retries it on request", async () => {
     const request = vi.fn(async () => {
       throw new Error("refresh failed")

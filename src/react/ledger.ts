@@ -266,7 +266,18 @@ interface Ledger<Invocation, Error> {
    * then, so a render can tell whether it includes them.
    */
   readonly restoredEntries: readonly LedgerEntry<Invocation>[]
+  /**
+   * How many mutations of this queue have ended with each failure kind,
+   * whoever held their receipts. Unmount ends receipts without ending their
+   * mutations, so `root-unmounted` is never counted.
+   */
+  readonly failures: FailureCounts
 }
+
+/** A count per failure kind; a kind that never occurred is absent. */
+export type FailureCounts = Readonly<
+  Partial<Record<MutationLifecycleError<unknown>["kind"], number>>
+>
 
 /** The receipt milestones the current observer holds for one mutation. */
 interface Milestones<Error> {
@@ -336,6 +347,13 @@ export function isCanonized(
   )
 }
 
+function countFailure(
+  counts: FailureCounts,
+  kind: MutationLifecycleError<unknown>["kind"]
+): FailureCounts {
+  return { ...counts, [kind]: (counts[kind] ?? 0) + 1 }
+}
+
 function createMilestones<Error>(): Milestones<Error> {
   return { accepted: createDeferred(), canonized: createDeferred() }
 }
@@ -380,6 +398,7 @@ export function createLedgerStore<Invocation, Error>(
     entries: [],
     conflicts: [],
     restoredEntries: [],
+    failures: {},
   }
   const lifetimes = new Map<string, EntryLifetime<Error>>()
   const listeners = new Set<() => void>()
@@ -531,8 +550,8 @@ export function createLedgerStore<Invocation, Error>(
   /**
    * The one terminal settlement: release the Action, resolve the receipt
    * milestones, and drop the entry. A failure settles both milestones (an
-   * already-resolved acceptance keeps its value); canonization settles only
-   * the second.
+   * already-resolved acceptance keeps its value) and is counted by kind;
+   * canonization settles only the second.
    */
   function settle(
     mutationId: string,
@@ -553,6 +572,9 @@ export function createLedgerStore<Invocation, Error>(
       entries: ledger.entries.filter(
         (entry) => entry.envelope.mutationId !== mutationId
       ),
+      failures: result.ok
+        ? ledger.failures
+        : countFailure(ledger.failures, result.error.kind),
     })
     saveQueue()
   }
@@ -770,6 +792,7 @@ export function createLedgerStore<Invocation, Error>(
       entries: ledger.entries.map((entry) => ({ ...entry, conflicted: false })),
       conflicts: [],
       restoredEntries: [],
+      failures: ledger.failures,
     })
     continueUnobserved()
   }

@@ -629,6 +629,11 @@ export interface IncorporationCoordinator {
   readonly status: IncorporationStatus
   /** Gives unmet requirements a fresh attempt budget and refreshes now. */
   readonly retryRefresh: () => void
+  /**
+   * Requires a refresh that starts after this call, as a subscription gap
+   * does. Signals that arrive before that refresh starts share it.
+   */
+  readonly signalGap: () => void
 }
 
 /**
@@ -661,7 +666,7 @@ export interface IncorporationCoordinator {
  * @param refresh Refresh carrier; the latest one is used for each request.
  * @param invalidations Optional push-invalidation adapter for canon's axes.
  * @param acceptances Optional store of the root's accepted mutations.
- * @returns Incorporation status and the retry control.
+ * @returns Incorporation status, the retry control, and the gap signal.
  */
 export function useIncorporation<State>(
   canon: Canon<State>,
@@ -729,7 +734,11 @@ export function useIncorporation<State>(
   )
 
   return useMemo(
-    () => ({ status, retryRefresh: incorporation.retryRefresh }),
+    () => ({
+      status,
+      retryRefresh: incorporation.retryRefresh,
+      signalGap: incorporation.signalGap,
+    }),
     [incorporation, status]
   )
 }

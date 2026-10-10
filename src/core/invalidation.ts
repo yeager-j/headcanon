@@ -292,9 +292,11 @@ function pollingStatus(status: InvalidationStatus): InvalidationStatus {
  * or `navigator.onLine` is undefined, such as on the server.
  *
  * A refresh requested while offline can cost the page: Next's router answers
- * a failed refresh with a full-page load, which drops in-memory state.
+ * a failed refresh with a full-page load, which drops in-memory state. Not a
+ * package export: the invalidation wrappers and a predicted root's refusal
+ * refresh hold their refreshes with it.
  */
-function browserIsOffline(): boolean {
+export function browserIsOffline(): boolean {
   return typeof navigator !== "undefined" && navigator.onLine === false
 }
 

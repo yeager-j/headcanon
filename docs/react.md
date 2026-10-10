@@ -43,7 +43,7 @@ The check matters because a mutation can be delivered after the session changed.
 
 The root does not discard queued mutations when the user changes; they fail with `"denied"`. Include the user's ID in a `persistence` key, so that the next user's root does not restore the previous user's queue.
 
-> **Breaking change in 0.4.0.** Predicted roots require `scope`, operation hooks require `scope`, and every envelope carries a `scope` field. The server rejects an envelope without it as `invalid-envelope` with reason `unexpected-fields`, and a root drops a stored envelope without it. Reload old clients after you deploy.
+> **Breaking change in 0.4.0.** Predicted roots require `scope`, operation hooks require `scope`, and every envelope carries a `scope` field. The server rejects an envelope without it as `invalid-envelope` with reason `unexpected-fields`, and a root or an operation hook drops a stored envelope without it. Reload old clients after you deploy.
 
 ## Share one root across components
 
@@ -195,7 +195,7 @@ export function RenameForm() {
 
 Each callback reports its own mutation. If the interface permits overlapping submissions, an earlier mutation can finish while another is pending. Use the root's `status` for an overall saving indicator, or track receipts separately when displaying per-edit messages.
 
-If prediction fails, only `onPrediction` runs: no receipt is created and the later stages do not open. Once a receipt exists, acceptance and canonization callbacks can report terminal failures as well as success. Their error shape is `MutationLifecycleError`; a server's public refusal is under `result.error.error` when `result.error.kind === "domain"`.
+If prediction fails, only `onPrediction` runs: no receipt is created and the later stages do not open. The root also refreshes canon; see [Refresh after a refusal or a server failure](#refresh-after-a-refusal-or-a-server-failure). Once a receipt exists, acceptance and canonization callbacks can report terminal failures as well as success. Their error shape is `MutationLifecycleError`; a server's public refusal is under `result.error.error` when `result.error.kind === "domain"`.
 
 To name a mutation's public error type in your own code, such as a save hook that covers several mutations, use `MutationErrorOf` from `headcanon`. It is the union of the mutation's prediction error and its refusal:
 
@@ -229,6 +229,10 @@ Both promises resolve with a `Result`; they never reject. Check `ok` instead of 
 ### Set default listeners
 
 Pass `mutationListeners` to `createNextPredictedRoot` for shared defaults. A `mutate` call overrides only the stages it supplies. For example, a call with `onAcceptance` keeps the factory's prediction and canonization listeners but replaces its acceptance listener; the factory's acceptance listener does not run.
+
+The factory is configured outside your components, so its listeners cannot use React state or context. Pass `mutationListeners` to the root itself, as `useNote({ canon, mutationListeners })` or a prop of `NoteRoot.Provider`, for listeners that need them, such as a toast service from context. They also observe the mutations the root restores after a reload; see [Keep the queue across a reload](#keep-the-queue-across-a-reload).
+
+Each stage comes from the most specific source that supplies it: the `mutate` call, then the mounted root, then the factory. A stage from the mounted root replaces the factory's stage; one from the `mutate` call replaces both for that call. The root reads its own listeners when a stage runs, not when the mutation is queued, so a receipt that settles after a re-render reports to the listener of the latest render. Listeners passed to a `mutate` call stay fixed for that call.
 
 If `onPrediction` throws, the exception comes out of `mutate` in your event handler. On a successful prediction, the mutation is already queued before that callback runs; the exception does not undo it. If `onAcceptance` or `onCanonization` throws, it produces an unhandled promise rejection: Headcanon attaches these callbacks with `.then(...)` and does not catch the returned promise. The original receipt promises still resolve with a `Result`. Handle errors inside listeners and in any asynchronous work they start.
 
@@ -356,17 +360,17 @@ Calls to `mutate` in the same event check against the same rendered value. If tw
 
 ## Handle terminal failures
 
-Local prediction failures are returned directly by `mutate`. After a receipt exists, failures use these `kind` values:
+Local prediction failures are returned directly by `mutate`. After a receipt exists, failures use these `kind` values. The last column says whether the root refreshes canon after the failure; see [Refresh after a refusal or a server failure](#refresh-after-a-refusal-or-a-server-failure).
 
-| Kind                   | Meaning                                                                                                                                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `"domain"`             | The server returned the mutation's public refusal, available as `error`.                                                                                                              |
-| `"denied"`             | The server denied access without exposing a reason, or the mutation's scope is not the delivering actor's.                                                                            |
-| `"undeliverable"`      | The server rejected this delivery: the envelope, its arguments, a reused mutation ID, or a creation time outside the delivery window. `error` contains the executor failure.          |
-| `"stale-client"`       | The server does not know the Server Action this page called, because the page's code is older than the deployed build. This delivery wrote nothing, and a retry cannot help.          |
-| `"replay-refused"`     | Replay refused a prediction that could still be withdrawn; `error` contains the predictor's refusal.                                                                                  |
-| `"delivery-cancelled"` | The Next binding passed framework control flow, such as a redirect, back to Next.js. This does not prove the write was rolled back: `finalizeAccepted` can redirect after the commit. |
-| `"root-unmounted"`     | The root stopped observing the mutation. `outcome` is `"accepted"` if acceptance was known, otherwise `"unknown"`.                                                                    |
+| Kind                   | Meaning                                                                                                                                                                               | Refreshes |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| `"domain"`             | The server returned the mutation's public refusal, available as `error`.                                                                                                              | Yes       |
+| `"denied"`             | The server denied access without exposing a reason, or the mutation's scope is not the delivering actor's.                                                                            | Yes       |
+| `"undeliverable"`      | The server rejected this delivery: the envelope, its arguments, a reused mutation ID, or a creation time outside the delivery window. `error` contains the executor failure.          | Yes       |
+| `"stale-client"`       | The server does not know the Server Action this page called, because the page's code is older than the deployed build. This delivery wrote nothing, and a retry cannot help.          | No        |
+| `"replay-refused"`     | Replay refused a prediction that could still be withdrawn; `error` contains the predictor's refusal.                                                                                  | No        |
+| `"delivery-cancelled"` | The Next binding passed framework control flow, such as a redirect, back to Next.js. This does not prove the write was rolled back: `finalizeAccepted` can redirect after the commit. | No        |
+| `"root-unmounted"`     | The root stopped observing the mutation. `outcome` is `"accepted"` if acceptance was known, otherwise `"unknown"`.                                                                    | No        |
 
 An `"undeliverable"` delivery wrote nothing, but it does not always prove that the mutation never committed. `error.code` tells you more:
 
@@ -390,6 +394,27 @@ Show a "Refresh to update" prompt for `"stale-client"`. Only a page reload loads
 
 Delivery uncertainty is a root status, not a terminal failure. A stalled refresh also leaves canonization pending while the root remains mounted.
 
+### Refresh after a refusal or a server failure
+
+A refusal does not prove that the view shows the true state. The root checked the prediction over the canon it had, which may be behind the server: another device may have changed the record. A server refusal, a denial, or an undeliverable delivery also means that the server's state may differ from the canon the root predicted over.
+
+So the root refreshes canon through its carrier, as it does after an invalidation gap, when:
+
+- `mutate` returns a prediction refusal;
+- a mutation fails with `"domain"`, `"denied"`, or `"undeliverable"`. This includes a mutation restored after a reload, and one whose receipt no listener observes.
+
+It does not refresh after the other failures:
+
+- `"stale-client"`: a router refresh would load the new build. Your application decides when to reload, for example after it shows a "Refresh to update" prompt.
+- `"replay-refused"`: newer canon already arrived and refused the prediction.
+- `"delivery-cancelled"` and `"root-unmounted"`.
+
+A prediction refusal made while the browser reports it is offline (`navigator.onLine === false`) waits: the root refreshes once when the browser is online again, as `withPollingFallback` and `withVisibilityRefresh` do (see [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page)), and not at all if it unmounts first. A server failure needs an answer from the server, so it refreshes at once. Failures close together share one refresh. Freshness is `"refreshing"` until the refresh completes, and `"current"` after it, as for an invalidation gap. A root that has unmounted does not refresh, even when its queue keeps delivering; a root that later continues the queue refreshes for failures it observes.
+
+A listener needs only to show the notice. For example, a toast with the mutation's label and the reason needs no `router.refresh()` call after it.
+
+> **Changed in 0.4.0.** Earlier versions did not refresh after these failures. If your application calls `router.refresh()` after them, remove that call, or it refreshes twice.
+
 ## Choose the root's lifetime
 
 Place the root high enough to outlive the components that edit its data. Closing a dialog inside a mounted provider can leave its mutation running and observable. Unmounting the provider ends that observation.
@@ -402,7 +427,7 @@ That ordering applies only within the unsent group. While mounted, the queue wai
 
 With `persistence`, the queue outlives its root. After unmount, the root's mutations keep being delivered in order, one at a time, including a mutation queued at unmount, such as an autosave flushed from an unmount cleanup, or by a `mutate` call that runs after unmount, such as a debounced save. Delivery stops at a mutation whose outcome is uncertain, so a later mutation never commits before an earlier one that did not reach the server. A mutation that is still being sent finishes, and its answer still updates storage.
 
-A root of the same factory that later mounts with the same key continues that queue instead of restoring it from storage. It shows every mutation still in the queue, including one accepted after unmount until the new root's canon includes it, and reports their outcomes to the factory's `mutationListeners` with `restored: true`. It delivers an uncertain mutation again, as a reload does. When a root replaces another in one commit, such as after a change of React `key`, the old root's receipts settle with `"root-unmounted"` and the new root continues the queue. See [Keep the queue across a reload](#keep-the-queue-across-a-reload).
+A root of the same factory that later mounts with the same key continues that queue instead of restoring it from storage. It shows every mutation still in the queue, including one accepted after unmount until the new root's canon includes it, and reports their outcomes to its `mutationListeners` with `restored: true`. It delivers an uncertain mutation again, as a reload does. When a root replaces another in one commit, such as after a change of React `key`, the old root's receipts settle with `"root-unmounted"` and the new root continues the queue. See [Keep the queue across a reload](#keep-the-queue-across-a-reload).
 
 Background delivery still calls `send`. With the Next binding, a Server Action that redirects can still navigate the page after the root has unmounted; the root itself passes no control flow to React.
 
@@ -442,6 +467,22 @@ export const useNote = createNextPredictedRoot({
 
 `showNotice` is an application-owned helper.
 
+To show the notice through React state or context, pass the listener to the mounted root instead. `useToast` is an application-owned hook:
+
+```ts
+const toast = useToast()
+const root = useNote({
+  canon,
+  mutationListeners: {
+    onAcceptance(result, mutation) {
+      if (mutation.restored && !result.ok) {
+        toast("A change made before the page reloaded was not saved.")
+      }
+    },
+  },
+})
+```
+
 Each root calls the function once, when it mounts, with its first canon. Key the root by the record's identity (see [Share one root across components](#share-one-root-across-components)), so the record's ID does not change while the root is mounted. Return `undefined` to keep a root's queue in memory only. A single `QueuePersistence` object, instead of a function, gives every root of the factory the same key; use it only when the factory mounts one root at a time.
 
 The key also names the queue in memory. While a queue still has mutations to deliver after its root unmounts, a root of the same factory that mounts with the same key continues it. Use each key with one factory only.
@@ -450,7 +491,7 @@ The root stores each envelope (mutation ID, protocol, `scope`, `createdAt`, and 
 
 When a root mounts, it restores the stored mutations once, ahead of any new mutation, and delivers them again in order under their original mutation IDs. A `mutate` call that comes first, such as one from a child's mount effect, restores the queue itself and is predicted over the restored mutations. This is safe: the server keeps one receipt per mutation ID, so a mutation that already committed gets its stored outcome and is not applied twice. The restored predictions are replayed over the new page's canon, like any pending mutation. A restored mutation may already have been sent by the earlier page, so a replay refusal hides its prediction but does not withdraw it; the root waits for the server's answer.
 
-Restored mutations count in `status.pending` and `status.delivery`. No `mutate` call holds their receipts, so the factory's `mutationListeners` report them. `onAcceptance` and `onCanonization` receive a second argument, `{ id, restored }`; `restored` is `true` for a restored mutation. `onPrediction` does not run for it.
+Restored mutations count in `status.pending` and `status.delivery`. No `mutate` call holds their receipts, so the root's `mutationListeners` report them: the mounted root's stages, and the factory's for the stages the root does not supply. `onAcceptance` and `onCanonization` receive a second argument, `{ id, restored }`; `restored` is `true` for a restored mutation. `onPrediction` does not run for it.
 
 The root checks every stored envelope before it restores it. It drops an envelope for a different protocol ID, an unknown mutation name, an envelope with missing or extra fields (including a missing `scope` or `createdAt`), arguments that the mutation's schema refuses or changes (the server admits only arguments in parsed form), and a repeated mutation ID. A stored value that is not valid JSON is dropped completely. A schema that validates asynchronously cannot be checked in time, so its mutations are dropped too. Dropped mutations are not reported.
 

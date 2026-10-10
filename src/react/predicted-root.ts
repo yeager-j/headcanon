@@ -7,6 +7,7 @@ import {
   useCallback,
   useEffect,
   useEffectEvent,
+  useInsertionEffect,
   useMemo,
   useRef,
   useState,
@@ -15,7 +16,10 @@ import {
 import { err, ok, type Result } from "serializable-result"
 
 import type { MutationEnvelope } from "../core/authority"
-import type { InvalidationAdapter } from "../core/invalidation"
+import {
+  browserIsOffline,
+  type InvalidationAdapter,
+} from "../core/invalidation"
 import {
   findMutation,
   type AnyMutationDefinition,
@@ -34,6 +38,7 @@ import {
   createLedgerStore,
   isCanonized,
   queueHead,
+  type FailureCounts,
   type LedgerEntry,
   type LedgerStore,
   type MutationLifecycleError,
@@ -112,8 +117,9 @@ export interface PredictedRoot<State, Invocation, Error> {
   /**
    * Predicts `invocation` over `value` and, when the prediction succeeds,
    * queues it for delivery and returns its receipt. An `err` is the local
-   * prediction's refusal: nothing was queued. `listeners` override the
-   * factory's `mutationListeners` one stage at a time.
+   * prediction's refusal: nothing was queued, and the root refreshes canon.
+   * `listeners` override the root's `mutationListeners` and then the
+   * factory's, one stage at a time.
    */
   readonly mutate: (
     invocation: Invocation,
@@ -229,8 +235,9 @@ export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
    */
   readonly invalidations?: InvalidationAdapter
   /**
-   * Default stage observers used when a mutate call does not override a
-   * stage. They also observe every mutation restored from `persistence`.
+   * Default stage observers used when neither a mutate call nor the mounted
+   * root supplies a stage. They also observe every mutation restored from
+   * `persistence`.
    */
   readonly mutationListeners?: MutationStageListeners<ErrorOf<Protocol>>
   /**
@@ -282,12 +289,20 @@ export interface PredictedRootInput<
   readonly canon: Canon<State>
   /** Root-recovery observers scoped to this mounted aggregate. */
   readonly recoveryListeners?: PredictedRootRecoveryListeners<Invocation, Error>
+  /**
+   * Stage observers scoped to this mounted aggregate. Each stage replaces the
+   * factory's, and a mutate call's own stage replaces both for that call.
+   * They also observe every mutation restored from `persistence`. A stage is
+   * read when it runs, so a receipt that settles after a re-render reports to
+   * that render's listener.
+   */
+  readonly mutationListeners?: MutationStageListeners<Error>
 }
 
 /**
  * The public hook type returned by a predicted-root factory. Its protocol fixes
  * the canon state, invocation union, and correlated mutation error types.
- * @param input The current canon and optional per-mount recovery listeners.
+ * @param input The current canon and optional per-mount listeners.
  * @returns Protocol-specialized predicted root state and controls.
  */
 export type PredictedRootHook<Protocol extends AnyProtocolDefinition> = (
@@ -378,22 +393,91 @@ function persistenceFor<State>(
   return typeof option === "function" ? option(canon) : option
 }
 
-/** Calls the acceptance and canonization listeners when `receipt` settles. */
+/**
+ * Calls the acceptance and canonization listeners when `receipt` settles,
+ * reading each from `stages` at that moment.
+ */
 function observeStages<Error>(
   receipt: MutationReceipt<Error>,
-  stages: MutationStageListeners<Error>,
+  stages: () => MutationStageListeners<Error>,
   restored: boolean
 ): void {
   const mutation: StagedMutation = { id: receipt.id, restored }
-  const { onAcceptance, onCanonization } = stages
 
-  if (onAcceptance) {
-    void receipt.accepted.then((result) => onAcceptance(result, mutation))
-  }
+  void receipt.accepted.then((result) =>
+    stages().onAcceptance?.(result, mutation)
+  )
+  void receipt.canonized.then((result) =>
+    stages().onCanonization?.(result, mutation)
+  )
+}
 
-  if (onCanonization) {
-    void receipt.canonized.then((result) => onCanonization(result, mutation))
+/**
+ * Whether a failure of `kind` shows that the server's state may differ from
+ * the canon the prediction ran over, so the root refreshes canon.
+ */
+function failureRefreshesCanon(
+  kind: MutationLifecycleError<unknown>["kind"]
+): boolean {
+  switch (kind) {
+    case "domain":
+    case "denied":
+    case "undeliverable":
+      return true
+    // `stale-client`: a router refresh would load the new build, and the
+    // application owns that reload. `replay-refused`: newer canon already
+    // refused the prediction. `delivery-cancelled`: the framework handles
+    // its control flow, such as a redirect. `root-unmounted`: no root
+    // remains to refresh.
+    case "stale-client":
+    case "replay-refused":
+    case "delivery-cancelled":
+    case "root-unmounted":
+      return false
   }
+}
+
+/** How many of the counted failures refresh canon. */
+function countRefreshingFailures(failures: FailureCounts): number {
+  let count = 0
+  for (const [kind, occurrences] of Object.entries(failures)) {
+    if (failureRefreshesCanon(kind as keyof FailureCounts)) {
+      count += occurrences ?? 0
+    }
+  }
+  return count
+}
+
+/**
+ * Returns the gap signal for a local refusal. While the browser reports it is
+ * offline, the signal waits for the browser's `online` event, because a router
+ * refresh that fails loads the full page. Signals held while offline become
+ * one, and none is sent once the root unmounts.
+ */
+function useOnlineGapSignal(signalGap: () => void): () => void {
+  const heldWhileOffline = useRef(false)
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+
+    const signalHeld = () => {
+      if (!heldWhileOffline.current || browserIsOffline()) return
+
+      heldWhileOffline.current = false
+      signalGap()
+    }
+
+    // React Activity may have hidden the root, and removed the listener,
+    // while the browser came back online.
+    signalHeld()
+    window.addEventListener("online", signalHeld)
+    return () => window.removeEventListener("online", signalHeld)
+  }, [signalGap])
+
+  return useCallback(() => {
+    if (browserIsOffline()) heldWhileOffline.current = true
+    else signalGap()
+  }, [signalGap])
 }
 
 /**
@@ -569,7 +653,11 @@ export function createPredictedRootHook<
   ): LedgerStore<Invocation, Error> =>
     (store.key !== undefined && queues.get(store.key)) || store
 
-  return function usePredictedRoot({ canon, recoveryListeners }) {
+  return function usePredictedRoot({
+    canon,
+    recoveryListeners,
+    mutationListeners,
+  }) {
     const [store] = useState(() => ledgerFor(canon))
     // Identifies this root to the ledger, which may outlive it.
     const [observerToken] = useState(() => ({}))
@@ -594,14 +682,52 @@ export function createPredictedRootHook<
     )
     const listeners = withDefaults(recoveryListeners, options.recoveryListeners)
 
+    // Receipts settle after the render that observed them, so their stages
+    // are read from the latest committed listeners when they run. An
+    // insertion effect runs before every layout effect, so a descendant that
+    // calls `mutate` from its own layout effect reads this commit's listeners.
+    const latestMutationListeners = useRef(mutationListeners)
+    useInsertionEffect(() => {
+      latestMutationListeners.current = mutationListeners
+    }, [mutationListeners])
+    const mountedStages = useCallback(
+      () =>
+        withDefaults(
+          latestMutationListeners.current,
+          options.mutationListeners
+        ),
+      []
+    )
+
     // Restores in an effect or in `mutate`, never during render, so the
     // hydration render matches the server's. `mutate` restores too because a
     // child's mount effect runs before this root's.
     const restoreQueue = useCallback((): void => {
       for (const receipt of store.restore(observerToken)) {
-        observeStages(receipt, options.mutationListeners ?? {}, true)
+        observeStages(receipt, mountedStages, true)
       }
-    }, [observerToken, store])
+    }, [mountedStages, observerToken, store])
+
+    // Follows the ledger's failure counts rather than receipts, so a
+    // mutation whose receipt this root does not hold, such as one queued by
+    // an earlier root's `mutate` after it unmounted, still refreshes this
+    // root. Counting from the first render also covers a failure that
+    // settles before this effect subscribes.
+    const { signalGap } = incorporation
+    const signalRefusalGap = useOnlineGapSignal(signalGap)
+    const signalledFailures = useRef(countRefreshingFailures(ledger.failures))
+    useEffect(() => {
+      const signalNewFailures = () => {
+        const count = countRefreshingFailures(store.getSnapshot().failures)
+        if (count <= signalledFailures.current) return
+
+        signalledFailures.current = count
+        signalGap()
+      }
+
+      signalNewFailures()
+      return store.subscribe(signalNewFailures)
+    }, [signalGap, store])
 
     // Set from the effect's cleanup until its next setup: unmount, or React
     // Activity hiding the root. A `mutate` held past it, such as a debounced
@@ -649,7 +775,7 @@ export function createPredictedRootHook<
           unrenderedRestore.length === 0
             ? projection.value
             : project(canon, [...unrenderedRestore, ...ledger.entries]).value
-        const stages = withDefaults(stageOverrides, options.mutationListeners)
+        const stages = () => withDefaults(stageOverrides, mountedStages())
         const envelope = freezeEnvelope({
           protocol: options.protocol.id,
           scope: options.scope(canon),
@@ -659,8 +785,11 @@ export function createPredictedRootHook<
         })
         const predicted = predict(current, envelope)
         if (!predicted.ok) {
+          // The refusal may come from canon that is behind the server. A
+          // root that no longer observes has no canon to refresh.
+          if (!observationDeactivated.current) signalRefusalGap()
           const result = err<Error>(predicted.error)
-          stages.onPrediction?.(result)
+          stages().onPrediction?.(result)
           return result
         }
 
@@ -670,10 +799,18 @@ export function createPredictedRootHook<
         const receipt = queue.enqueue(envelope)
         observeStages(receipt, stages, false)
         const result = ok(receipt)
-        stages.onPrediction?.(result)
+        stages().onPrediction?.(result)
         return result
       },
-      [canon, ledger, projection.value, restoreQueue, store]
+      [
+        canon,
+        ledger,
+        mountedStages,
+        projection.value,
+        restoreQueue,
+        signalRefusalGap,
+        store,
+      ]
     )
 
     const head = queueHead(ledger.entries)
