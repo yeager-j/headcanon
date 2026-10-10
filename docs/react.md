@@ -587,13 +587,13 @@ export function NewRunForm({ playerId }: { playerId: string }) {
 
 The hook holds at most one submission:
 
-| Call                                | What happens                                                                                                   |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `run(args)` with nothing held       | Makes a new envelope (mutation ID, `createdAt`, and `scope`), stores it if `persistence` is set, and sends it. |
-| `run(args)` with the same arguments | Retries the held submission. It never makes a second envelope.                                                 |
-| `run(args)` with other arguments    | Returns `pending-submission` and sends nothing, until `retry()` or `discard()`.                                |
-| `retry()`                           | Sends the held envelope again: same mutation ID, arguments, and `createdAt`. Joins a call still in flight.     |
-| `discard()`                         | Forgets the held submission. A delivery of it may still commit; its answer no longer changes the hook.         |
+| Call                                | What happens                                                                                                       |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `run(args)` with nothing held       | Makes a new envelope (mutation ID, `createdAt`, and `scope`), stores it if `persistence` is set, and sends it.     |
+| `run(args)` with the same arguments | Retries the held submission. It never makes a second envelope.                                                     |
+| `run(args)` with other arguments    | Returns `pending-submission` and sends nothing, until `retry()` or `discard()`.                                    |
+| `retry()`                           | Sends the held envelope again: same mutation ID, arguments, and `createdAt`. Joins a call still in flight.         |
+| `discard()`                         | Forgets the held submission. A delivery of it may still commit; its answer or redirect no longer changes the hook. |
 
 Exhausted contention on the server resends the same envelope after a short backoff. Any answer from the server ends the submission: the next `run` makes a new envelope.
 

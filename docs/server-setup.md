@@ -474,7 +474,7 @@ export async function createRunAction(envelope: unknown) {
 }
 ```
 
-A redelivery of an accepted submission returns the same result, so it redirects to the same run. To redirect from the client instead, navigate from the operation hook's `onSettled`.
+A redelivery of an accepted submission returns the same result, so it redirects to the same run. If the user discards the submission before the answer arrives, the operation hook drops the redirect. To redirect from the client instead, navigate from the operation hook's `onSettled`.
 
 ### Keep one key per submission in the browser
 

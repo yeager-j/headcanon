@@ -81,6 +81,32 @@ function rethrowControlFlow(error: unknown): void {
   if (error instanceof ControlFlowError) throw error
 }
 
+/**
+ * Runs `test` and returns each time `error` reached the window, as control
+ * flow rethrown in a fresh transition does.
+ */
+async function windowErrorsDuring(
+  error: unknown,
+  test: () => Promise<void>
+): Promise<unknown[]> {
+  const reached: unknown[] = []
+  const capture = (event: ErrorEvent) => {
+    if (event.error !== error) return
+
+    event.preventDefault()
+    reached.push(event.error)
+  }
+
+  window.addEventListener("error", capture)
+  try {
+    await test()
+  } finally {
+    window.removeEventListener("error", capture)
+  }
+
+  return reached
+}
+
 /** The receipt scope of the player signed in when a test does not say. */
 const PLAYER_1 = "player-1"
 
@@ -331,21 +357,14 @@ describe("createOperationHook", () => {
 
   it("passes control flow that arrives after the wait to React", async () => {
     const redirect = new ControlFlowError("NEXT_REDIRECT")
-    const propagated = vi.fn()
-    const captureRedirect = (event: ErrorEvent) => {
-      if (event.error !== redirect) return
-      event.preventDefault()
-      propagated(event.error)
-    }
-    window.addEventListener("error", captureRedirect)
-    try {
-      const { calls, send } = createDeferredSender()
-      const useOperation = createOperationHook(
-        { operation: createRun, send },
-        rethrowControlFlow
-      )
-      const { result } = mountOperation(useOperation)
+    const { calls, send } = createDeferredSender()
+    const useOperation = createOperationHook(
+      { operation: createRun, send },
+      rethrowControlFlow
+    )
+    const { result } = mountOperation(useOperation)
 
+    const propagated = await windowErrorsDuring(redirect, async () => {
       let outcome: Promise<unknown> = Promise.resolve()
       act(() => {
         outcome = result.current.run({ name: "Emerald" })
@@ -356,12 +375,72 @@ describe("createOperationHook", () => {
       )
 
       await calls[0]!.fail(redirect)
+    })
 
-      expect(propagated).toHaveBeenCalledWith(redirect)
-      expect(result.current.status).toBe("idle")
-    } finally {
-      window.removeEventListener("error", captureRedirect)
-    }
+    expect(propagated).toEqual([redirect])
+    expect(result.current.status).toBe("idle")
+  })
+
+  it("drops a discarded submission's late control flow", async () => {
+    const redirect = new ControlFlowError("NEXT_REDIRECT")
+    const { calls, send } = createDeferredSender()
+    const onSettled = vi.fn()
+    const useOperation = createOperationHook(
+      { operation: createRun, send },
+      rethrowControlFlow
+    )
+    const { result } = mountOperation(useOperation, {
+      persistence: sessionStoragePersistence(PERSISTENCE_KEY),
+      onSettled,
+    })
+
+    const propagated = await windowErrorsDuring(redirect, async () => {
+      act(() => {
+        void result.current.run({ name: "Emerald" })
+      })
+      await act(async () => vi.advanceTimersByTime(DELIVERY_WAIT_MS))
+      act(() => {
+        result.current.discard()
+        void result.current.run({ name: "Ruby" })
+      })
+
+      await calls[0]!.fail(redirect)
+    })
+
+    expect(propagated).toEqual([])
+    expect(result.current.status).toBe("sending")
+    expect(result.current.pending?.args).toEqual({ name: "Ruby" })
+    expect(storedEnvelopes()).toEqual([calls[1]!.envelope])
+
+    await calls[1]!.answer(ok({ runId: "run-2" }))
+
+    expect(result.current.status).toBe("settled")
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(ok({ runId: "run-2" }))
+  })
+
+  it("resolves a discarded submission's waiting call unconfirmed on control flow", async () => {
+    const { calls, send } = createDeferredSender()
+    const useOperation = createOperationHook(
+      { operation: createRun, send },
+      rethrowControlFlow
+    )
+    const { result } = mountOperation(useOperation)
+
+    let first: Promise<unknown> = Promise.resolve()
+    act(() => {
+      first = result.current.run({ name: "Emerald" })
+    })
+    act(() => {
+      result.current.discard()
+      void result.current.run({ name: "Ruby" })
+    })
+    await calls[0]!.fail(new ControlFlowError("NEXT_REDIRECT"))
+
+    expect(await first).toEqual(
+      err({ kind: "unconfirmed", mayHaveCommitted: true })
+    )
+    expect(result.current.status).toBe("sending")
+    expect(result.current.pending?.args).toEqual({ name: "Ruby" })
   })
 
   it("exposes frozen pending arguments", () => {
