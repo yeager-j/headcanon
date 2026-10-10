@@ -146,7 +146,8 @@ export interface OperationHandle<Operation extends AnyOperationDefinition> {
   /**
    * Forgets the held submission, so the next `run` makes a new one. An
    * earlier delivery of it may still commit; its answer no longer changes
-   * this hook.
+   * this hook, and its framework control flow, such as a server
+   * `redirect()`, is dropped.
    */
   discard(): void
 }
@@ -443,6 +444,15 @@ function createOperationCell<Operation extends AnyOperationDefinition>(
     try {
       rethrowControlFlow(error)
     } catch (controlFlow) {
+      // A discarded submission's control flow must not navigate, so its
+      // waiting calls end unconfirmed. The server answered, so the call may
+      // have committed.
+      if (held !== submission) {
+        submission.mayHaveCommitted = true
+        unconfirm(submission, delivery)
+        return
+      }
+
       // Framework control flow (a redirect, say) must reach the framework.
       // A waiting `run` or `retry` carries it; once every wait has expired,
       // a fresh transition does, while a hook is mounted to receive it.
