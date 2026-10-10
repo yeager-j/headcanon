@@ -92,6 +92,7 @@ describe("createPredictedRootContext", () => {
     const onDeliveryUncertain = vi.fn()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -134,6 +135,7 @@ describe("createPredictedRootContext", () => {
   it("fails at the consumer when no generated provider owns the root", () => {
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send: createControlledSender().send,
       refresh: useNoRefresh,
     })

@@ -267,6 +267,7 @@ import { notesProtocol } from "./protocol"
 
 export const useNote = createNextPredictedRoot({
   protocol: notesProtocol,
+  scope: (canon) => canon.value.ownerId,
   action: applyNotesMutation,
   invalidations: axisInvalidations,
 })

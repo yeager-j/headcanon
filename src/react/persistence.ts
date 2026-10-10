@@ -60,9 +60,12 @@ export interface QueuePersistence {
  * ```ts
  * export const useNote = createNextPredictedRoot({
  *   protocol: notesProtocol,
+ *   scope: (canon) => canon.value.ownerId,
  *   action: applyNotesMutation,
  *   persistence: (canon) =>
- *     sessionStoragePersistence(`notes-queue:${canon.value.id}`),
+ *     sessionStoragePersistence(
+ *       `notes-queue:${canon.value.ownerId}:${canon.value.id}`
+ *     ),
  * })
  * ```
  */
@@ -180,7 +183,7 @@ function parseStoredQueue<Invocation>(
     const parsed = parseEnvelope(candidate, protocol)
     if (!parsed.ok) continue
 
-    const { mutationId, createdAt, definition, args } = parsed.value
+    const { scope, mutationId, createdAt, definition, args } = parsed.value
     if (mutationIds.has(mutationId)) continue
     if (!hasValidArguments(definition.args, args)) continue
 
@@ -188,6 +191,7 @@ function parseStoredQueue<Invocation>(
     envelopes.push(
       Object.freeze({
         protocol: protocol.id,
+        scope,
         mutationId,
         createdAt,
         invocation: Object.freeze({

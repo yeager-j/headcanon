@@ -142,6 +142,7 @@ function setup(
   const controlled = createControlledSender()
   const useCounterPredictions = createPredictedRoot({
     protocol: counterProtocol,
+    scope: () => "actor",
     send: controlled.send,
     refresh: useNoRefresh,
     recoveryListeners: defaultRecoveryListeners,
@@ -226,6 +227,38 @@ describe("createPredictedRoot", () => {
     expect(stages).toEqual(["prediction", "acceptance", "canonization"])
   })
 
+  it("scopes each envelope with the canon the root renders when it is created", async () => {
+    const controlled = createControlledSender()
+    const scope = vi.fn((current: Canon<number>) => `player-${current.value}`)
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      scope,
+      send: controlled.send,
+      refresh: useNoRefresh,
+    })
+    const firstCanon = canon(1, 0)
+    const { result, rerender } = renderHook(
+      ({ currentCanon }: { currentCanon: Canon<number> }) =>
+        useCounterPredictions({ canon: currentCanon }),
+      { initialProps: { currentCanon: firstCanon } }
+    )
+
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+    rerender({ currentCanon: canon(5, 1) })
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+
+    expect(scope).toHaveBeenNthCalledWith(1, firstCanon)
+    expect(controlled.deliveries[0]?.envelope.scope).toBe("player-1")
+    act(() => controlled.deliveries[0]?.resolve(ok(stamp(1))))
+    await waitFor(() => expect(controlled.deliveries).toHaveLength(2))
+    expect(controlled.deliveries[1]?.envelope.scope).toBe("player-5")
+    act(() => controlled.deliveries[1]?.resolve(ok(stamp(2))))
+  })
+
   it("canonizes an acceptance with an empty stamp at once", async () => {
     const { result, deliveries } = setup()
     const unchanged = acceptedStamp({ revisions: {} })
@@ -295,6 +328,7 @@ describe("createPredictedRoot", () => {
     const overridePrediction = vi.fn()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send: createControlledSender().send,
       refresh: useNoRefresh,
       mutationListeners: {
@@ -358,6 +392,7 @@ describe("createPredictedRoot", () => {
     )
     const usePredictions = createPredictedRoot({
       protocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -498,6 +533,7 @@ describe("createPredictedRoot", () => {
     >()
     const usePredictions = createPredictedRoot({
       protocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -633,6 +669,7 @@ describe("createPredictedRoot", () => {
     const { send } = createControlledSender()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -915,6 +952,7 @@ describe("createPredictedRoot — mutation-specific authority refusals", () => {
     >()
     const useMixedPredictions = createPredictedRoot({
       protocol: mixedProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -960,6 +998,7 @@ describe("createPredictedRoot — retryable delivery", () => {
     )
     const usePredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -1002,6 +1041,7 @@ describe("createPredictedRoot — retryable delivery", () => {
     )
     const usePredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -1043,6 +1083,7 @@ describe("createPredictedRoot — retryable delivery", () => {
     )
     const usePredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -1221,6 +1262,7 @@ describe("createPredictedRoot — prediction lifetime", () => {
     const { deliveries, send } = createControlledSender()
     const usePredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -1274,6 +1316,7 @@ describe("createPredictedRoot — prediction lifetime", () => {
     const useResolvingRefresh = () => useSnapshotRefresh(refetch)
     const usePredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useResolvingRefresh,
     })
@@ -1299,6 +1342,7 @@ describe("createPredictedRoot — prediction lifetime", () => {
     const { deliveries, send } = createControlledSender()
     const usePredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
     })
@@ -1550,6 +1594,7 @@ describe("createPredictedRoot — terminal and paused delivery", () => {
       const usePredictions = createPredictedRootHook(
         {
           protocol: counterProtocol,
+          scope: () => "actor",
           send,
           refresh: useNoRefresh,
         },
@@ -1602,6 +1647,7 @@ function createMemoryPersistence(initial?: unknown) {
 
 interface MountPersistedOptions {
   readonly canon?: Canon<number>
+  readonly scope?: string
   readonly strict?: boolean
   readonly mutationListeners?: MutationStageListeners<CounterError>
 }
@@ -1611,6 +1657,7 @@ function mountPersisted(
   persistence: PredictedRootOptions<typeof counterProtocol>["persistence"],
   {
     canon: initialCanon = canon(0, 0),
+    scope = "actor",
     strict,
     mutationListeners,
   }: MountPersistedOptions = {}
@@ -1618,6 +1665,7 @@ function mountPersisted(
   const controlled = createControlledSender()
   const useCounterPredictions = createPredictedRoot({
     protocol: counterProtocol,
+    scope: () => scope,
     send: controlled.send,
     refresh: useNoRefresh,
     persistence,
@@ -1642,6 +1690,7 @@ function storedEnvelope(
 ): MutationEnvelope<CounterInvocation> {
   return {
     protocol: counterProtocol.id,
+    scope: "actor",
     mutationId: globalThis.crypto.randomUUID(),
     createdAt,
     invocation: { name: add.name, args } as CounterInvocation,
@@ -1659,6 +1708,7 @@ function createPersistedContext(persistence: QueuePersistence) {
   const controlled = createControlledSender()
   const useCounterPredictions = createPredictedRoot({
     protocol: counterProtocol,
+    scope: () => "actor",
     send: controlled.send,
     refresh: useNoRefresh,
     persistence,
@@ -1816,6 +1866,24 @@ describe("createPredictedRoot — persisted queue", () => {
     act(() => firstPage.deliveries[0]?.resolve(ok(stamp(1))))
   })
 
+  it("redelivers a restored mutation with its own scope after the actor changes", async () => {
+    const restored = { ...storedEnvelope({ amount: 1 }), scope: "player-1" }
+    const { persistence } = createMemoryPersistence([restored])
+
+    const { result, deliveries } = mountPersisted(persistence, {
+      scope: "player-2",
+    })
+    act(() => {
+      mutate(result, add({ amount: 2 }))
+    })
+
+    expect(deliveries[0]?.envelope).toEqual(restored)
+    act(() => deliveries[0]?.resolve(ok(stamp(1))))
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    expect(deliveries[1]?.envelope.scope).toBe("player-2")
+    act(() => deliveries[1]?.resolve(ok(stamp(2))))
+  })
+
   it("restores before a mutate from a child's mount effect, and predicts over it", async () => {
     // The child's effect runs before the root's. Its mutation refuses at 0,
     // so it succeeds only when predicted over the restored one.
@@ -1824,6 +1892,7 @@ describe("createPredictedRoot — persisted queue", () => {
     const { send } = createControlledSender()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -2005,6 +2074,7 @@ describe("createPredictedRoot — persisted queue", () => {
     const onAcceptance = vi.fn()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -2161,6 +2231,8 @@ describe("createPredictedRoot — persisted queue", () => {
       (({ createdAt: _createdAt, ...rest }) => rest)(
         storedEnvelope({ amount: 4 })
       ),
+      (({ scope: _scope, ...rest }) => rest)(storedEnvelope({ amount: 8 })),
+      { ...storedEnvelope({ amount: 9 }), scope: null },
       { ...storedEnvelope({ amount: 5 }), mutationId: "not-a-uuid" },
       {
         ...storedEnvelope({ amount: 6 }),
@@ -2218,6 +2290,7 @@ describe("createPredictedRoot — persisted queue", () => {
     })
     const envelopeFor = (args: unknown) => ({
       protocol: coercingProtocol.id,
+      scope: "actor",
       mutationId: globalThis.crypto.randomUUID(),
       createdAt: Date.UTC(2026, 0, 1),
       invocation: { name: addCoerced.name, args },
@@ -2230,6 +2303,7 @@ describe("createPredictedRoot — persisted queue", () => {
     ])
     const useCoercedPredictions = createPredictedRoot({
       protocol: coercingProtocol,
+      scope: () => "actor",
       send: createControlledSender<ReturnType<typeof addCoerced>>().send,
       refresh: useNoRefresh,
       persistence,
@@ -2355,6 +2429,7 @@ describe("createPredictedRoot — persisted queue", () => {
       createControlledSender<ReturnType<typeof addAsync>>()
     const useAsyncPredictions = createPredictedRoot({
       protocol: asyncProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -2484,6 +2559,7 @@ function createPersistedFactory(
   const controlled = createControlledSender()
   const useCounterPredictions = createPredictedRoot({
     protocol: counterProtocol,
+    scope: () => "actor",
     send: controlled.send,
     refresh: useNoRefresh,
     persistence,
@@ -2768,6 +2844,7 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     const { persistence } = createMemoryPersistence()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -2809,6 +2886,7 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     const { deliveries, send } = createControlledSender()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -2891,6 +2969,7 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     const { deliveries, send } = createControlledSender()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -2932,6 +3011,7 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     const { deliveries, send } = createControlledSender()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -2989,6 +3069,7 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     const { deliveries, send } = createControlledSender()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -3063,6 +3144,7 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     const { persistence } = createMemoryPersistence()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -3107,6 +3189,7 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
     const { deliveries, send } = createControlledSender()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -3185,6 +3268,7 @@ describe("createPredictedRoot — a persisted queue outlives its root", () => {
       const useCounterPredictions = createPredictedRootHook(
         {
           protocol: counterProtocol,
+          scope: () => "actor",
           send,
           refresh: useNoRefresh,
           persistence,
@@ -3224,6 +3308,7 @@ describe("createPredictedRoot — Activity", () => {
       const { deliveries, send } = createControlledSender()
       const useCounterPredictions = createPredictedRoot({
         protocol: counterProtocol,
+        scope: () => "actor",
         send,
         refresh: useNoRefresh,
         persistence,
@@ -3258,6 +3343,7 @@ describe("createPredictedRoot — Activity with a child's mutate", () => {
     const { deliveries, send } = createControlledSender()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,
@@ -3304,6 +3390,7 @@ describe("createPredictedRoot — Activity and a later root", () => {
     const { deliveries, send } = createControlledSender()
     const useCounterPredictions = createPredictedRoot({
       protocol: counterProtocol,
+      scope: () => "actor",
       send,
       refresh: useNoRefresh,
       persistence,

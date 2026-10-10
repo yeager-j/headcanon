@@ -262,6 +262,7 @@ function windowAuthority(
 function touchEnvelope(sequence: number, createdAt: number) {
   return {
     protocol: touchProtocol.id,
+    scope: "actor",
     mutationId: `40000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`,
     createdAt,
     invocation: touch({ effect: `touch-${sequence}` }),
@@ -571,6 +572,7 @@ describe.skipIf(!databaseUrl)("Drizzle/Postgres mutation authority", () => {
     const execute = async () => {
       const prepared = await prepareMutationRequest(touchProtocol, {
         protocol: touchProtocol.id,
+        scope: "actor",
         mutationId: "10000000-0000-4000-8000-000000000100",
         createdAt: Date.now(),
         invocation: touch({ effect: "serialization" }),

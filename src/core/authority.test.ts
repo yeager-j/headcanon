@@ -41,6 +41,7 @@ describe("envelope admission", () => {
     await expect(
       prepareMutationRequest(protocol, {
         protocol: protocol.id,
+        scope: "actor",
         mutationId: "30000000-0000-4000-8000-000000000001",
         createdAt: Date.now(),
         invocation: add({ amount: 1 }),
@@ -55,6 +56,7 @@ describe("envelope admission", () => {
     await expect(
       prepareMutationRequest(protocol, {
         protocol: protocol.id,
+        scope: "actor",
         mutationId: "30000000-0000-4000-8000-000000000002",
         invocation: add({ amount: 1 }),
       })
@@ -69,6 +71,7 @@ describe("envelope admission", () => {
       await expect(
         prepareMutationRequest(protocol, {
           protocol: protocol.id,
+          scope: "actor",
           mutationId: "30000000-0000-4000-8000-000000000003",
           createdAt,
           invocation: add({ amount: 1 }),
@@ -82,6 +85,7 @@ describe("envelope admission", () => {
   it("carries the creation time into the prepared request", async () => {
     const prepared = await prepareMutationRequest(protocol, {
       protocol: protocol.id,
+      scope: "actor",
       mutationId: "30000000-0000-4000-8000-000000000004",
       createdAt: 1_700_000_000_000,
       invocation: add({ amount: 1 }),
@@ -268,6 +272,7 @@ describe("accepted stamp check", () => {
     })
     const prepared = await prepareMutationRequest(protocol, {
       protocol: protocol.id,
+      scope: "actor",
       mutationId: `30000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`,
       createdAt: Date.now(),
       invocation: add({ amount: 1 }),

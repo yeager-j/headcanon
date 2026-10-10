@@ -169,19 +169,26 @@ export function operationRegistry(
 }
 
 /**
- * Builds the envelope for one submission of an operation: a fresh mutation ID
- * and the current time, unless given. Its arguments are a deeply frozen copy.
- * Build it once, when the user submits,
+ * Builds the envelope for one submission of an operation, for one actor's
+ * receipt scope: a fresh mutation ID and the current time, unless given. Its
+ * arguments are a deeply frozen copy. Build it once, when the user submits,
  * and send this same envelope on every retry until the action answers. A new
  * envelope for a submission that may have committed can write twice.
  * @param operation The operation to submit.
  * @param args Arguments in the schema's parsed form.
- * @param identity A mutation ID (a UUID) and `createdAt` (epoch milliseconds) to use instead of fresh ones.
+ * @param identity The submitting actor's receipt scope, as the authority's
+ *   `scope(actor)` returns it, and optionally a mutation ID (a UUID) and
+ *   `createdAt` (epoch milliseconds) to use instead of fresh ones. The action
+ *   denies the envelope when the delivering actor's scope differs.
  * @returns A frozen envelope for the operation's Server Action.
  * @throws An error from `structuredClone` when `args` is not plain data.
  * @example
  * ```ts
- * const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+ * const envelope = createOperationEnvelope(
+ *   createRun,
+ *   { name: "Emerald" },
+ *   { scope: player.id }
+ * )
  * let outcome = await createRunAction(envelope).catch(() => undefined)
  * // No answer: send the same envelope again, never a new one.
  * outcome ??= await createRunAction(envelope)
@@ -192,10 +199,15 @@ export function createOperationEnvelope<
 >(
   operation: Operation,
   args: OperationArgsOf<Operation>,
-  identity: { readonly mutationId?: string; readonly createdAt?: number } = {}
+  identity: {
+    readonly scope: string
+    readonly mutationId?: string
+    readonly createdAt?: number
+  }
 ): OperationEnvelope<Operation> {
   return Object.freeze({
     protocol: OPERATION_PROTOCOL_ID,
+    scope: identity.scope,
     mutationId: identity.mutationId ?? globalThis.crypto.randomUUID(),
     createdAt: identity.createdAt ?? Date.now(),
     invocation: Object.freeze({

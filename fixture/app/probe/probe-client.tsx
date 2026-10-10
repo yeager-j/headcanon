@@ -1,5 +1,6 @@
 "use client"
 
+import { FIXTURE_USER_ID } from "@/lib/actor"
 import { addItem, fixtureProtocol, ITEMS_AXIS } from "@/lib/protocol"
 import { revisionAt, type MutationEnvelope } from "headcanon"
 import Link from "next/link"
@@ -51,6 +52,7 @@ export function ProbeClient({
     text: string
   ): MutationEnvelope<ReturnType<typeof addItem>> => ({
     protocol: fixtureProtocol.id,
+    scope: FIXTURE_USER_ID,
     mutationId: globalThis.crypto.randomUUID(),
     createdAt: Date.now(),
     invocation: addItem({ text }),

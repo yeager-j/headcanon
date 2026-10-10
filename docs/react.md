@@ -20,6 +20,7 @@ import { notesProtocol } from "./protocol"
 
 export const useNote = createNextPredictedRoot({
   protocol: notesProtocol,
+  scope: (canon) => canon.value.ownerId,
   action: applyNotesMutation,
 })
 
@@ -31,6 +32,18 @@ export const NoteRoot = createPredictedRootContext(useNote, {
 The Next binding supplies Server Action delivery and router refresh. A router refresh that fails reloads the whole page, which drops the root's queue and any unsaved drafts; see [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page). To keep the queue across a reload, see [Keep the queue across a reload](#keep-the-queue-across-a-reload). The binding also passes Next.js navigation signals, such as redirects, back to the framework instead of treating them as uncertain delivery.
 
 The factory does not create a shared store. Each call to `useNote({ canon })` mounts an independent root. Use the hook directly when one component owns the feature, as in Getting started. Use `NoteRoot.Provider` when several components need the same state and queue.
+
+## Scope mutations to the signed-in user
+
+`scope` is required. It returns the receipt scope of the user that the canon was loaded for: the same value that the authority's `scope(actor)` returns for that user, such as a user ID. Load it into the canon on the server. `mutate` calls `scope` with the canon the root renders and puts the result in the mutation's envelope. A retry, a delivery after unmount, and a mutation restored after a reload all keep the original scope.
+
+The server action compares the envelope's scope with the scope of the actor that delivers it, before it reads a receipt or runs a command. If they differ, the action answers `denied`, and the mutation fails with `"denied"`. It writes nothing and records no receipt.
+
+The check matters because a mutation can be delivered after the session changed. A queue keeps delivering after its root unmounts, and Next.js can retry a Server Action that failed with a network error when the connection returns, with the cookie that is current then. Without the check, a change that user A made offline before signing out could run as user B after B signs in.
+
+The root does not discard queued mutations when the user changes; they fail with `"denied"`. Include the user's ID in a `persistence` key, so that the next user's root does not restore the previous user's queue.
+
+> **Breaking change in 0.4.0.** Predicted roots require `scope`, operation hooks require `scope`, and every envelope carries a `scope` field. The server rejects an envelope without it as `invalid-envelope` with reason `unexpected-fields`, and a root drops a stored envelope without it. Reload old clients after you deploy.
 
 ## Share one root across components
 
@@ -348,7 +361,7 @@ Local prediction failures are returned directly by `mutate`. After a receipt exi
 | Kind                   | Meaning                                                                                                                                                                               |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `"domain"`             | The server returned the mutation's public refusal, available as `error`.                                                                                                              |
-| `"denied"`             | The server denied access without exposing a reason.                                                                                                                                   |
+| `"denied"`             | The server denied access without exposing a reason, or the mutation's scope is not the delivering actor's.                                                                            |
 | `"undeliverable"`      | The server rejected this delivery: the envelope, its arguments, a reused mutation ID, or a creation time outside the delivery window. `error` contains the executor failure.          |
 | `"stale-client"`       | The server does not know the Server Action this page called, because the page's code is older than the deployed build. This delivery wrote nothing, and a retry cannot help.          |
 | `"replay-refused"`     | Replay refused a prediction that could still be withdrawn; `error` contains the predictor's refusal.                                                                                  |
@@ -411,9 +424,12 @@ import { notesProtocol } from "./protocol"
 
 export const useNote = createNextPredictedRoot({
   protocol: notesProtocol,
+  scope: (canon) => canon.value.ownerId,
   action: applyNotesMutation,
   persistence: (canon) =>
-    sessionStoragePersistence(`notes-queue:${canon.value.id}`),
+    sessionStoragePersistence(
+      `notes-queue:${canon.value.ownerId}:${canon.value.id}`
+    ),
   mutationListeners: {
     onAcceptance(result, mutation) {
       if (mutation.restored && !result.ok) {
@@ -430,13 +446,13 @@ Each root calls the function once, when it mounts, with its first canon. Key the
 
 The key also names the queue in memory. While a queue still has mutations to deliver after its root unmounts, a root of the same factory that mounts with the same key continues it. Use each key with one factory only.
 
-The root stores each envelope (mutation ID, protocol, `createdAt`, and invocation) when `mutate` queues it. It removes the envelope when the server accepts the mutation or the mutation fails, also after the root has unmounted. Unmount does not remove an envelope, and a mutation queued from an unmount cleanup, such as an autosave, is stored too. Every write finishes before `mutate` returns, so nothing is lost when the page reloads right after an edit.
+The root stores each envelope (mutation ID, protocol, `scope`, `createdAt`, and invocation) when `mutate` queues it. It removes the envelope when the server accepts the mutation or the mutation fails, also after the root has unmounted. Unmount does not remove an envelope, and a mutation queued from an unmount cleanup, such as an autosave, is stored too. Every write finishes before `mutate` returns, so nothing is lost when the page reloads right after an edit.
 
 When a root mounts, it restores the stored mutations once, ahead of any new mutation, and delivers them again in order under their original mutation IDs. A `mutate` call that comes first, such as one from a child's mount effect, restores the queue itself and is predicted over the restored mutations. This is safe: the server keeps one receipt per mutation ID, so a mutation that already committed gets its stored outcome and is not applied twice. The restored predictions are replayed over the new page's canon, like any pending mutation. A restored mutation may already have been sent by the earlier page, so a replay refusal hides its prediction but does not withdraw it; the root waits for the server's answer.
 
 Restored mutations count in `status.pending` and `status.delivery`. No `mutate` call holds their receipts, so the factory's `mutationListeners` report them. `onAcceptance` and `onCanonization` receive a second argument, `{ id, restored }`; `restored` is `true` for a restored mutation. `onPrediction` does not run for it.
 
-The root checks every stored envelope before it restores it. It drops an envelope for a different protocol ID, an unknown mutation name, an envelope with missing or extra fields (including a missing `createdAt`), arguments that the mutation's schema refuses or changes (the server admits only arguments in parsed form), and a repeated mutation ID. A stored value that is not valid JSON is dropped completely. A schema that validates asynchronously cannot be checked in time, so its mutations are dropped too. Dropped mutations are not reported.
+The root checks every stored envelope before it restores it. It drops an envelope for a different protocol ID, an unknown mutation name, an envelope with missing or extra fields (including a missing `scope` or `createdAt`), arguments that the mutation's schema refuses or changes (the server admits only arguments in parsed form), and a repeated mutation ID. A stored value that is not valid JSON is dropped completely. A schema that validates asynchronously cannot be checked in time, so its mutations are dropped too. Dropped mutations are not reported.
 
 If storage is missing or refuses a read or write, for example in a private window or when it is full, `mutate` still works and the queue stays in memory. A root that cannot read storage never writes to it either, so whatever it holds stays there for a later mount. Text under the key that is not JSON counts as a stored value the root cannot use, and the root replaces it.
 
@@ -448,6 +464,7 @@ Know the limits:
 - **One tab.** `sessionStorage` belongs to one tab, and a closed tab loses it, together with any delivery still in progress. A duplicated tab gets a copy, so both tabs deliver the same mutations. This is safe: they share mutation IDs, and the server's receipts make the second delivery return the first one's outcome.
 - **One mounted root per key.** Two roots mounted at the same time with the same key are not supported: they render one queue, but only the first holds its receipts, and roots of two factories overwrite each other's stored queue. Give each mounted root its own key, such as one that includes the record's ID.
 - **No other devices or browsers.** Nothing leaves the browser until it is delivered.
+- **Scope.** A restored envelope keeps its original `scope`. If another user is now signed in, delivery fails with `"denied"`. See [Scope mutations to the signed-in user](#scope-mutations-to-the-signed-in-user).
 - **Delivery age.** A restored envelope keeps its original `createdAt`. If it is older than the server's maximum delivery age and the server has no receipt for it, delivery fails with `"undeliverable"` and `error.code` `"delivery-expired"`. See [Limit delivery age](server-setup.md#limit-delivery-age).
 - **JSON arguments.** `sessionStoragePersistence` stores envelopes as JSON. Mutation arguments must already be canonical JSON for the server, so this loses nothing.
 
@@ -487,6 +504,7 @@ import { useRouter } from "next/navigation"
 export function NewRunForm({ playerId }: { playerId: string }) {
   const router = useRouter()
   const createRun = useCreateRun({
+    scope: playerId,
     persistence: sessionStoragePersistence(`new-run:${playerId}`),
     onSettled: (answer) => {
       if (answer.ok) router.push(`/runs/${answer.value.runId}`)
@@ -522,17 +540,19 @@ export function NewRunForm({ playerId }: { playerId: string }) {
 
 `showNotice` is an application-owned helper.
 
+`scope` is required, as for a predicted root: pass the receipt scope of the signed-in user, the value that the authority's `scope(actor)` returns. Each new submission's envelope carries it, and a held or restored submission keeps its own. The action answers `denied` to a submission whose scope is not the delivering actor's, so a submission resent after a sign-in switch never runs as the other user. See [Scope mutations to the signed-in user](#scope-mutations-to-the-signed-in-user).
+
 ### How the hook keeps one key
 
 The hook holds at most one submission:
 
-| Call                                | What happens                                                                                               |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `run(args)` with nothing held       | Makes a new envelope (mutation ID and `createdAt`), stores it if `persistence` is set, and sends it.       |
-| `run(args)` with the same arguments | Retries the held submission. It never makes a second envelope.                                             |
-| `run(args)` with other arguments    | Returns `pending-submission` and sends nothing, until `retry()` or `discard()`.                            |
-| `retry()`                           | Sends the held envelope again: same mutation ID, arguments, and `createdAt`. Joins a call still in flight. |
-| `discard()`                         | Forgets the held submission. A delivery of it may still commit; its answer no longer changes the hook.     |
+| Call                                | What happens                                                                                                   |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `run(args)` with nothing held       | Makes a new envelope (mutation ID, `createdAt`, and `scope`), stores it if `persistence` is set, and sends it. |
+| `run(args)` with the same arguments | Retries the held submission. It never makes a second envelope.                                                 |
+| `run(args)` with other arguments    | Returns `pending-submission` and sends nothing, until `retry()` or `discard()`.                                |
+| `retry()`                           | Sends the held envelope again: same mutation ID, arguments, and `createdAt`. Joins a call still in flight.     |
+| `discard()`                         | Forgets the held submission. A delivery of it may still commit; its answer no longer changes the hook.         |
 
 Exhausted contention on the server resends the same envelope after a short backoff. Any answer from the server ends the submission: the next `run` makes a new envelope.
 
@@ -550,7 +570,7 @@ Put navigation and other effects of an answer in `onSettled`. It receives each a
 | ----------------------------- | ------------------------------------------------------------------------------------- |
 | `ok(result)`                  | The operation was accepted. A retry gets the same result.                             |
 | `refused`                     | The command refused with a public refusal. A retry gets the same refusal.             |
-| `denied`                      | Screening or admission denied the submission.                                         |
+| `denied`                      | Screening or admission denied the submission, or its scope is not the actor's.        |
 | `undeliverable`               | The executor refused this delivery, for example `delivery-expired`. It wrote nothing. |
 | `stale-client`                | The page is older than the deployed build. Reload it.                                 |
 | `unconfirmed` (not an answer) | No answer yet. The submission is still held: offer `retry()` and `discard()`.         |
@@ -563,7 +583,7 @@ Put navigation and other effects of an answer in `onSettled`. It receives each a
 
 Without `persistence`, the held submission lives only in memory, and a page reload loses it. A user who reloads and submits again then makes a new envelope, and a submission that committed before the reload can be written twice. Pass `persistence` to keep the held envelope in `sessionStorage`. The hook stores it before the first send and removes it when the server answers or the user discards it.
 
-A restored submission is `unconfirmed`, with `pending.restored` set. The hook never sends it on its own: show the user what was submitted and offer `retry()` and `discard()`. The hook checks a stored value as a root checks its queue, and drops anything that is not one envelope of this operation.
+A restored submission is `unconfirmed`, with `pending.restored` set. It keeps the scope it was made with. The hook never sends it on its own: show the user what was submitted and offer `retry()` and `discard()`. The hook checks a stored value as a root checks its queue, and drops anything that is not one envelope of this operation.
 
 Hooks of one factory with the same key share one submission, also across a remount. Use each key with one factory only, and do not share a key with a predicted root.
 
@@ -603,11 +623,12 @@ Its `value` is confirmed canon only. It exposes `status` and `retryRefresh`, but
 
 `createPredictedRoot` and `createObservedRoot` from `headcanon/react` accept explicit refresh dependencies. A predicted root also needs a `send` function:
 
-| Dependency      | Contract                                                                                                                         |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `send`          | Delivers the envelope and resolves with an accepted stamp or a public refusal. An ordinary throw means the outcome is uncertain. |
-| `refresh`       | A React hook returning a `RefreshAdapter`. For snapshot data, call `useSnapshotRefresh(refetch)` inside this hook.               |
-| `invalidations` | Optional adapter that notifies the root about newer revisions or subscription gaps.                                              |
+| Dependency      | Contract                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scope`         | Returns the receipt scope of the user that a canon was loaded for. See [Scope mutations to the signed-in user](#scope-mutations-to-the-signed-in-user). |
+| `send`          | Delivers the envelope and resolves with an accepted stamp or a public refusal. An ordinary throw means the outcome is uncertain.                        |
+| `refresh`       | A React hook returning a `RefreshAdapter`. For snapshot data, call `useSnapshotRefresh(refetch)` inside this hook.                                      |
+| `invalidations` | Optional adapter that notifies the root about newer revisions or subscription gaps.                                                                     |
 
 Use `RetryableDeliveryError` only when the authority confirms it stored no terminal receipt, and `TerminalDeliveryError` for a known terminal delivery failure. Throw `new TerminalDeliveryError({ kind: "stale-client" }, { cause })` when the server does not know the endpoint this client called. The Next binding already translates generated-action outcomes, and Next's unknown-action error, into these categories.
 

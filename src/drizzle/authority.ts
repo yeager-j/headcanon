@@ -61,7 +61,8 @@ export interface DrizzleMutationAuthorityOptions<
   /**
    * Returns the trusted receipt scope for an actor, such as a user ID.
    * Receipts and duplicate detection are keyed by this scope and the mutation
-   * ID, so it must be stable for one actor.
+   * ID, so it must be stable for one actor. The action denies an envelope
+   * whose `scope` is not this value, so the client must derive the same one.
    */
   readonly scope: (actor: Actor) => string
   /**
@@ -334,6 +335,7 @@ export function createDrizzleMutationAuthority<
 
   return {
     preflight: options.db,
+    scope: options.scope,
     execute(request, run) {
       const actorScope = options.scope(request.actor)
       const key = receiptKey(actorScope, request.mutationId)

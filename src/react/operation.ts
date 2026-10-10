@@ -156,6 +156,14 @@ export interface OperationHookOptions<
   Operation extends AnyOperationDefinition,
 > {
   /**
+   * The receipt scope of the signed-in actor, as the authority's
+   * `scope(actor)` returns it, such as a user ID. `run` puts it in each new
+   * submission's envelope; a held or restored submission keeps its own. The
+   * action denies a submission whose scope is not the delivering actor's, so
+   * one made before a sign-out never runs as the next actor.
+   */
+  readonly scope: string
+  /**
    * Keeps the held submission across a page load, for example
    * `sessionStoragePersistence(\`new-run:${playerId}\`)`. A restored
    * submission is `unconfirmed` and is never sent again on its own. Hooks of
@@ -177,11 +185,12 @@ export interface OperationHookOptions<
 
 /**
  * The hook an operation hook factory returns. Call it once per form instance.
- * @param options Persistence for the held submission, and the answer listener.
+ * @param options The actor's receipt scope, persistence for the held
+ *   submission, and the answer listener.
  * @returns The form's operation handle.
  */
 export type OperationHook<Operation extends AnyOperationDefinition> = (
-  options?: OperationHookOptions<Operation>
+  options: OperationHookOptions<Operation>
 ) => OperationHandle<Operation>
 
 type AnswerOf<Operation extends AnyOperationDefinition> = OperationAnswer<
@@ -235,7 +244,10 @@ interface OperationCell<Operation extends AnyOperationDefinition> {
   getSnapshot(): Snapshot<Operation>
   subscribe(listener: () => void): () => void
   mount(onSettled: (answer: AnswerOf<Operation>) => void): () => void
-  run(args: OperationArgsOf<Operation>): Promise<OutcomeOf<Operation>>
+  run(
+    args: OperationArgsOf<Operation>,
+    scope: string
+  ): Promise<OutcomeOf<Operation>>
   retry(): Promise<OutcomeOf<Operation>>
   discard(): void
 }
@@ -571,7 +583,7 @@ function createOperationCell<Operation extends AnyOperationDefinition>(
         retire()
       }
     },
-    run(args) {
+    run(args, scope) {
       restore()
       if (held) {
         return sameArguments(args, held.envelope.invocation.args)
@@ -580,7 +592,7 @@ function createOperationCell<Operation extends AnyOperationDefinition>(
       }
 
       held = {
-        envelope: createOperationEnvelope(operation, args),
+        envelope: createOperationEnvelope(operation, args, { scope }),
         restored: false,
         mayHaveCommitted: false,
         delivery: undefined,
@@ -688,8 +700,8 @@ export function createOperationHook<Operation extends AnyOperationDefinition>(
     return cell
   }
 
-  return function useOperation(hookOptions = {}) {
-    const { persistence } = hookOptions
+  return function useOperation(hookOptions) {
+    const { persistence, scope } = hookOptions
     const key = persistence?.key
     // A new key selects another submission; the store object may change
     // identity on every render.
@@ -707,8 +719,8 @@ export function createOperationHook<Operation extends AnyOperationDefinition>(
     useEffect(() => cell.mount((answer) => settled(answer)), [cell])
 
     const run = useCallback(
-      (args: OperationArgsOf<Operation>) => cell.run(args),
-      [cell]
+      (args: OperationArgsOf<Operation>) => cell.run(args, scope),
+      [cell, scope]
     )
     const retry = useCallback(() => cell.retry(), [cell])
     const discard = useCallback(() => cell.discard(), [cell])

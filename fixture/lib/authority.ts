@@ -5,6 +5,7 @@ import {
   type InMemoryMutationAuthority,
 } from "headcanon/testing"
 
+import { FIXTURE_USER_ID } from "./actor"
 import { ITEMS_AXIS, type FixtureState } from "./protocol"
 
 /** What the fixture's authority stores: the items and the axis revision. */
@@ -56,8 +57,11 @@ type FixtureAuthority = InMemoryMutationAuthority<
   unknown
 >
 
-/** The part of an authority a binder uses: its preflight and its deliveries. */
-type BindableAuthority = Pick<FixtureAuthority, "preflight" | "execute">
+/** The part of an authority a binder uses: its preflight, scope, and deliveries. */
+type BindableAuthority = Pick<
+  FixtureAuthority,
+  "preflight" | "scope" | "execute"
+>
 
 interface FixtureServer {
   authority: FixtureAuthority
@@ -108,6 +112,9 @@ export const fixtureAuthority: BindableAuthority = {
   get preflight() {
     return server().authority.preflight
   },
+  scope(actor) {
+    return server().authority.scope(actor)
+  },
   async execute(request, run) {
     // Read once: a delivery released by a reset must not reach the new
     // authority.
@@ -126,7 +133,7 @@ export const fixtureAuthority: BindableAuthority = {
 
 /** The actor the Server Action trusts. It never rides the wire. */
 export function fixtureActor(): FixtureActor {
-  return { id: "fixture-user", role: server().faults.role }
+  return { id: FIXTURE_USER_ID, role: server().faults.role }
 }
 
 /**

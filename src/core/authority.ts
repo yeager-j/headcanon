@@ -22,6 +22,14 @@ import {
 /** The transport envelope admitted by a mutation authority executor. */
 export interface MutationEnvelope<Invocation> {
   readonly protocol: string
+  /**
+   * The receipt scope of the actor the client created the mutation for, as
+   * the authority's `scope(actor)` returns it. Every redelivery keeps it. The
+   * action denies the envelope when the actor delivering it has another
+   * scope, so a mutation queued before a sign-out never runs as the next
+   * actor.
+   */
+  readonly scope: string
   readonly mutationId: string
   /**
    * When the client created the mutation, in epoch milliseconds on the
@@ -218,6 +226,11 @@ export interface MutationAuthorityAdapter<
    * and reading through it claims no receipt.
    */
   readonly preflight: Preflight
+  /**
+   * Returns the trusted receipt scope for an actor. Receipts are keyed by it,
+   * and the action denies an envelope whose `scope` differs from it.
+   */
+  scope(actor: Actor): string
   /**
    * Runs one request under its receipt key: the actor's scope and the
    * mutation ID. Calls with one key run one at a time; calls with different
@@ -588,6 +601,7 @@ export type MutationExecutorError =
         | "not-plain-object"
         | "unexpected-fields"
         | "invalid-protocol"
+        | "invalid-scope"
         | "invalid-mutation-id"
         | "invalid-created-at"
         | "invalid-invocation"
@@ -621,6 +635,7 @@ export interface AdmissionRegistry {
 
 /** An envelope that passed {@link parseEnvelope}. */
 export interface ParsedEnvelope {
+  readonly scope: string
   readonly mutationId: string
   readonly createdAt: number
   readonly definition: AdmittedDefinition
@@ -629,6 +644,8 @@ export interface ParsedEnvelope {
 
 /** A strictly parsed, canonical request which has not touched receipt authority. */
 export interface PreparedMutationRequest {
+  /** The envelope's `scope`: untrusted until compared with the actor's. */
+  readonly scope: string
   readonly mutationId: string
   /** The envelope's `createdAt`: client epoch milliseconds. */
   readonly createdAt: number
@@ -654,12 +671,21 @@ export function parseEnvelope(
     return err({ code: "invalid-envelope", reason: "not-plain-object" })
   }
   if (
-    !hasExactKeys(value, ["protocol", "mutationId", "createdAt", "invocation"])
+    !hasExactKeys(value, [
+      "protocol",
+      "scope",
+      "mutationId",
+      "createdAt",
+      "invocation",
+    ])
   ) {
     return err({ code: "invalid-envelope", reason: "unexpected-fields" })
   }
   if (value.protocol !== protocol.id) {
     return err({ code: "invalid-envelope", reason: "invalid-protocol" })
+  }
+  if (typeof value.scope !== "string") {
+    return err({ code: "invalid-envelope", reason: "invalid-scope" })
   }
   if (
     typeof value.mutationId !== "string" ||
@@ -685,6 +711,7 @@ export function parseEnvelope(
   }
 
   return ok({
+    scope: value.scope,
     mutationId: value.mutationId,
     createdAt: value.createdAt,
     definition,
@@ -719,7 +746,8 @@ const UNPARSED_ARGUMENTS_ISSUE: StandardSchemaV1.Issue = Object.freeze({
  * Strictly parses and canonicalizes an envelope without claiming a receipt.
  *
  * This is the server-side trust-boundary step: it checks the exact envelope
- * shape (including a non-negative integer `createdAt`) and protocol, validates the mutation name, parses arguments with the
+ * shape (including a string `scope` and a non-negative integer `createdAt`)
+ * and protocol, validates the mutation name, parses arguments with the
  * registered Standard Schema, and derives canonical receipt identity. Clients
  * send arguments in parsed form (the value they predicted with), so arguments
  * the schema changes are refused as `invalid-arguments`; otherwise the
@@ -766,6 +794,7 @@ export async function prepareMutationRequest(
   }
 
   return ok({
+    scope: parsedEnvelope.value.scope,
     mutationId: parsedEnvelope.value.mutationId,
     createdAt: parsedEnvelope.value.createdAt,
     protocol: protocol.id,

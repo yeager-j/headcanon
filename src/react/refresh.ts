@@ -94,7 +94,12 @@ export type IncorporationStatus = FreshnessState & {
  * function useNotesRefresh() {
  *   return useSnapshotRefresh(refetchNotes)
  * }
- * const useNotes = createPredictedRoot({ protocol, send, refresh: useNotesRefresh })
+ * const useNotes = createPredictedRoot({
+ *   protocol,
+ *   scope,
+ *   send,
+ *   refresh: useNotesRefresh,
+ * })
  * ```
  */
 export function useSnapshotRefresh(

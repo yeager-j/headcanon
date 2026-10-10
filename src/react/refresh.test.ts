@@ -166,6 +166,7 @@ function setupAcceptedMutation(options: {
   )
   const useRoot = createPredictedRoot({
     protocol,
+    scope: () => "actor",
     send,
     refresh: useRefresh,
     invalidations: options.invalidations,

@@ -263,6 +263,7 @@ function contractEnvelope(
 ) {
   return {
     protocol: CONTRACT_PROTOCOL,
+    scope: "actor",
     mutationId: `00000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`,
     createdAt,
     invocation: { name: CONTRACT_MUTATION, args },

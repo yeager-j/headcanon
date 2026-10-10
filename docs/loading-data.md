@@ -40,7 +40,7 @@ export async function loadNoteCanon(noteId: string) {
   if (!note) notFound()
 
   return defineCanon<NoteState>({
-    value: { id: note.id, title: note.title },
+    value: { id: note.id, ownerId: note.ownerId, title: note.title },
     revisions: { [noteAxis.of(note.id)]: note.revision },
   })
 }
@@ -226,7 +226,7 @@ async function readCachedNoteCanon(noteId: string, userId: string) {
   if (!note) notFound()
 
   return defineCachedCanon<NoteState>({
-    value: { id: note.id, title: note.title },
+    value: { id: note.id, ownerId: note.ownerId, title: note.title },
     revisions: { [noteAxis.of(note.id)]: note.revision },
   })
 }

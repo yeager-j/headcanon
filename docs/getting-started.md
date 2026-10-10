@@ -57,6 +57,7 @@ import { z } from "zod"
 
 export type NoteState = {
   id: string
+  ownerId: string
   title: string
 }
 
@@ -254,6 +255,7 @@ export async function loadNoteCanon(noteId: string) {
   return defineCanon<NoteState>({
     value: {
       id: note.id,
+      ownerId: note.ownerId,
       title: note.title,
     },
     revisions: {
@@ -283,6 +285,7 @@ import { useState } from "react"
 
 const useNote = createNextPredictedRoot({
   protocol: notesProtocol,
+  scope: (canon) => canon.value.ownerId,
   action: applyNotesMutation,
 })
 
@@ -348,6 +351,8 @@ export default async function NotePage({
   return <NoteEditor key={id} canon={canon} />
 }
 ```
+
+`scope` returns the receipt scope of the signed-in user: the same value as the authority's `scope(actor)`. The loader only reads the user's own notes, so the note's `ownerId` is that user's ID. Every mutation carries this scope, and the server action denies a mutation whose scope is not the current user's. A change made before a sign-out therefore never runs as the next user.
 
 The component reads `value` from Headcanon. That value includes pending predictions over the latest confirmed data.
 

@@ -64,16 +64,17 @@ import { err, ok } from "serializable-result"
 import { expect, it } from "vitest"
 
 const noteId = "00000000-0000-4000-8000-000000000001"
+const ownerId = "user-1"
 const context = {
   mutationId: "00000000-0000-4000-8000-000000000002",
 }
 
 it("predicts a title without changing the input", () => {
-  const state = Object.freeze({ id: noteId, title: "Before" })
+  const state = Object.freeze({ id: noteId, ownerId, title: "Before" })
   const args = { noteId, title: "After" }
 
   expect(renameNote.predict(state, args, context)).toEqual(
-    ok({ id: noteId, title: "After" })
+    ok({ id: noteId, ownerId, title: "After" })
   )
   expect(renameNote.predict(state, args, context)).toEqual(
     renameNote.predict(state, args, context)
@@ -84,7 +85,7 @@ it("predicts a title without changing the input", () => {
 it("refuses an empty title", () => {
   expect(
     renameNote.predict(
-      { id: noteId, title: "Before" },
+      { id: noteId, ownerId, title: "Before" },
       { noteId, title: "   " },
       context
     )
@@ -96,13 +97,14 @@ Calling `predict` directly does not validate arguments through the mutation's sc
 
 ## Test server behavior
 
-For the Drizzle commands in [Server setup](server-setup.md), use a test database with both your application tables and Headcanon's receipt table. Give each test isolated data and call the generated action with an envelope containing `protocol`, a UUID `mutationId`, `createdAt: Date.now()`, and the mutation invocation.
+For the Drizzle commands in [Server setup](server-setup.md), use a test database with both your application tables and Headcanon's receipt table. Give each test isolated data and call the generated action with an envelope containing `protocol`, the actor's `scope`, a UUID `mutationId`, `createdAt: Date.now()`, and the mutation invocation.
 
 Check the returned outcome, committed rows, revisions, and receipts together:
 
 | Case                                                     | Expected result                                                                                                                                                                              |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Malformed envelope or arguments                          | Executor error before actor lookup or command execution.                                                                                                                                     |
+| The envelope's `scope` is not the actor's                | `ok({ kind: "denied" })` before screening; no receipt lookup, no receipt, and no write.                                                                                                      |
 | Screening denies access                                  | `ok({ kind: "denied" })`; no receipt and no write.                                                                                                                                           |
 | Transaction-time admission denies access                 | Recorded denial; no domain write.                                                                                                                                                            |
 | A command refuses after making tentative writes          | Domain writes roll back; the refusal is recorded.                                                                                                                                            |
@@ -142,7 +144,7 @@ import type { NoteState } from "@/lib/notes/protocol"
 import { createMutationBinder } from "headcanon/server"
 import { createInMemoryMutationAuthority } from "headcanon/testing"
 
-type StoredNote = NoteState & { ownerId: string; revision: number }
+type StoredNote = NoteState & { revision: number }
 type Actor = { userId: string }
 
 export function createNotesFixture(initialState: StoredNote) {
@@ -189,7 +191,11 @@ it("creates one run for two deliveries of one submission", async () => {
     binder,
     binding: bindCreateRun(binder),
   })
-  const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+  const envelope = createOperationEnvelope(
+    createRun,
+    { name: "Emerald" },
+    { scope: "user-1" }
+  )
 
   const first = await action(envelope)
   const second = await action(envelope)
@@ -199,7 +205,7 @@ it("creates one run for two deliveries of one submission", async () => {
 })
 ```
 
-Also check that the same `mutationId` with other arguments returns `mutation-id-reused`, and that a refusal replays as the same refusal. The action needs the `next/cache` mock above.
+Pass the scope that the fixture's authority gives its actor. Also check that the same `mutationId` with other arguments returns `mutation-id-reused`, that a refusal replays as the same refusal, and that an envelope with another actor's scope is `denied` without running the command. The action needs the `next/cache` mock above.
 
 ## Test prediction, acceptance, and canonization separately
 
@@ -222,7 +228,7 @@ it("keeps the prediction until canon covers the accepted revision", async () => 
   const axis = noteAxis.of(noteId)
   const canon = (title: string, revision: number) =>
     defineCanon({
-      value: { id: noteId, title },
+      value: { id: noteId, ownerId: "user-1", title },
       revisions: { [axis]: revision },
     })
   const parsed = acceptedStamp({ revisions: { [axis]: 1 } })
@@ -240,6 +246,7 @@ it("keeps the prediction until canon covers the accepted revision", async () => 
   const refetch = vi.fn(async () => undefined)
   const useNotes = createPredictedRoot({
     protocol: notesProtocol,
+    scope: (current) => current.value.ownerId,
     send,
     refresh: () => useSnapshotRefresh(refetch),
   })

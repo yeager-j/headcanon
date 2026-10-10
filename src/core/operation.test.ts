@@ -58,6 +58,7 @@ const createRun = defineOperation({
 const archiveRun = defineOperation({ name: "run.archive.v1", args: nameArgs })
 
 const MUTATION_ID = "00000000-0000-4000-8000-000000000001"
+const PLAYER_1 = { scope: "player-1" }
 
 describe("defineOperation", () => {
   it("types arguments, result, and refusal from its schemas", () => {
@@ -114,6 +115,7 @@ describe("createOperationEnvelope", () => {
   it("builds a frozen envelope under the reserved operation ID", () => {
     const args = { name: "Emerald" }
     const envelope = createOperationEnvelope(createRun, args, {
+      scope: "player-1",
       mutationId: MUTATION_ID,
       createdAt: 1_000,
     })
@@ -121,6 +123,7 @@ describe("createOperationEnvelope", () => {
 
     expect(envelope).toEqual({
       protocol: OPERATION_PROTOCOL_ID,
+      scope: "player-1",
       mutationId: MUTATION_ID,
       createdAt: 1_000,
       invocation: { name: "run.create.v1", args: { name: "Emerald" } },
@@ -137,7 +140,7 @@ describe("createOperationEnvelope", () => {
         Array.isArray((value as { tags?: unknown } | null)?.tags)
       ),
     })
-    const envelope = createOperationEnvelope(tagged, { tags: ["a"] })
+    const envelope = createOperationEnvelope(tagged, { tags: ["a"] }, PLAYER_1)
 
     expect(() => envelope.invocation.args.tags.push("b")).toThrow(TypeError)
     expect(envelope.invocation.args.tags).toEqual(["a"])
@@ -145,8 +148,8 @@ describe("createOperationEnvelope", () => {
 
   it("mints a fresh mutation ID and the current time by default", () => {
     const before = Date.now()
-    const first = createOperationEnvelope(createRun, { name: "a" })
-    const second = createOperationEnvelope(createRun, { name: "a" })
+    const first = createOperationEnvelope(createRun, { name: "a" }, PLAYER_1)
+    const second = createOperationEnvelope(createRun, { name: "a" }, PLAYER_1)
 
     expect(first.mutationId).not.toBe(second.mutationId)
     expect(first.createdAt).toBeGreaterThanOrEqual(before)
@@ -159,7 +162,7 @@ describe("operation admission", () => {
     const envelope = createOperationEnvelope(
       createRun,
       { name: "Emerald" },
-      { mutationId: MUTATION_ID, createdAt: 1_000 }
+      { scope: "player-1", mutationId: MUTATION_ID, createdAt: 1_000 }
     )
 
     const prepared = await prepareMutationRequest(
@@ -169,6 +172,7 @@ describe("operation admission", () => {
 
     expect(prepared).toMatchObject(
       ok({
+        scope: "player-1",
         mutationId: MUTATION_ID,
         createdAt: 1_000,
         protocol: OPERATION_PROTOCOL_ID,
@@ -180,7 +184,11 @@ describe("operation admission", () => {
 
   it("refuses another operation's envelope and invalid arguments", async () => {
     const registry = operationRegistry(createRun)
-    const other = createOperationEnvelope(archiveRun, { name: "Emerald" })
+    const other = createOperationEnvelope(
+      archiveRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
 
     expect(await prepareMutationRequest(registry, other)).toEqual(
       err({ code: "invalid-envelope", reason: "unknown-mutation" })
@@ -193,6 +201,22 @@ describe("operation admission", () => {
     ).toMatchObject(
       err({ code: "invalid-arguments", mutation: "run.create.v1" })
     )
+  })
+
+  it("refuses an envelope without a string scope", async () => {
+    const registry = operationRegistry(createRun)
+    const { scope: _scope, ...unscoped } = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
+
+    expect(await prepareMutationRequest(registry, unscoped)).toEqual(
+      err({ code: "invalid-envelope", reason: "unexpected-fields" })
+    )
+    expect(
+      await prepareMutationRequest(registry, { ...unscoped, scope: 1 })
+    ).toEqual(err({ code: "invalid-envelope", reason: "invalid-scope" }))
   })
 
   it("reserves the operation ID from protocols", () => {
