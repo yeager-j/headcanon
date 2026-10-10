@@ -69,6 +69,7 @@ describe("a protocol with no mutations yet", () => {
     expect(
       await action({
         protocol: "run.v1",
+        scope: "actor",
         mutationId: "00000000-0000-4000-8000-000000000001",
         createdAt: Date.now(),
         invocation: { name: "run.rename", args: {} },
@@ -79,7 +80,11 @@ describe("a protocol with no mutations yet", () => {
 
   it("mounts a root whose mutate takes no invocation", () => {
     const { action } = createRunAction()
-    const useRun = createNextPredictedRoot({ protocol: runProtocol, action })
+    const useRun = createNextPredictedRoot({
+      protocol: runProtocol,
+      scope: () => "actor",
+      action,
+    })
 
     const { result } = renderHook(() =>
       useRun({
@@ -97,6 +102,7 @@ describe("a protocol with no mutations yet", () => {
     const { action } = createRunAction()
     const useRun = createNextPredictedRoot({
       protocol: runProtocol,
+      scope: () => "actor",
       action,
       persistence: sessionStoragePersistence(QUEUE_KEY),
     })
@@ -106,6 +112,7 @@ describe("a protocol with no mutations yet", () => {
       JSON.stringify([
         {
           protocol: "run.v1",
+          scope: "actor",
           mutationId: "00000000-0000-4000-8000-000000000002",
           createdAt: Date.now(),
           invocation: { name: "run.rename", args: { name: "Ruby" } },

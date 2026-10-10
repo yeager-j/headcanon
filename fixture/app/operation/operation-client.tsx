@@ -1,5 +1,6 @@
 "use client"
 
+import { FIXTURE_USER_ID } from "@/lib/actor"
 import { createItem, type CreatedItem } from "@/lib/operations"
 import type { FixtureRefusal } from "@/lib/protocol"
 import { createNextOperationHook } from "headcanon/next/client"
@@ -51,6 +52,7 @@ function describeAnswer(
 function useNavigateOnSettled(): OperationHookOptions<typeof createItem> {
   const router = useRouter()
   return {
+    scope: FIXTURE_USER_ID,
     persistence: sessionStoragePersistence("fixture-operation:client"),
     onSettled: (answer) => {
       if (answer.ok) router.push(`/items/${answer.value.index}`)
@@ -76,6 +78,7 @@ function ClientRedirectForm() {
 
 function ServerRedirectForm() {
   const operation = useCreateItemWithServerRedirect({
+    scope: FIXTURE_USER_ID,
     persistence: sessionStoragePersistence("fixture-operation:server"),
   })
   return <OperationForm operation={operation} />

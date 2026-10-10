@@ -81,11 +81,14 @@ function rethrowControlFlow(error: unknown): void {
   if (error instanceof ControlFlowError) throw error
 }
 
+/** The receipt scope of the player signed in when a test does not say. */
+const PLAYER_1 = "player-1"
+
 function mountOperation(
   useOperation: ReturnType<typeof createOperationHook<typeof createRun>>,
-  options: OperationHookOptions<typeof createRun> = {}
+  options: Partial<OperationHookOptions<typeof createRun>> = {}
 ) {
-  return renderHook(() => useOperation(options))
+  return renderHook(() => useOperation({ scope: PLAYER_1, ...options }))
 }
 
 const PERSISTENCE_KEY = "new-run:player-1"
@@ -121,6 +124,8 @@ describe("createOperationHook", () => {
       restored: false,
       mayHaveCommitted: false,
     })
+
+    expect(calls[0]!.envelope.scope).toBe(PLAYER_1)
 
     await calls[0]!.answer(ok({ runId: "run-1" }))
 
@@ -401,7 +406,7 @@ describe("operation persistence", () => {
     )
   })
 
-  it("restores a held submission after a page load without sending it", async () => {
+  it("restores a held submission with its own scope after a page load without sending it", async () => {
     const first = createDeferredSender()
     const persistence = sessionStoragePersistence(PERSISTENCE_KEY)
     const before = mountOperation(
@@ -419,7 +424,7 @@ describe("operation persistence", () => {
     const onSettled = vi.fn()
     const { result } = mountOperation(
       createOperationHook({ operation: createRun, send: second.send }),
-      { persistence, onSettled }
+      { scope: "player-2", persistence, onSettled }
     )
 
     expect(result.current.status).toBe("unconfirmed")
@@ -436,6 +441,7 @@ describe("operation persistence", () => {
     await second.calls[0]!.answer(ok({ runId: "run-1" }))
 
     expect(second.calls[0]!.envelope).toEqual(envelope)
+    expect(second.calls[0]!.envelope.scope).toBe(PLAYER_1)
     expect(onSettled).toHaveBeenCalledExactlyOnceWith(ok({ runId: "run-1" }))
   })
 
@@ -448,6 +454,32 @@ describe("operation persistence", () => {
     const { result } = mountOperation(
       createOperationHook({ operation: createRun, send }),
       { persistence: sessionStoragePersistence(PERSISTENCE_KEY) }
+    )
+
+    expect(result.current.status).toBe("idle")
+  })
+
+  it("drops a stored envelope without a scope", () => {
+    const first = createDeferredSender()
+    const persistence = sessionStoragePersistence(PERSISTENCE_KEY)
+    const before = mountOperation(
+      createOperationHook({ operation: createRun, send: first.send }),
+      { persistence }
+    )
+    act(() => {
+      void before.result.current.run({ name: "Emerald" })
+    })
+    before.unmount()
+    const { scope: _scope, ...unscoped } = first.calls[0]!.envelope
+    globalThis.sessionStorage.setItem(
+      PERSISTENCE_KEY,
+      JSON.stringify([unscoped])
+    )
+
+    const { send } = createDeferredSender()
+    const { result } = mountOperation(
+      createOperationHook({ operation: createRun, send }),
+      { persistence }
     )
 
     expect(result.current.status).toBe("idle")
@@ -489,9 +521,12 @@ describe("operation persistence", () => {
     const { calls, send } = createDeferredSender()
     const useOperation = createOperationHook({ operation: createRun, send })
     const persistence = sessionStoragePersistence(PERSISTENCE_KEY)
-    const strict = renderHook(() => useOperation({ persistence }), {
-      wrapper: StrictMode,
-    })
+    const strict = renderHook(
+      () => useOperation({ scope: PLAYER_1, persistence }),
+      {
+        wrapper: StrictMode,
+      }
+    )
     act(() => {
       void strict.result.current.run({ name: "Emerald" })
     })

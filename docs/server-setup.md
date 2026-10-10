@@ -61,6 +61,16 @@ Receipt scope does not grant permission to read or write data. Commands still ne
 
 The binder module must not import command modules. Commands import the binder, and the action imports both.
 
+### Deny envelopes made for another actor
+
+Every envelope carries the `scope` of the user it was made for. The client computes it: a predicted root from its canon, and an operation hook from its `scope` option (see [Scope mutations to the signed-in user](react.md#scope-mutations-to-the-signed-in-user)). It must equal the authority's `scope(actor)` for that user, so load the same value into the canon.
+
+The action derives the actor, then compares the envelope's `scope` with `scope(actor)`. If they differ, it returns `ok({ kind: "denied" })` before `screen`, before any receipt lookup, and before any command runs. Nothing is recorded. An envelope can arrive after the session changed: a queue keeps delivering after its root unmounts, and Next.js can retry a Server Action that failed with a network error when the connection returns, with the cookie that is current then. The check keeps a mutation that user A made before signing out from running as user B.
+
+The envelope's scope is not trusted for identity. The actor still comes from `requireActor()`, and the receipt is keyed by `scope(actor)`. The check only stops an envelope from running as an actor it was not made for.
+
+> **Breaking change in 0.4.0.** `scope` is a required envelope field. The server rejects an envelope without it, or with a scope that is not a string, as `invalid-envelope` (reason `unexpected-fields` or `invalid-scope`). This is terminal: the client does not retry it. Reload old clients after you deploy. Code that builds envelopes itself, such as tests or a custom sender, must add the actor's `scope`.
+
 ## Bind your commands
 
 Move a command into its own server module as a feature grows. This is the rename command from Getting started, using its existing shared mutation and schema:
@@ -168,7 +178,7 @@ Use both steps when a permission controls access to stored outcomes and new writ
 | `throwMutationContention()`           | A concurrent change that requires a fresh attempt.                                | Rolls back the transaction and retries with a fresh stamp, up to `maxAttempts`.                         |
 | An unexpected exception               | A database failure or programming error.                                          | Propagates without committing the attempt or a new receipt.                                             |
 
-The generated action returns denials as `ok({ kind: "denied" })`, without a reason. `createNextPredictedRoot` maps that outcome to a terminal mutation failure. You do not need to throw Next.js `forbidden()` for this path.
+The generated action returns denials as `ok({ kind: "denied" })`, without a reason. It also denies an envelope made for another actor; see [Deny envelopes made for another actor](#deny-envelopes-made-for-another-actor). `createNextPredictedRoot` maps that outcome to a terminal mutation failure. You do not need to throw Next.js `forbidden()` for this path.
 
 Give a mutation a `refusal` schema when its command can return `refuseMutation(error)`. If the command has no public refusal cases, omit `refusal`: the mutation's refusal type is then `never`, and a stored refusal for it throws instead of replaying. Refusal schemas must validate synchronously, and their values must be JSON serializable. Keep secrets and internal error details out of public refusals.
 
@@ -296,7 +306,7 @@ A client whose clock is wrong by more than these limits cannot save: a slow cloc
 
 Receipts are part of the write guarantee. The adapter stores them in the same database transaction as accepted application changes and replays recorded refusals and denials too, after screening allows the delivery.
 
-A retry must keep the same mutation ID, protocol, and arguments. Reusing an ID with a different invocation returns `mutation-id-reused`. The client root preserves the original envelope when retrying uncertain delivery.
+A retry must keep the same mutation ID, protocol, scope, and arguments. Reusing an ID with a different invocation returns `mutation-id-reused`. The client root preserves the original envelope when retrying uncertain delivery.
 
 `deleteExpiredReceipts()` deletes receipts that no honest redelivery can use. It deletes a receipt once it is older than `maxDeliveryAgeMs + clockSkewToleranceMs + marginMs` on the database clock. After that, every redelivery that keeps its original `createdAt` gets `delivery-expired`. `marginMs` defaults to 1 hour and covers database clock adjustments, such as a failover to a server whose clock differs.
 
@@ -426,13 +436,13 @@ Give the action the binder that made the binding. Each operation has its own act
 
 The action returns the same outcomes as a mutation's action. An accepted outcome also carries `result`:
 
-| Delivery                                   | What the action returns                                                                                    |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| A new submission                           | The command's outcome: `accepted` with `result`, `refused`, or `denied`. The receipt records it.           |
-| The same envelope again                    | The recorded outcome, result included. The command does not run again; `screen` and finalization do.       |
-| The same mutation ID with other arguments  | `mutation-id-reused`. Nothing is written.                                                                  |
-| The same mutation ID from another actor    | That actor's own execution. Receipts are scoped to the actor, so it never receives another actor's result. |
-| A new envelope outside the delivery window | `delivery-expired` or `delivery-from-future`, as in [Limit delivery age](#limit-delivery-age).             |
+| Delivery                                   | What the action returns                                                                              |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| A new submission                           | The command's outcome: `accepted` with `result`, `refused`, or `denied`. The receipt records it.     |
+| The same envelope again                    | The recorded outcome, result included. The command does not run again; `screen` and finalization do. |
+| The same mutation ID with other arguments  | `mutation-id-reused`. Nothing is written.                                                            |
+| An envelope made for another actor         | `denied`, before any receipt lookup or command. Nothing is written or recorded.                      |
+| A new envelope outside the delivery window | `delivery-expired` or `delivery-from-future`, as in [Limit delivery age](#limit-delivery-age).       |
 
 After acceptance, the action runs `finalizeAccepted`, expires cache tags for the stamp, refreshes the invoking route, and publishes invalidations, as in [Run work after acceptance](#run-work-after-acceptance). `finalizeAccepted` also receives the recorded `result`. You do not call `finalizeExternalActionCommit` yourself.
 
@@ -470,8 +480,8 @@ A redelivery of an accepted submission returns the same result, so it redirects 
 
 The receipt works only when every delivery of one submission carries the same envelope. In a Next.js app, `createNextOperationHook` does this for you; see [Submit an operation](react.md#submit-an-operation). Without the hook, the browser must:
 
-- Make one envelope when the user submits: a new `mutationId` (a UUID) and `createdAt`. `createOperationEnvelope(operation, args)` from `headcanon` makes one.
-- Send that same envelope again for every retry, until the server answers. A redelivery must keep the mutation ID, the arguments, and `createdAt`.
+- Make one envelope when the user submits: the signed-in actor's `scope`, a new `mutationId` (a UUID), and `createdAt`. `createOperationEnvelope(operation, args, { scope })` from `headcanon` makes one.
+- Send that same envelope again for every retry, until the server answers. A redelivery must keep the scope, the mutation ID, the arguments, and `createdAt`.
 - Make a new envelope only after an answer (accepted, refused, or denied), or when the user deliberately discards the submission. A new mutation ID while the first one may have committed can write twice.
 - Not send other arguments with a held mutation ID. The action refuses them as `mutation-id-reused`.
 

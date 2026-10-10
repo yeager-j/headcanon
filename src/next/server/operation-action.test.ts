@@ -90,6 +90,9 @@ type Actor = { readonly id: string }
 
 const EMPTY_RUNS: Runs = { names: [], revision: 0 }
 
+/** The envelope identity of a submission made while player 1 is signed in. */
+const PLAYER_1 = { scope: "player-1" }
+
 /** A runs store, an authority over it, and the operation's action. */
 function createHarness(
   options: {
@@ -155,7 +158,7 @@ describe("createNextOperationAction", () => {
     const { action, authority, finalized } = createHarness()
 
     const outcome = await action(
-      createOperationEnvelope(createRun, { name: "Emerald" })
+      createOperationEnvelope(createRun, { name: "Emerald" }, PLAYER_1)
     )
 
     const result = acceptedResult(outcome)
@@ -182,7 +185,11 @@ describe("createNextOperationAction", () => {
 
   it("returns the recorded result to a redelivery without running the command again", async () => {
     const { action, authority, executed, finalized } = createHarness()
-    const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+    const envelope = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
 
     const first = await action(envelope)
     const redelivery = await action(structuredClone(envelope))
@@ -217,7 +224,11 @@ describe("createNextOperationAction", () => {
         },
       }),
     })
-    const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+    const envelope = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
 
     const first = await action(envelope)
     const replay = await action(envelope)
@@ -228,7 +239,11 @@ describe("createNextOperationAction", () => {
 
   it("refuses a reused mutation ID with other arguments and writes nothing", async () => {
     const { action, authority, executed } = createHarness()
-    const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+    const envelope = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
 
     await action(envelope)
     const reused = await action({
@@ -245,8 +260,14 @@ describe("createNextOperationAction", () => {
 
   it("records a refusal and replays it", async () => {
     const { action, executed } = createHarness()
-    await action(createOperationEnvelope(createRun, { name: "Emerald" }))
-    const taken = createOperationEnvelope(createRun, { name: "Emerald" })
+    await action(
+      createOperationEnvelope(createRun, { name: "Emerald" }, PLAYER_1)
+    )
+    const taken = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
 
     const first = await action(taken)
     const replay = await action(taken)
@@ -259,28 +280,77 @@ describe("createNextOperationAction", () => {
     expect(executed).toHaveBeenCalledTimes(2)
   })
 
-  it("gives each actor its own receipt for one mutation ID", async () => {
-    const { action, executed, actAs } = createHarness()
-    const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+  it("denies a submission made for another player before any receipt lookup or command", async () => {
+    const { action, authority, executed, finalized, actAs } = createHarness()
+    const receiptLookup = vi.spyOn(authority, "execute")
+    const envelope = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
+
+    actAs({ id: "player-2" })
+
+    expect(await action(envelope)).toEqual({
+      ok: true,
+      value: { kind: "denied" },
+    })
+    expect(receiptLookup).not.toHaveBeenCalled()
+    expect(executed).not.toHaveBeenCalled()
+    expect(finalized).not.toHaveBeenCalled()
+    expect(authority.receiptCount()).toBe(0)
+    expect(authority.read()).toEqual(EMPTY_RUNS)
+  })
+
+  it("denies another player's redelivery instead of replaying or rerunning the submission", async () => {
+    const { action, authority, executed, actAs } = createHarness()
+    const envelope = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
 
     acceptedResult(await action(envelope))
     actAs({ id: "player-2" })
-    const second = await action(envelope)
 
-    // Player 2 runs the command itself, so it sees the name player 1 took
-    // instead of replaying player 1's accepted receipt.
-    expect(second).toEqual({
+    expect(await action(envelope)).toEqual({
       ok: true,
-      value: { kind: "refused", error: "name-taken" },
+      value: { kind: "denied" },
     })
-    expect(executed).toHaveBeenCalledTimes(2)
+    expect(executed).toHaveBeenCalledTimes(1)
+    expect(authority.receiptCount()).toBe(1)
+    expect(authority.hasReceipt({ id: "player-2" }, envelope.mutationId)).toBe(
+      false
+    )
+  })
+
+  it("refuses a submission without a string scope as an invalid envelope", async () => {
+    const { action, authority, executed } = createHarness()
+    const { scope: _scope, ...unscoped } = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
+
+    expect(await action(unscoped)).toEqual(
+      err({ code: "invalid-envelope", reason: "unexpected-fields" })
+    )
+    expect(await action({ ...unscoped, scope: null })).toEqual(
+      err({ code: "invalid-envelope", reason: "invalid-scope" })
+    )
+    expect(executed).not.toHaveBeenCalled()
+    expect(authority.receiptCount()).toBe(0)
   })
 
   it("returns a screening denial without claiming a receipt", async () => {
     const { action, authority, executed } = createHarness({
       screen: () => false,
     })
-    const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+    const envelope = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
 
     expect(await action(envelope)).toEqual({
       ok: true,
@@ -294,7 +364,11 @@ describe("createNextOperationAction", () => {
     const { action, authority } = createHarness({
       result: (runId) => ({ runId, extra: true }),
     })
-    const envelope = createOperationEnvelope(createRun, { name: "Emerald" })
+    const envelope = createOperationEnvelope(
+      createRun,
+      { name: "Emerald" },
+      PLAYER_1
+    )
 
     await expect(action(envelope)).rejects.toThrow(
       "Invalid stored operation result"
@@ -312,11 +386,13 @@ describe("createNextOperationAction", () => {
     })
 
     expect(
-      await action(createOperationEnvelope(other, { name: "Emerald" }))
+      await action(
+        createOperationEnvelope(other, { name: "Emerald" }, PLAYER_1)
+      )
     ).toEqual(err({ code: "invalid-envelope", reason: "unknown-mutation" }))
     expect(
       await action({
-        ...createOperationEnvelope(createRun, { name: "Emerald" }),
+        ...createOperationEnvelope(createRun, { name: "Emerald" }, PLAYER_1),
         protocol: "test.runs.v1",
       })
     ).toEqual(err({ code: "invalid-envelope", reason: "invalid-protocol" }))

@@ -192,6 +192,19 @@ export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
   /** The protocol whose mutations the root predicts and delivers. */
   readonly protocol: Protocol
   /**
+   * Returns the receipt scope of the actor that `canon` belongs to: the value
+   * the authority's `scope(actor)` returns for that actor, such as a user ID.
+   * `mutate` calls it with the canon the root renders, and the mutation's
+   * envelope keeps that scope through every redelivery and page load. The
+   * action denies an envelope whose scope is not the delivering actor's, so
+   * a mutation queued before a sign-out never runs as the next actor.
+   * @example
+   * ```ts
+   * scope: (canon) => canon.value.ownerId
+   * ```
+   */
+  readonly scope: (canon: Canon<StateOf<Protocol>>) => string
+  /**
    * Delivers one envelope to the authority and resolves with its accepted
    * stamp or domain refusal. An ordinary throw means delivery is uncertain
    * (the commit may exist). Throw {@link RetryableDeliveryError} instead when
@@ -240,7 +253,9 @@ export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
    * @example
    * ```ts
    * persistence: (canon) =>
-   *   sessionStoragePersistence(`notes-queue:${canon.value.id}`)
+   *   sessionStoragePersistence(
+   *     `notes-queue:${canon.value.ownerId}:${canon.value.id}`
+   *   )
    * ```
    */
   readonly persistence?: PersistenceOption<StateOf<Protocol>>
@@ -341,16 +356,11 @@ interface Projection<State, Error> {
 }
 
 function freezeEnvelope<Invocation>(
-  protocol: string,
-  mutationId: string,
-  createdAt: number,
-  invocation: Invocation
+  envelope: MutationEnvelope<Invocation>
 ): MutationEnvelope<Invocation> {
   return Object.freeze({
-    protocol,
-    mutationId,
-    createdAt,
-    invocation: structuredClone(invocation),
+    ...envelope,
+    invocation: structuredClone(envelope.invocation),
   })
 }
 
@@ -640,12 +650,13 @@ export function createPredictedRootHook<
             ? projection.value
             : project(canon, [...unrenderedRestore, ...ledger.entries]).value
         const stages = withDefaults(stageOverrides, options.mutationListeners)
-        const envelope = freezeEnvelope(
-          options.protocol.id,
-          globalThis.crypto.randomUUID(),
-          Date.now(),
-          invocation
-        )
+        const envelope = freezeEnvelope({
+          protocol: options.protocol.id,
+          scope: options.scope(canon),
+          mutationId: globalThis.crypto.randomUUID(),
+          createdAt: Date.now(),
+          invocation,
+        })
         const predicted = predict(current, envelope)
         if (!predicted.ok) {
           const result = err<Error>(predicted.error)

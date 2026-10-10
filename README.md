@@ -60,6 +60,7 @@ import { z } from "zod"
 
 export type NoteState = {
   id: string
+  ownerId: string
   title: string
 }
 
@@ -117,6 +118,7 @@ import { notesProtocol, renameNote, type NoteState } from "./protocol"
 
 const useNote = createNextPredictedRoot({
   protocol: notesProtocol,
+  scope: (canon) => canon.value.ownerId,
   action: applyNotesMutation,
 })
 

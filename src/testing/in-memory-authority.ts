@@ -86,7 +86,10 @@ export function createInMemoryMutationAuthority<
 >(options: {
   /** State before any commit. */
   readonly initialState: State
-  /** Maps a trusted actor to its receipt scope. */
+  /**
+   * Maps a trusted actor to its receipt scope. The action denies an envelope
+   * whose `scope` is not this value.
+   */
   readonly scope: (actor: Actor) => string
   /**
    * Copies state wherever it enters or leaves the authority, so no caller
@@ -184,6 +187,7 @@ export function createInMemoryMutationAuthority<
 
   return {
     preflight: { read: () => clone(state) },
+    scope: options.scope,
     execute(request, run) {
       const key = receiptKey(options.scope(request.actor), request.mutationId)
       return withReceiptLock(key, async () => {

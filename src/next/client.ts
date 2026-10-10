@@ -280,6 +280,7 @@ export type NextOperationAction<Operation extends AnyOperationDefinition> = (
  * function NewRunForm({ playerId }: { playerId: string }) {
  *   const router = useRouter()
  *   const createRunForm = useCreateRun({
+ *     scope: playerId,
  *     persistence: sessionStoragePersistence(`new-run:${playerId}`),
  *     onSettled: (answer) => {
  *       if (answer.ok) router.push(`/runs/${answer.value.runId}`)

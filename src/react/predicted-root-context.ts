@@ -39,6 +39,7 @@ export interface PredictedRootContext<Protocol extends AnyProtocolDefinition> {
  * ```tsx
  * const useNotes = createPredictedRoot({
  *   protocol: notesProtocol,
+ *   scope: (canon) => canon.value.ownerId,
  *   send: sendNotesMutation,
  *   refresh: useNotesRefresh,
  * })

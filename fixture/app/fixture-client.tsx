@@ -1,5 +1,6 @@
 "use client"
 
+import { FIXTURE_USER_ID } from "@/lib/actor"
 import { addItem, fixtureProtocol, type FixtureState } from "@/lib/protocol"
 import type { AcceptedStamp, Canon } from "headcanon"
 import { createNextPredictedRoot } from "headcanon/next/client"
@@ -14,6 +15,7 @@ import { applyFixtureMutation } from "./actions"
 // sender, and the App Router is the default refresh carrier.
 const useFixturePredictions = createNextPredictedRoot({
   protocol: fixtureProtocol,
+  scope: () => FIXTURE_USER_ID,
   action: applyFixtureMutation,
 })
 

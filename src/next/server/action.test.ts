@@ -457,6 +457,7 @@ describe("Next mutation action", () => {
 
   const envelope = {
     protocol: protocol.id,
+    scope: "actor",
     mutationId: "83da9d18-9796-44b6-8bc1-066d9ca24fbb",
     createdAt: Date.now(),
     invocation: increment({ amount: 1 }),
@@ -513,6 +514,39 @@ describe("Next mutation action", () => {
     )
 
     expect(lifecycle).toEqual(["screen:0"])
+    expect(authority.receiptCount()).toBe(0)
+  })
+
+  it("denies an envelope made for another actor before any receipt lookup or command", async () => {
+    const authority = createAuthority()
+    const lifecycle: string[] = []
+    const receiptLookup = vi.spyOn(authority, "execute")
+    const execute = action(authority, command({ lifecycle }), {
+      actor: () => "next-actor",
+    })
+
+    await expect(execute(envelope)).resolves.toEqual(ok({ kind: "denied" }))
+
+    expect(receiptLookup).not.toHaveBeenCalled()
+    expect(lifecycle).toEqual([])
+    expect(authority.receiptCount()).toBe(0)
+    expect(authority.read()).toBe(0)
+  })
+
+  it("refuses an envelope without a string scope before deriving the actor", async () => {
+    const authority = createAuthority()
+    const actor = vi.fn(() => "actor")
+    const execute = action(authority, command(), { actor })
+    const { scope: _scope, ...unscoped } = envelope
+
+    await expect(execute(unscoped)).resolves.toEqual(
+      err({ code: "invalid-envelope", reason: "unexpected-fields" })
+    )
+    await expect(execute({ ...envelope, scope: 7 })).resolves.toEqual(
+      err({ code: "invalid-envelope", reason: "invalid-scope" })
+    )
+
+    expect(actor).not.toHaveBeenCalled()
     expect(authority.receiptCount()).toBe(0)
   })
 
@@ -954,6 +988,7 @@ describe("Next mutation action", () => {
   it("fails closed when the authority presents a corrupt stored refusal", async () => {
     const authority: CounterAuthority = {
       preflight: { read: () => 0 },
+      scope: (actor) => actor,
       async execute(request) {
         request.parseRefusal?.({ code: "corrupt" })
         throw new Error("corrupt refusal was admitted")
@@ -1039,6 +1074,7 @@ describe("Next mutation action for a mutation with no refusal cases", () => {
   })
   const touchEnvelope = {
     protocol: touchProtocol.id,
+    scope: "actor",
     mutationId: "5b3f2a61-4c7e-4d8a-9f0b-2e6c1d7a8b90",
     createdAt: Date.now(),
     invocation: touch({ amount: 1 }),
@@ -1079,6 +1115,7 @@ describe("Next mutation action for a mutation with no refusal cases", () => {
   it("fails closed when a stored refusal reaches it", async () => {
     const authority: CounterAuthority = {
       preflight: { read: () => 0 },
+      scope: (actor) => actor,
       async execute(request) {
         request.parseRefusal?.({ code: "refused" })
         throw new Error("a refusal was admitted for a mutation without one")

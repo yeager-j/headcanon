@@ -146,6 +146,7 @@ function mountAction(
 ) {
   const useRoot = createNextPredictedRoot({
     protocol: actionProtocol,
+    scope: () => "actor",
     action,
     refresh: useRefresh,
     ...options,
@@ -179,6 +180,7 @@ describe("Next client binding", () => {
     const rejection = new Error("response lost")
     const useRoot = createNextPredictedRoot({
       protocol,
+      scope: () => "actor",
       send: async (_envelope: MutationEnvelope<ReturnType<typeof add>>) => {
         throw rejection
       },
@@ -244,6 +246,7 @@ describe("Next client binding", () => {
     const stamp = accepted()
     const useRoot = createNextPredictedRoot({
       protocol,
+      scope: () => "actor",
       send: async () => ok(stamp),
       refresh: useRefresh,
     })
@@ -263,6 +266,7 @@ describe("Next client binding", () => {
     const stamp = accepted()
     const useRoot = createNextPredictedRoot({
       protocol,
+      scope: () => "actor",
       send: async () => ok(stamp),
     })
     const currentCanon = canon()
@@ -395,6 +399,7 @@ describe("Next action golden path", () => {
 
     const thrown = await send({
       protocol: actionProtocol.id,
+      scope: "actor",
       mutationId: "stale-client-cause",
       createdAt: Date.now(),
       invocation: guardedAdd({ amount: 1 }),
@@ -444,6 +449,7 @@ describe("Next action golden path", () => {
     const action: GuardedAction = async () => ok({ kind: "accepted", stamp })
     const useRoot = createNextPredictedRoot({
       protocol: actionProtocol,
+      scope: () => "actor",
       action,
     })
     const currentCanon = canon()
@@ -467,6 +473,7 @@ describe("Next action golden path", () => {
 
     createNextPredictedRoot({
       protocol: actionProtocol,
+      scope: () => "actor",
       // @ts-expect-error — the action's envelope belongs to another protocol.
       action: foreign,
     })
@@ -499,6 +506,7 @@ describe("Next action golden path", () => {
     expect(twinProtocol.id).not.toBe(actionProtocol.id)
     createNextPredictedRoot({
       protocol: actionProtocol,
+      scope: () => "actor",
       // @ts-expect-error — same refusal shape, wrong protocol identity.
       action: generatedForTwin,
     })

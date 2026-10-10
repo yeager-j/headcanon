@@ -82,7 +82,9 @@ type RuntimeBinding<Actor, Preflight, Transaction, Refusal> = MutationBinding<
  *
  * The returned action treats its argument as untrusted: a malformed or unknown
  * envelope returns an executor error before the binder's actor callback or any
- * command runs. It runs `screen` before it claims a receipt, and runs `admit`
+ * command runs. After it derives the actor, it denies an envelope whose
+ * `scope` is not the authority's `scope(actor)`, before any receipt lookup or
+ * command. It runs `screen` before it claims a receipt, and runs `admit`
  * and `execute` inside the authority's transaction attempts, which may repeat.
  * When no receipt exists and the envelope's `createdAt` is outside the
  * authority's delivery window, it returns `delivery-expired` or
@@ -93,10 +95,11 @@ type RuntimeBinding<Actor, Preflight, Transaction, Refusal> = MutationBinding<
  * application authorization, domain writes, axis stamping, and the
  * repeat-safe `finalizeAccepted` projection.
  *
- * A denial, from screening or from a recorded transaction-time admission,
- * returns `ok({ kind: "denied" })`. It carries no reason, so it reveals no
- * more than an HTTP 403, and it needs no Next configuration. A screening denial
- * claims no receipt; a recorded denial replays on redelivery.
+ * A denial, from the scope check, from screening, or from a recorded
+ * transaction-time admission, returns `ok({ kind: "denied" })`. It carries no
+ * reason, so it reveals no more than an HTTP 403, and it needs no Next
+ * configuration. A scope or screening denial claims no receipt; a recorded
+ * denial replays on redelivery.
  *
  * After acceptance the action first runs `finalizeAccepted`, then expires
  * the affected Next cache tags, refreshes the invoking route, and publishes
@@ -182,10 +185,10 @@ export function createNextMutationAction<
  * binder when it is created. Each call parses its untrusted envelope, derives
  * the actor, screens, and runs `admit` and `execute` in the authority's
  * transaction attempts, exactly as `createNextMutationAction` does. Receipts,
- * the delivery window, denials, and contention work the same way. A
- * redelivery of a recorded submission runs `screen` and returns the recorded
- * outcome, result included, without running the command again; the same
- * mutation ID with other arguments returns `mutation-id-reused`.
+ * the scope check, the delivery window, denials, and contention work the
+ * same way. A redelivery of a recorded submission runs `screen` and returns
+ * the recorded outcome, result included, without running the command again;
+ * the same mutation ID with other arguments returns `mutation-id-reused`.
  *
  * After acceptance the action runs `finalizeAccepted` with the recorded
  * result, then expires the stamp's cache tags, refreshes the invoking route,
@@ -304,8 +307,9 @@ interface DeliveredCommand<Transaction, Actor, Preflight, Refusal> {
 
 /**
  * Delivers one prepared request through its command: derive the actor,
- * screen, execute in the authority, then finalize an acceptance. The one
- * home of the lifecycle order both generated actions document.
+ * check the envelope's scope, screen, execute in the authority, then
+ * finalize an acceptance. The one home of the lifecycle order both generated
+ * actions document.
  */
 async function deliverCommand<Transaction, Actor, Preflight, Refusal>(options: {
   readonly prepared: PreparedMutationRequest
@@ -318,6 +322,13 @@ async function deliverCommand<Transaction, Actor, Preflight, Refusal>(options: {
   const { prepared, binder, command } = options
 
   const actor = await binder.actor()
+
+  // An envelope made for another actor, such as one queued before a sign-out,
+  // must not run as this one, nor read or claim this actor's receipts.
+  if (prepared.scope !== binder.authority.scope(actor)) {
+    return ok({ kind: "denied" })
+  }
+
   const screening = await command.screen({
     executor: binder.authority.preflight,
     actor,
