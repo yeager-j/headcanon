@@ -270,13 +270,40 @@ function rejectInvalidCommandListsAtCompileTime() {
       readonly [typeof incrementBinding] | readonly [typeof renameBinding]
     >([incrementBinding]),
   })
+  // @ts-expect-error — rename is not bound.
   createNextMutationAction({
     ...context,
-    // @ts-expect-error — rename is not bound.
+    commands: [incrementBinding],
+  })
+  createNextMutationAction({
+    // @ts-expect-error — rename is not bound; the error is on the protocol.
+    protocol: pairProtocol,
+    binder: counterBinder,
     commands: [incrementBinding],
   })
 }
 void rejectInvalidCommandListsAtCompileTime
+
+function acceptAnInlineProtocolAtCompileTime() {
+  createNextMutationAction({
+    protocol: defineProtocol({
+      id: "test.next-server.inline.v1",
+      mutations: [increment],
+    }),
+    binder: counterBinder,
+    commands: [incrementBinding],
+  })
+  createNextMutationAction({
+    // @ts-expect-error — rename is not bound.
+    protocol: defineProtocol({
+      id: "test.next-server.inline-pair.v1",
+      mutations: [increment, rename],
+    }),
+    binder: counterBinder,
+    commands: [incrementBinding],
+  })
+}
+void acceptAnInlineProtocolAtCompileTime
 
 function rejectMismatchedBindingsAtCompileTime() {
   // @ts-expect-error — the command accepts next.rename args, not increment args.
@@ -1054,9 +1081,10 @@ describe("Next mutation action", () => {
   it("rejects missing command registration at construction", () => {
     expect(() =>
       createNextMutationAction({
+        // @ts-expect-error — the compiler rejects the missing binding too; this checks the runtime guard.
         protocol,
         binder: counterBinder,
-        commands: [] as never,
+        commands: [],
         invalidations: { publish: vi.fn(), onFailure: vi.fn() },
       })
     ).toThrow("Incomplete mutation bindings: missing [next.increment]")

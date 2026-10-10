@@ -19,13 +19,11 @@ import {
 import { axisId } from "../core/revisions"
 import {
   createInMemoryMutationAuthority,
-  type InMemoryReader,
-  type InMemoryTransaction,
 } from "../testing"
 import {
   assertValidBindings,
   type AnyMutationBinding,
-  type ValidBindings,
+  type CompleteBindings,
 } from "./binder"
 
 type NoteState = {
@@ -135,13 +133,7 @@ describe("naming the mutations an incomplete binding list gets wrong", () => {
   type NotesBindings<
     Protocol,
     Commands extends readonly AnyMutationBinding[],
-  > = ValidBindings<
-    Protocol,
-    Commands,
-    string,
-    InMemoryReader<NoteState>,
-    InMemoryTransaction<NoteState>
-  >
+  > = CompleteBindings<Protocol, Commands>
 
   it("names each unbound mutation", () => {
     expectTypeOf<

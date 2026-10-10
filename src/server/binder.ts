@@ -438,8 +438,11 @@ type UnknownMutation<
 /**
  * Requires a command list to bind exactly the protocol's mutations. A
  * failure's marker names each missing or unknown mutation in its type.
+ * The action checks it on `protocol`, not on `commands`: a `commands` type
+ * that names the protocol stops the compiler inferring a protocol written
+ * inline, such as `protocol: defineProtocol(...)`.
  */
-type CompleteBindings<
+export type CompleteBindings<
   Protocol,
   Commands extends readonly AnyMutationBinding[],
 > = [MissingMutation<Protocol, Commands>] extends [never]
@@ -516,12 +519,12 @@ type EachBinding<
     : { readonly __commandsMustBeFixedList: never }
 
 /**
- * Compile-time form of `assertValidBindings`: one fixed list that binds
- * every protocol mutation exactly once, each to a command that accepts the
- * action's context. A union of lists is rejected, not split.
+ * With {@link CompleteBindings}, the compile-time form of
+ * `assertValidBindings`: one fixed list that binds each mutation at most
+ * once, each to a command that accepts the action's context. A union of
+ * lists is rejected, not split.
  */
 export type ValidBindings<
-  Protocol,
   Commands extends readonly AnyMutationBinding[],
   Actor,
   Preflight,
@@ -529,8 +532,7 @@ export type ValidBindings<
 > =
   IsUnion<Commands> extends true
     ? { readonly __commandsMustBeOneFixedList: never }
-    : CompleteBindings<Protocol, Commands> &
-        EachBinding<Commands, Actor, Preflight, Transaction>
+    : EachBinding<Commands, Actor, Preflight, Transaction>
 
 export function assertValidBindings(
   protocol: AnyProtocolDefinition,

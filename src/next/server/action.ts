@@ -34,6 +34,7 @@ import {
   assertValidBindings,
   type AnyMutationBinding,
   type BoundMutation,
+  type CompleteBindings,
   type MutationBinder,
   type MutationBinding,
   type MutationCommand,
@@ -135,10 +136,10 @@ export function createNextMutationAction<
   Preflight,
   const Commands extends readonly AnyMutationBinding[],
 >(options: {
-  readonly protocol: Protocol
+  readonly protocol: Protocol & CompleteBindings<Protocol, Commands>
   readonly binder: MutationBinder<Transaction, Actor, Preflight>
   readonly commands: Commands &
-    ValidBindings<Protocol, Commands, Actor, Preflight, Transaction>
+    ValidBindings<Commands, Actor, Preflight, Transaction>
   /** Publishes accepted stamps to other clients; omit it without realtime. */
   readonly invalidations?: InvalidationPublisher
 }) {
