@@ -9,9 +9,11 @@ import {
   StrictMode,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useState,
   type ReactNode,
 } from "react"
+import { createRoot } from "react-dom/client"
 import { err, ok, type Result } from "serializable-result"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -3571,6 +3573,45 @@ describe("createPredictedRoot — per-mount mutation listeners", () => {
       [ok(stamp(2)), { id: receipt.id, restored: false }],
     ])
   })
+
+  it("gives a descendant's layout effect the listeners of the same commit", () => {
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      scope: () => "actor",
+      send: createControlledSender().send,
+      refresh: useNoRefresh,
+    })
+    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+      name: "CounterRoot",
+    })
+    const initialCanon = canon(0, 0)
+    function RefuseOnAttempt({ attempt }: { readonly attempt: number }) {
+      const { mutate } = CounterRoot.useRoot()
+      useLayoutEffect(() => {
+        if (attempt > 0) mutate(add({ amount: 1, refuseAt: 0 }))
+      }, [attempt, mutate])
+      return null
+    }
+    const page = (
+      onPrediction: MutationStageListeners<CounterError>["onPrediction"],
+      attempt: number
+    ) =>
+      createElement(CounterRoot.Provider, {
+        canon: initialCanon,
+        mutationListeners: { onPrediction },
+        children: createElement(RefuseOnAttempt, { attempt }),
+      })
+    const earlier = vi.fn()
+    const later = vi.fn()
+
+    const view = render(page(earlier, 0))
+    view.rerender(page(later, 1))
+
+    expect(later).toHaveBeenCalledExactlyOnceWith(
+      err({ code: "prediction-refused" })
+    )
+    expect(earlier).not.toHaveBeenCalled()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -3596,7 +3637,7 @@ function createRefreshCountingFactory(persistence?: QueuePersistence) {
       { initialProps: { currentCanon: initialCanon } }
     )
 
-  return { ...controlled, refetch, mount }
+  return { ...controlled, refetch, mount, useCounterPredictions }
 }
 
 const undeliverable = new TerminalDeliveryError({
@@ -3851,6 +3892,74 @@ describe("createPredictedRoot — refresh after a failure", () => {
     })
 
     expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("refreshes a root whose continued queue fails before the root subscribes", async () => {
+    // The answer arrives in the commit that mounts the later root: after it
+    // rendered, before its effects run.
+    const { persistence } = createMemoryPersistence()
+    const { mount, refetch, deliveries, useCounterPredictions } =
+      createRefreshCountingFactory(persistence)
+    const firstVisit = mount()
+    act(() => {
+      mutate(firstVisit.result, add({ amount: 1 }))
+    })
+    firstVisit.unmount()
+    await act(async () => {})
+    const initialCanon = canon(0, 0)
+    function DeniesOnCommit() {
+      useLayoutEffect(() => {
+        deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+      }, [])
+      return null
+    }
+    function LaterVisit() {
+      useCounterPredictions({ canon: initialCanon })
+      return createElement(DeniesOnCommit)
+    }
+
+    // Outside `act`, React runs passive effects in a later task, as a
+    // browser does, so the answer settles before the root subscribes.
+    const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    const wasActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = false
+    const reactRoot = createRoot(document.createElement("div"))
+    try {
+      reactRoot.render(createElement(LaterVisit))
+      await vi.waitFor(() => expect(refetch).toHaveBeenCalledOnce())
+    } finally {
+      reactRoot.unmount()
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = wasActEnvironment
+    }
+  })
+
+  it("refreshes for a refusal made offline when a hidden root is shown again online", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false)
+    const { refetch, useCounterPredictions } = createRefreshCountingFactory()
+    const initialCanon = canon(0, 0)
+    const roots = new Map<string, ReturnType<typeof useCounterPredictions>>()
+    function Counter() {
+      roots.set("counter", useCounterPredictions({ canon: initialCanon }))
+      return null
+    }
+    const shown = (mode: "visible" | "hidden") =>
+      createElement(Activity, { mode, children: createElement(Counter) })
+    const view = render(shown("visible"))
+
+    await act(async () => {
+      roots.get("counter")?.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    view.rerender(shown("hidden"))
+    await act(async () => {})
+    onLine.mockReturnValue(true)
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+    expect(refetch).not.toHaveBeenCalled()
+
+    view.rerender(shown("visible"))
+    await act(async () => {})
+    expect(refetch).toHaveBeenCalledOnce()
   })
 
   it("refreshes once for several failures in one event", async () => {

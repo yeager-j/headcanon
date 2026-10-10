@@ -7,7 +7,7 @@ import {
   useCallback,
   useEffect,
   useEffectEvent,
-  useLayoutEffect,
+  useInsertionEffect,
   useMemo,
   useRef,
   useState,
@@ -38,6 +38,7 @@ import {
   createLedgerStore,
   isCanonized,
   queueHead,
+  type FailureCounts,
   type LedgerEntry,
   type LedgerStore,
   type MutationLifecycleError,
@@ -412,13 +413,13 @@ function observeStages<Error>(
 }
 
 /**
- * Whether `failure` shows that the server's state may differ from the canon
- * the prediction ran over, so the root refreshes canon.
+ * Whether a failure of `kind` shows that the server's state may differ from
+ * the canon the prediction ran over, so the root refreshes canon.
  */
 function failureRefreshesCanon(
-  failure: MutationLifecycleError<unknown>
+  kind: MutationLifecycleError<unknown>["kind"]
 ): boolean {
-  switch (failure.kind) {
+  switch (kind) {
     case "domain":
     case "denied":
     case "undeliverable":
@@ -436,6 +437,17 @@ function failureRefreshesCanon(
   }
 }
 
+/** How many of the counted failures refresh canon. */
+function countRefreshingFailures(failures: FailureCounts): number {
+  let count = 0
+  for (const [kind, occurrences] of Object.entries(failures)) {
+    if (failureRefreshesCanon(kind as keyof FailureCounts)) {
+      count += occurrences ?? 0
+    }
+  }
+  return count
+}
+
 /**
  * Returns the gap signal for a local refusal. While the browser reports it is
  * offline, the signal waits for the browser's `online` event, because a router
@@ -448,15 +460,18 @@ function useOnlineGapSignal(signalGap: () => void): () => void {
   useEffect(() => {
     if (typeof window === "undefined") return
 
-    const onOnline = () => {
-      if (!heldWhileOffline.current) return
+    const signalHeld = () => {
+      if (!heldWhileOffline.current || browserIsOffline()) return
 
       heldWhileOffline.current = false
       signalGap()
     }
 
-    window.addEventListener("online", onOnline)
-    return () => window.removeEventListener("online", onOnline)
+    // React Activity may have hidden the root, and removed the listener,
+    // while the browser came back online.
+    signalHeld()
+    window.addEventListener("online", signalHeld)
+    return () => window.removeEventListener("online", signalHeld)
   }, [signalGap])
 
   return useCallback(() => {
@@ -668,9 +683,11 @@ export function createPredictedRootHook<
     const listeners = withDefaults(recoveryListeners, options.recoveryListeners)
 
     // Receipts settle after the render that observed them, so their stages
-    // are read from the latest committed listeners when they run.
+    // are read from the latest committed listeners when they run. An
+    // insertion effect runs before every layout effect, so a descendant that
+    // calls `mutate` from its own layout effect reads this commit's listeners.
     const latestMutationListeners = useRef(mutationListeners)
-    useLayoutEffect(() => {
+    useInsertionEffect(() => {
       latestMutationListeners.current = mutationListeners
     }, [mutationListeners])
     const mountedStages = useCallback(
@@ -691,18 +708,26 @@ export function createPredictedRootHook<
       }
     }, [mountedStages, observerToken, store])
 
-    // Subscribed to the store rather than to receipts, so a mutation whose
-    // receipt this root does not hold, such as one queued by an earlier
-    // root's `mutate` after it unmounted, still refreshes this root.
+    // Follows the ledger's failure counts rather than receipts, so a
+    // mutation whose receipt this root does not hold, such as one queued by
+    // an earlier root's `mutate` after it unmounted, still refreshes this
+    // root. Counting from the first render also covers a failure that
+    // settles before this effect subscribes.
     const { signalGap } = incorporation
     const signalRefusalGap = useOnlineGapSignal(signalGap)
-    useEffect(
-      () =>
-        store.subscribeFailures((failure) => {
-          if (failureRefreshesCanon(failure)) signalGap()
-        }),
-      [signalGap, store]
-    )
+    const signalledFailures = useRef(countRefreshingFailures(ledger.failures))
+    useEffect(() => {
+      const signalNewFailures = () => {
+        const count = countRefreshingFailures(store.getSnapshot().failures)
+        if (count <= signalledFailures.current) return
+
+        signalledFailures.current = count
+        signalGap()
+      }
+
+      signalNewFailures()
+      return store.subscribe(signalNewFailures)
+    }, [signalGap, store])
 
     // Set from the effect's cleanup until its next setup: unmount, or React
     // Activity hiding the root. A `mutate` held past it, such as a debounced
