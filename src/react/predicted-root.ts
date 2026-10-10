@@ -16,7 +16,10 @@ import {
 import { err, ok, type Result } from "serializable-result"
 
 import type { MutationEnvelope } from "../core/authority"
-import type { InvalidationAdapter } from "../core/invalidation"
+import {
+  browserIsOffline,
+  type InvalidationAdapter,
+} from "../core/invalidation"
 import {
   findMutation,
   type AnyMutationDefinition,
@@ -113,8 +116,9 @@ export interface PredictedRoot<State, Invocation, Error> {
   /**
    * Predicts `invocation` over `value` and, when the prediction succeeds,
    * queues it for delivery and returns its receipt. An `err` is the local
-   * prediction's refusal: nothing was queued. `listeners` override the
-   * root's `mutationListeners` and then the factory's, one stage at a time.
+   * prediction's refusal: nothing was queued, and the root refreshes canon.
+   * `listeners` override the root's `mutationListeners` and then the
+   * factory's, one stage at a time.
    */
   readonly mutate: (
     invocation: Invocation,
@@ -408,6 +412,60 @@ function observeStages<Error>(
 }
 
 /**
+ * Whether `failure` shows that the server's state may differ from the canon
+ * the prediction ran over, so the root refreshes canon.
+ */
+function failureRefreshesCanon(
+  failure: MutationLifecycleError<unknown>
+): boolean {
+  switch (failure.kind) {
+    case "domain":
+    case "denied":
+    case "undeliverable":
+      return true
+    // `stale-client`: a router refresh would load the new build, and the
+    // application owns that reload. `replay-refused`: newer canon already
+    // refused the prediction. `delivery-cancelled`: the framework handles
+    // its control flow, such as a redirect. `root-unmounted`: no root
+    // remains to refresh.
+    case "stale-client":
+    case "replay-refused":
+    case "delivery-cancelled":
+    case "root-unmounted":
+      return false
+  }
+}
+
+/**
+ * Returns the gap signal for a local refusal. While the browser reports it is
+ * offline, the signal waits for the browser's `online` event, because a router
+ * refresh that fails loads the full page. Signals held while offline become
+ * one, and none is sent once the root unmounts.
+ */
+function useOnlineGapSignal(signalGap: () => void): () => void {
+  const heldWhileOffline = useRef(false)
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+
+    const onOnline = () => {
+      if (!heldWhileOffline.current) return
+
+      heldWhileOffline.current = false
+      signalGap()
+    }
+
+    window.addEventListener("online", onOnline)
+    return () => window.removeEventListener("online", onOnline)
+  }, [signalGap])
+
+  return useCallback(() => {
+    if (browserIsOffline()) heldWhileOffline.current = true
+    else signalGap()
+  }, [signalGap])
+}
+
+/**
  * Merges per-call or per-mount listeners over factory defaults, one stage or
  * condition at a time.
  */
@@ -633,6 +691,19 @@ export function createPredictedRootHook<
       }
     }, [mountedStages, observerToken, store])
 
+    // Subscribed to the store rather than to receipts, so a mutation whose
+    // receipt this root does not hold, such as one queued by an earlier
+    // root's `mutate` after it unmounted, still refreshes this root.
+    const { signalGap } = incorporation
+    const signalRefusalGap = useOnlineGapSignal(signalGap)
+    useEffect(
+      () =>
+        store.subscribeFailures((failure) => {
+          if (failureRefreshesCanon(failure)) signalGap()
+        }),
+      [signalGap, store]
+    )
+
     // Set from the effect's cleanup until its next setup: unmount, or React
     // Activity hiding the root. A `mutate` held past it, such as a debounced
     // save, no longer restores: it must not make the root observe again.
@@ -689,6 +760,9 @@ export function createPredictedRootHook<
         })
         const predicted = predict(current, envelope)
         if (!predicted.ok) {
+          // The refusal may come from canon that is behind the server. A
+          // root that no longer observes has no canon to refresh.
+          if (!observationDeactivated.current) signalRefusalGap()
           const result = err<Error>(predicted.error)
           stages().onPrediction?.(result)
           return result
@@ -703,7 +777,15 @@ export function createPredictedRootHook<
         stages().onPrediction?.(result)
         return result
       },
-      [canon, ledger, mountedStages, projection.value, restoreQueue, store]
+      [
+        canon,
+        ledger,
+        mountedStages,
+        projection.value,
+        restoreQueue,
+        signalRefusalGap,
+        store,
+      ]
     )
 
     const head = queueHead(ledger.entries)

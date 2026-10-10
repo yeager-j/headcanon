@@ -195,7 +195,7 @@ export function RenameForm() {
 
 Each callback reports its own mutation. If the interface permits overlapping submissions, an earlier mutation can finish while another is pending. Use the root's `status` for an overall saving indicator, or track receipts separately when displaying per-edit messages.
 
-If prediction fails, only `onPrediction` runs: no receipt is created and the later stages do not open. Once a receipt exists, acceptance and canonization callbacks can report terminal failures as well as success. Their error shape is `MutationLifecycleError`; a server's public refusal is under `result.error.error` when `result.error.kind === "domain"`.
+If prediction fails, only `onPrediction` runs: no receipt is created and the later stages do not open. The root also refreshes canon; see [Refresh after a refusal or a server failure](#refresh-after-a-refusal-or-a-server-failure). Once a receipt exists, acceptance and canonization callbacks can report terminal failures as well as success. Their error shape is `MutationLifecycleError`; a server's public refusal is under `result.error.error` when `result.error.kind === "domain"`.
 
 To name a mutation's public error type in your own code, such as a save hook that covers several mutations, use `MutationErrorOf` from `headcanon`. It is the union of the mutation's prediction error and its refusal:
 
@@ -360,17 +360,17 @@ Calls to `mutate` in the same event check against the same rendered value. If tw
 
 ## Handle terminal failures
 
-Local prediction failures are returned directly by `mutate`. After a receipt exists, failures use these `kind` values:
+Local prediction failures are returned directly by `mutate`. After a receipt exists, failures use these `kind` values. The last column says whether the root refreshes canon after the failure; see [Refresh after a refusal or a server failure](#refresh-after-a-refusal-or-a-server-failure).
 
-| Kind                   | Meaning                                                                                                                                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `"domain"`             | The server returned the mutation's public refusal, available as `error`.                                                                                                              |
-| `"denied"`             | The server denied access without exposing a reason, or the mutation's scope is not the delivering actor's.                                                                            |
-| `"undeliverable"`      | The server rejected this delivery: the envelope, its arguments, a reused mutation ID, or a creation time outside the delivery window. `error` contains the executor failure.          |
-| `"stale-client"`       | The server does not know the Server Action this page called, because the page's code is older than the deployed build. This delivery wrote nothing, and a retry cannot help.          |
-| `"replay-refused"`     | Replay refused a prediction that could still be withdrawn; `error` contains the predictor's refusal.                                                                                  |
-| `"delivery-cancelled"` | The Next binding passed framework control flow, such as a redirect, back to Next.js. This does not prove the write was rolled back: `finalizeAccepted` can redirect after the commit. |
-| `"root-unmounted"`     | The root stopped observing the mutation. `outcome` is `"accepted"` if acceptance was known, otherwise `"unknown"`.                                                                    |
+| Kind                   | Meaning                                                                                                                                                                               | Refreshes |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| `"domain"`             | The server returned the mutation's public refusal, available as `error`.                                                                                                              | Yes       |
+| `"denied"`             | The server denied access without exposing a reason, or the mutation's scope is not the delivering actor's.                                                                            | Yes       |
+| `"undeliverable"`      | The server rejected this delivery: the envelope, its arguments, a reused mutation ID, or a creation time outside the delivery window. `error` contains the executor failure.          | Yes       |
+| `"stale-client"`       | The server does not know the Server Action this page called, because the page's code is older than the deployed build. This delivery wrote nothing, and a retry cannot help.          | No        |
+| `"replay-refused"`     | Replay refused a prediction that could still be withdrawn; `error` contains the predictor's refusal.                                                                                  | No        |
+| `"delivery-cancelled"` | The Next binding passed framework control flow, such as a redirect, back to Next.js. This does not prove the write was rolled back: `finalizeAccepted` can redirect after the commit. | No        |
+| `"root-unmounted"`     | The root stopped observing the mutation. `outcome` is `"accepted"` if acceptance was known, otherwise `"unknown"`.                                                                    | No        |
 
 An `"undeliverable"` delivery wrote nothing, but it does not always prove that the mutation never committed. `error.code` tells you more:
 
@@ -393,6 +393,27 @@ onAcceptance(result) {
 Show a "Refresh to update" prompt for `"stale-client"`. Only a page reload loads the new build. Each mutation that is still queued is also sent and also fails with `"stale-client"`, one at a time, so the root does not stop. Next.js can keep an action's ID across builds, so an old page can still save some changes after a deploy. Headcanon reports `"stale-client"` only when the server does not know the action's ID.
 
 Delivery uncertainty is a root status, not a terminal failure. A stalled refresh also leaves canonization pending while the root remains mounted.
+
+### Refresh after a refusal or a server failure
+
+A refusal does not prove that the view shows the true state. The root checked the prediction over the canon it had, which may be behind the server: another device may have changed the record. A server refusal, a denial, or an undeliverable delivery also means that the server's state may differ from the canon the root predicted over.
+
+So the root refreshes canon through its carrier, as it does after an invalidation gap, when:
+
+- `mutate` returns a prediction refusal;
+- a mutation fails with `"domain"`, `"denied"`, or `"undeliverable"`. This includes a mutation restored after a reload, and one whose receipt no listener observes.
+
+It does not refresh after the other failures:
+
+- `"stale-client"`: a router refresh would load the new build. Your application decides when to reload, for example after it shows a "Refresh to update" prompt.
+- `"replay-refused"`: newer canon already arrived and refused the prediction.
+- `"delivery-cancelled"` and `"root-unmounted"`.
+
+A prediction refusal made while the browser reports it is offline (`navigator.onLine === false`) waits: the root refreshes once when the browser is online again, as `withPollingFallback` and `withVisibilityRefresh` do (see [Loading data](loading-data.md#a-failed-router-refresh-reloads-the-page)), and not at all if it unmounts first. A server failure needs an answer from the server, so it refreshes at once. Failures close together share one refresh. Freshness is `"refreshing"` until the refresh completes, and `"current"` after it, as for an invalidation gap. A root that has unmounted does not refresh, even when its queue keeps delivering; a root that later continues the queue refreshes for failures it observes.
+
+A listener needs only to show the notice. For example, a toast with the mutation's label and the reason needs no `router.refresh()` call after it.
+
+> **Changed in 0.4.0.** Earlier versions did not refresh after these failures. If your application calls `router.refresh()` after them, remove that call, or it refreshes twice.
 
 ## Choose the root's lifetime
 

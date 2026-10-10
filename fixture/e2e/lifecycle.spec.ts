@@ -37,7 +37,7 @@ test("a duplicate is refused by the local prediction and never sent", async ({
   expect((await readAuthority(page)).receipts).toBe(1)
 })
 
-test("the authority refuses a duplicate this page has not seen, and the prediction rolls back", async ({
+test("the authority refuses a duplicate this page has not seen, and the root refreshes to the true state", async ({
   page,
 }) => {
   await openFixture(page)
@@ -48,15 +48,11 @@ test("the authority refuses a duplicate this page has not seen, and the predicti
   await expect(page.getByTestId("refusal")).toHaveText("none")
 
   await expect(page.getByTestId("outcome")).toHaveText("refused: item-refused")
-  await expectSettled(page)
-  // A refusal changes nothing, so no canon rides back: the page shows the
-  // canon it has, without the rolled-back prediction.
-  await expect(renderedItems(page)).toHaveCount(0)
-  await expect(page.getByTestId("canon-count")).toHaveText("0")
-
-  await page.getByRole("button", { name: "Reload canon" }).click()
+  // The refusal shows that this page's canon may be behind, so the root
+  // refreshes it: the other client's item arrives without a reload.
   await expect(renderedItems(page)).toHaveText(["beta"])
   await expect(page.getByTestId("canon-count")).toHaveText("1")
+  await expectSettled(page)
   await expectStayedMounted(page)
 })
 

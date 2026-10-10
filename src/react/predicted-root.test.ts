@@ -3573,6 +3573,304 @@ describe("createPredictedRoot — per-mount mutation listeners", () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// A refusal or a server failure refreshes canon
+// ---------------------------------------------------------------------------
+
+/** A factory whose refresh carrier counts its requests and completes each at once. */
+function createRefreshCountingFactory(persistence?: QueuePersistence) {
+  const controlled = createControlledSender()
+  const refetch = vi.fn(async () => undefined)
+  const useCountedRefresh = () => useSnapshotRefresh(refetch)
+  const useCounterPredictions = createPredictedRoot({
+    protocol: counterProtocol,
+    scope: () => "actor",
+    send: controlled.send,
+    refresh: useCountedRefresh,
+    persistence,
+  })
+  const mount = (initialCanon = canon(0, 0)) =>
+    renderHook(
+      ({ currentCanon }: { currentCanon: Canon<number> }) =>
+        useCounterPredictions({ canon: currentCanon }),
+      { initialProps: { currentCanon: initialCanon } }
+    )
+
+  return { ...controlled, refetch, mount }
+}
+
+const undeliverable = new TerminalDeliveryError({
+  kind: "undeliverable",
+  error: { code: "invalid-envelope", reason: "invalid-protocol" },
+})
+
+describe("createPredictedRoot — refresh after a failure", () => {
+  it("refreshes once when the local prediction refuses", async () => {
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result } = mount()
+
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+
+    expect(refetch).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("current")
+  })
+
+  it.each([
+    [
+      "a domain refusal",
+      (delivery?: ControlledDelivery) =>
+        delivery?.resolve(err({ code: "prediction-refused" })),
+    ],
+    [
+      "a denial",
+      (delivery?: ControlledDelivery) =>
+        delivery?.reject(new TerminalDeliveryError({ kind: "denied" })),
+    ],
+    [
+      "an undeliverable answer",
+      (delivery?: ControlledDelivery) => delivery?.reject(undeliverable),
+    ],
+  ])("refreshes once after %s", async (_, answer) => {
+    const { mount, refetch, deliveries } = createRefreshCountingFactory()
+    const { result } = mount()
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+
+    await act(async () => answer(deliveries[0]))
+
+    expect(refetch).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("current")
+  })
+
+  it("does not refresh after a stale-client answer", async () => {
+    const { mount, refetch, deliveries } = createRefreshCountingFactory()
+    const { result } = mount()
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "stale-client" }))
+    )
+
+    await expect(receipt.accepted).resolves.toEqual(
+      err({ kind: "stale-client", mayHaveCommitted: false })
+    )
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("does not refresh when newer canon withdraws a refused prediction", async () => {
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result, rerender } = mount()
+    let withdrawn!: MutationReceipt<CounterError>
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+      withdrawn = mutate(result, add({ amount: 1, refuseAt: 11 }))
+    })
+
+    rerender({ currentCanon: canon(10, 10) })
+    await act(async () => {})
+
+    await expect(withdrawn.accepted).resolves.toEqual(
+      err({
+        kind: "replay-refused",
+        error: { code: "prediction-refused" },
+      })
+    )
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("does not refresh when delivery passes control flow to the framework", async () => {
+    const signal = new Error("framework control flow")
+    const captureSignal = (event: ErrorEvent) => {
+      if (event.error === signal) event.preventDefault()
+    }
+    window.addEventListener("error", captureSignal)
+    try {
+      const { deliveries, send } = createControlledSender()
+      const refetch = vi.fn(async () => undefined)
+      const useCountedRefresh = () => useSnapshotRefresh(refetch)
+      const usePredictions = createPredictedRootHook(
+        {
+          protocol: counterProtocol,
+          scope: () => "actor",
+          send,
+          refresh: useCountedRefresh,
+        },
+        (error) => {
+          if (error === signal) throw error
+        }
+      )
+      const initialCanon = canon(0, 0)
+      const { result } = renderHook(() =>
+        usePredictions({ canon: initialCanon })
+      )
+      let receipt!: MutationReceipt<CounterError>
+      act(() => {
+        receipt = mutate(result, add({ amount: 1 }))
+      })
+
+      await act(async () => deliveries[0]?.reject(signal))
+
+      await expect(receipt.accepted).resolves.toEqual(
+        err({ kind: "delivery-cancelled" })
+      )
+      expect(refetch).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener("error", captureSignal)
+    }
+  })
+
+  it("does not refresh when the root unmounts", async () => {
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result, unmount } = mount()
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+
+    unmount()
+
+    await expect(receipt.accepted).resolves.toEqual(
+      err({ kind: "root-unmounted", outcome: "unknown" })
+    )
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("does not refresh an unmounted root when its continued queue fails", async () => {
+    const { persistence } = createMemoryPersistence()
+    const { mount, refetch, deliveries } =
+      createRefreshCountingFactory(persistence)
+    const { result, unmount } = mount()
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+    unmount()
+    await act(async () => {})
+
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+    )
+
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("refreshes after a restored mutation fails, with no listener", async () => {
+    const { persistence } = createMemoryPersistence([
+      storedEnvelope({ amount: 1 }),
+    ])
+    const { mount, refetch, deliveries } =
+      createRefreshCountingFactory(persistence)
+    mount()
+
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+    )
+
+    expect(refetch).toHaveBeenCalledOnce()
+  })
+
+  it("refreshes the root that continues a queue when a mutation it holds no receipt for fails", async () => {
+    // A debounced save fired after its root unmounted; a later root with
+    // the same key now observes the queue.
+    const { persistence } = createMemoryPersistence()
+    const { mount, refetch, deliveries } =
+      createRefreshCountingFactory(persistence)
+    const firstVisit = mount()
+    const staleMutate = firstVisit.result.current.mutate
+    firstVisit.unmount()
+    await act(async () => {})
+    act(() => {
+      acceptedLocally(staleMutate(add({ amount: 1 })))
+    })
+    mount()
+
+    await act(async () =>
+      deliveries[0]?.resolve(err({ code: "prediction-refused" }))
+    )
+
+    expect(refetch).toHaveBeenCalledOnce()
+  })
+
+  it("holds a refusal made offline until the browser is online", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false)
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result } = mount()
+
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    expect(refetch).not.toHaveBeenCalled()
+
+    onLine.mockReturnValue(true)
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+    expect(refetch).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("current")
+  })
+
+  it("refreshes once for several refusals made offline", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false)
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result } = mount()
+
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    onLine.mockReturnValue(true)
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+
+    expect(refetch).toHaveBeenCalledOnce()
+  })
+
+  it("does not refresh for a refusal made offline once the root unmounts", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false)
+    const { mount, refetch } = createRefreshCountingFactory()
+    const { result, unmount } = mount()
+
+    await act(async () => {
+      result.current.mutate(add({ amount: 1, refuseAt: 0 }))
+    })
+    unmount()
+    onLine.mockReturnValue(true)
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it("refreshes once for several failures in one event", async () => {
+    const { mount, refetch, deliveries } = createRefreshCountingFactory()
+    const { result } = mount()
+    act(() => {
+      mutate(result, add({ amount: 1 }))
+    })
+
+    await act(async () => {
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+      result.current.mutate(add({ amount: 1, refuseAt: 1 }))
+      result.current.mutate(add({ amount: 1, refuseAt: 1 }))
+    })
+
+    expect(refetch).toHaveBeenCalledOnce()
+    expect(result.current.status.freshness).toBe("current")
+  })
+})
+
 describe("sessionStoragePersistence", () => {
   afterEach(() => {
     globalThis.sessionStorage.clear()

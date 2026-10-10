@@ -383,6 +383,9 @@ export function createLedgerStore<Invocation, Error>(
   }
   const lifetimes = new Map<string, EntryLifetime<Error>>()
   const listeners = new Set<() => void>()
+  const failureListeners = new Set<
+    (failure: MutationLifecycleError<Error>) => void
+  >()
   /** Settles once every delivery attempt sent so far has been answered. */
   let outstanding: Promise<void> = Promise.resolve()
   /** Storage has been read; until then a write could erase an older page's queue. */
@@ -531,8 +534,8 @@ export function createLedgerStore<Invocation, Error>(
   /**
    * The one terminal settlement: release the Action, resolve the receipt
    * milestones, and drop the entry. A failure settles both milestones (an
-   * already-resolved acceptance keeps its value); canonization settles only
-   * the second.
+   * already-resolved acceptance keeps its value) and is reported to every
+   * failure listener; canonization settles only the second.
    */
   function settle(
     mutationId: string,
@@ -555,6 +558,10 @@ export function createLedgerStore<Invocation, Error>(
       ),
     })
     saveQueue()
+
+    if (result.ok) return
+
+    for (const listener of failureListeners) listener(result.error)
   }
 
   function receiveOutcome(
@@ -906,6 +913,19 @@ export function createLedgerStore<Invocation, Error>(
     subscribe(listener: () => void): () => void {
       listeners.add(listener)
       return () => listeners.delete(listener)
+    },
+
+    /**
+     * Calls `listener` with each failure that ends a mutation of this queue,
+     * whoever holds its receipt, until the returned cleanup runs. Unmount
+     * ends receipts without ending their mutations, so `root-unmounted` is
+     * never reported.
+     */
+    subscribeFailures(
+      listener: (failure: MutationLifecycleError<Error>) => void
+    ): () => void {
+      failureListeners.add(listener)
+      return () => failureListeners.delete(listener)
     },
 
     /**
