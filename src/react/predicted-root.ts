@@ -7,6 +7,7 @@ import {
   useCallback,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -113,7 +114,7 @@ export interface PredictedRoot<State, Invocation, Error> {
    * Predicts `invocation` over `value` and, when the prediction succeeds,
    * queues it for delivery and returns its receipt. An `err` is the local
    * prediction's refusal: nothing was queued. `listeners` override the
-   * factory's `mutationListeners` one stage at a time.
+   * root's `mutationListeners` and then the factory's, one stage at a time.
    */
   readonly mutate: (
     invocation: Invocation,
@@ -229,8 +230,9 @@ export interface PredictedRootOptions<Protocol extends AnyProtocolDefinition> {
    */
   readonly invalidations?: InvalidationAdapter
   /**
-   * Default stage observers used when a mutate call does not override a
-   * stage. They also observe every mutation restored from `persistence`.
+   * Default stage observers used when neither a mutate call nor the mounted
+   * root supplies a stage. They also observe every mutation restored from
+   * `persistence`.
    */
   readonly mutationListeners?: MutationStageListeners<ErrorOf<Protocol>>
   /**
@@ -282,12 +284,20 @@ export interface PredictedRootInput<
   readonly canon: Canon<State>
   /** Root-recovery observers scoped to this mounted aggregate. */
   readonly recoveryListeners?: PredictedRootRecoveryListeners<Invocation, Error>
+  /**
+   * Stage observers scoped to this mounted aggregate. Each stage replaces the
+   * factory's, and a mutate call's own stage replaces both for that call.
+   * They also observe every mutation restored from `persistence`. A stage is
+   * read when it runs, so a receipt that settles after a re-render reports to
+   * that render's listener.
+   */
+  readonly mutationListeners?: MutationStageListeners<Error>
 }
 
 /**
  * The public hook type returned by a predicted-root factory. Its protocol fixes
  * the canon state, invocation union, and correlated mutation error types.
- * @param input The current canon and optional per-mount recovery listeners.
+ * @param input The current canon and optional per-mount listeners.
  * @returns Protocol-specialized predicted root state and controls.
  */
 export type PredictedRootHook<Protocol extends AnyProtocolDefinition> = (
@@ -378,22 +388,23 @@ function persistenceFor<State>(
   return typeof option === "function" ? option(canon) : option
 }
 
-/** Calls the acceptance and canonization listeners when `receipt` settles. */
+/**
+ * Calls the acceptance and canonization listeners when `receipt` settles,
+ * reading each from `stages` at that moment.
+ */
 function observeStages<Error>(
   receipt: MutationReceipt<Error>,
-  stages: MutationStageListeners<Error>,
+  stages: () => MutationStageListeners<Error>,
   restored: boolean
 ): void {
   const mutation: StagedMutation = { id: receipt.id, restored }
-  const { onAcceptance, onCanonization } = stages
 
-  if (onAcceptance) {
-    void receipt.accepted.then((result) => onAcceptance(result, mutation))
-  }
-
-  if (onCanonization) {
-    void receipt.canonized.then((result) => onCanonization(result, mutation))
-  }
+  void receipt.accepted.then((result) =>
+    stages().onAcceptance?.(result, mutation)
+  )
+  void receipt.canonized.then((result) =>
+    stages().onCanonization?.(result, mutation)
+  )
 }
 
 /**
@@ -569,7 +580,11 @@ export function createPredictedRootHook<
   ): LedgerStore<Invocation, Error> =>
     (store.key !== undefined && queues.get(store.key)) || store
 
-  return function usePredictedRoot({ canon, recoveryListeners }) {
+  return function usePredictedRoot({
+    canon,
+    recoveryListeners,
+    mutationListeners,
+  }) {
     const [store] = useState(() => ledgerFor(canon))
     // Identifies this root to the ledger, which may outlive it.
     const [observerToken] = useState(() => ({}))
@@ -594,14 +609,29 @@ export function createPredictedRootHook<
     )
     const listeners = withDefaults(recoveryListeners, options.recoveryListeners)
 
+    // Receipts settle after the render that observed them, so their stages
+    // are read from the latest committed listeners when they run.
+    const latestMutationListeners = useRef(mutationListeners)
+    useLayoutEffect(() => {
+      latestMutationListeners.current = mutationListeners
+    }, [mutationListeners])
+    const mountedStages = useCallback(
+      () =>
+        withDefaults(
+          latestMutationListeners.current,
+          options.mutationListeners
+        ),
+      []
+    )
+
     // Restores in an effect or in `mutate`, never during render, so the
     // hydration render matches the server's. `mutate` restores too because a
     // child's mount effect runs before this root's.
     const restoreQueue = useCallback((): void => {
       for (const receipt of store.restore(observerToken)) {
-        observeStages(receipt, options.mutationListeners ?? {}, true)
+        observeStages(receipt, mountedStages, true)
       }
-    }, [observerToken, store])
+    }, [mountedStages, observerToken, store])
 
     // Set from the effect's cleanup until its next setup: unmount, or React
     // Activity hiding the root. A `mutate` held past it, such as a debounced
@@ -649,7 +679,7 @@ export function createPredictedRootHook<
           unrenderedRestore.length === 0
             ? projection.value
             : project(canon, [...unrenderedRestore, ...ledger.entries]).value
-        const stages = withDefaults(stageOverrides, options.mutationListeners)
+        const stages = () => withDefaults(stageOverrides, mountedStages())
         const envelope = freezeEnvelope({
           protocol: options.protocol.id,
           scope: options.scope(canon),
@@ -660,7 +690,7 @@ export function createPredictedRootHook<
         const predicted = predict(current, envelope)
         if (!predicted.ok) {
           const result = err<Error>(predicted.error)
-          stages.onPrediction?.(result)
+          stages().onPrediction?.(result)
           return result
         }
 
@@ -670,10 +700,10 @@ export function createPredictedRootHook<
         const receipt = queue.enqueue(envelope)
         observeStages(receipt, stages, false)
         const result = ok(receipt)
-        stages.onPrediction?.(result)
+        stages().onPrediction?.(result)
         return result
       },
-      [canon, ledger, projection.value, restoreQueue, store]
+      [canon, ledger, mountedStages, projection.value, restoreQueue, store]
     )
 
     const head = queueHead(ledger.entries)

@@ -3,12 +3,13 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { createElement, type ReactNode } from "react"
-import { ok, type Result } from "serializable-result"
+import { err, ok, type Result } from "serializable-result"
 import { describe, expect, it, vi } from "vitest"
 
 import {
   createPredictedRoot,
   createPredictedRootContext,
+  TerminalDeliveryError,
   useSnapshotRefresh,
   type MutationReceipt,
 } from "."
@@ -129,6 +130,42 @@ describe("createPredictedRootContext", () => {
       expect(onDeliveryUncertain).toHaveBeenCalledWith({
         retry: result.current.first.retryDelivery,
       })
+    )
+  })
+
+  it("reports to the Provider's mutation listeners", async () => {
+    const { deliveries, send } = createControlledSender()
+    const onAcceptance = vi.fn()
+    const useCounterPredictions = createPredictedRoot({
+      protocol: counterProtocol,
+      scope: () => "actor",
+      send,
+      refresh: useNoRefresh,
+    })
+    const CounterRoot = createPredictedRootContext(useCounterPredictions, {
+      name: "CounterRoot",
+    })
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(CounterRoot.Provider, {
+        canon: initialCanon,
+        mutationListeners: { onAcceptance },
+        children,
+      })
+    const { result } = renderHook(() => CounterRoot.useRoot(), { wrapper })
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = acceptedLocally(result.current.mutate(add({ amount: 1 })))
+    })
+    act(() =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+    )
+
+    await waitFor(() =>
+      expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(
+        err({ kind: "denied", mayHaveCommitted: false }),
+        { id: receipt.id, restored: false }
+      )
     )
   })
 

@@ -1650,6 +1650,7 @@ interface MountPersistedOptions {
   readonly scope?: string
   readonly strict?: boolean
   readonly mutationListeners?: MutationStageListeners<CounterError>
+  readonly mountedMutationListeners?: MutationStageListeners<CounterError>
 }
 
 /** Mounts a root as a fresh page would: a new hook, sender, and ledger. */
@@ -1660,6 +1661,7 @@ function mountPersisted(
     scope = "actor",
     strict,
     mutationListeners,
+    mountedMutationListeners,
   }: MountPersistedOptions = {}
 ) {
   const controlled = createControlledSender()
@@ -1677,7 +1679,10 @@ function mountPersisted(
     : undefined
   const rendered = renderHook(
     ({ currentCanon }: { currentCanon: Canon<number> }) =>
-      useCounterPredictions({ canon: currentCanon }),
+      useCounterPredictions({
+        canon: currentCanon,
+        mutationListeners: mountedMutationListeners,
+      }),
     { initialProps: { currentCanon: initialCanon }, wrapper }
   )
 
@@ -3427,6 +3432,144 @@ describe("createPredictedRoot — Activity and a later root", () => {
     await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
     expect(deliveries[1]?.envelope.invocation.args.amount).toBe(2)
     act(() => deliveries[1]?.resolve(ok(stamp(2))))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Per-mount mutation listeners
+// ---------------------------------------------------------------------------
+
+/** A root whose mounted listeners come from its props, so a test can re-render them. */
+function setupMountedListeners(
+  factoryListeners?: MutationStageListeners<CounterError>,
+  persistence?: QueuePersistence
+) {
+  const controlled = createControlledSender()
+  const useCounterPredictions = createPredictedRoot({
+    protocol: counterProtocol,
+    scope: () => "actor",
+    send: controlled.send,
+    refresh: useNoRefresh,
+    mutationListeners: factoryListeners,
+    persistence,
+  })
+  const initialCanon = canon(0, 0)
+  const mount = (listeners?: MutationStageListeners<CounterError>) =>
+    renderHook(
+      ({
+        mutationListeners,
+      }: {
+        mutationListeners?: MutationStageListeners<CounterError>
+      }) => useCounterPredictions({ canon: initialCanon, mutationListeners }),
+      { initialProps: { mutationListeners: listeners } }
+    )
+
+  return { ...controlled, mount }
+}
+
+describe("createPredictedRoot — per-mount mutation listeners", () => {
+  it("reports a restored mutation's failure to the mounted root's listener", async () => {
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence } = createMemoryPersistence([restored])
+    const onAcceptance = vi.fn()
+    const { deliveries } = mountPersisted(persistence, {
+      mountedMutationListeners: { onAcceptance },
+    })
+
+    await act(async () =>
+      deliveries[0]?.reject(new TerminalDeliveryError({ kind: "denied" }))
+    )
+
+    expect(onAcceptance).toHaveBeenCalledExactlyOnceWith(
+      err({ kind: "denied", mayHaveCommitted: true }),
+      { id: restored.mutationId, restored: true }
+    )
+  })
+
+  it("replaces the factory's listeners one stage at a time", async () => {
+    const factoryPrediction = vi.fn()
+    const factoryAcceptance = vi.fn()
+    const factoryCanonization = vi.fn()
+    const mountedAcceptance = vi.fn()
+    const { mount, deliveries } = setupMountedListeners({
+      onPrediction: factoryPrediction,
+      onAcceptance: factoryAcceptance,
+      onCanonization: factoryCanonization,
+    })
+    const { result } = mount({ onAcceptance: mountedAcceptance })
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }))
+    })
+    await act(async () =>
+      deliveries[0]?.resolve(err({ code: "prediction-refused" }))
+    )
+    await receipt.canonized
+
+    const refusal = err({
+      kind: "domain" as const,
+      error: { code: "prediction-refused" as const },
+    })
+    const mutation = { id: receipt.id, restored: false }
+    expect(factoryPrediction).toHaveBeenCalledExactlyOnceWith(ok(receipt))
+    expect(mountedAcceptance).toHaveBeenCalledExactlyOnceWith(refusal, mutation)
+    expect(factoryAcceptance).not.toHaveBeenCalled()
+    expect(factoryCanonization).toHaveBeenCalledExactlyOnceWith(
+      refusal,
+      mutation
+    )
+  })
+
+  it("lets a mutate call's own stage replace both for that call", async () => {
+    const factoryAcceptance = vi.fn()
+    const mountedAcceptance = vi.fn()
+    const callAcceptance = vi.fn()
+    const { mount, deliveries } = setupMountedListeners({
+      onAcceptance: factoryAcceptance,
+    })
+    const { result } = mount({ onAcceptance: mountedAcceptance })
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 1 }), {
+        onAcceptance: callAcceptance,
+      })
+    })
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    await receipt.accepted
+
+    expect(callAcceptance).toHaveBeenCalledExactlyOnceWith(ok(stamp(1)), {
+      id: receipt.id,
+      restored: false,
+    })
+    expect(mountedAcceptance).not.toHaveBeenCalled()
+    expect(factoryAcceptance).not.toHaveBeenCalled()
+  })
+
+  it("calls the latest render's listener when a pending or restored receipt settles", async () => {
+    const restored = storedEnvelope({ amount: 1 })
+    const { persistence } = createMemoryPersistence([restored])
+    const earlier = vi.fn()
+    const later = vi.fn()
+    const { mount, deliveries } = setupMountedListeners(undefined, persistence)
+    const { result, rerender } = mount({ onAcceptance: earlier })
+
+    let receipt!: MutationReceipt<CounterError>
+    act(() => {
+      receipt = mutate(result, add({ amount: 2 }))
+    })
+    rerender({ mutationListeners: { onAcceptance: later } })
+    await act(async () => deliveries[0]?.resolve(ok(stamp(1))))
+    await waitFor(() => expect(deliveries).toHaveLength(2))
+    await act(async () => deliveries[1]?.resolve(ok(stamp(2))))
+    await receipt.accepted
+
+    expect(earlier).not.toHaveBeenCalled()
+    expect(later.mock.calls).toEqual([
+      [ok(stamp(1)), { id: restored.mutationId, restored: true }],
+      [ok(stamp(2)), { id: receipt.id, restored: false }],
+    ])
   })
 })
 

@@ -43,7 +43,7 @@ The check matters because a mutation can be delivered after the session changed.
 
 The root does not discard queued mutations when the user changes; they fail with `"denied"`. Include the user's ID in a `persistence` key, so that the next user's root does not restore the previous user's queue.
 
-> **Breaking change in 0.4.0.** Predicted roots require `scope`, operation hooks require `scope`, and every envelope carries a `scope` field. The server rejects an envelope without it as `invalid-envelope` with reason `unexpected-fields`, and a root drops a stored envelope without it. Reload old clients after you deploy.
+> **Breaking change in 0.4.0.** Predicted roots require `scope`, operation hooks require `scope`, and every envelope carries a `scope` field. The server rejects an envelope without it as `invalid-envelope` with reason `unexpected-fields`, and a root or an operation hook drops a stored envelope without it. Reload old clients after you deploy.
 
 ## Share one root across components
 
@@ -230,6 +230,10 @@ Both promises resolve with a `Result`; they never reject. Check `ok` instead of 
 
 Pass `mutationListeners` to `createNextPredictedRoot` for shared defaults. A `mutate` call overrides only the stages it supplies. For example, a call with `onAcceptance` keeps the factory's prediction and canonization listeners but replaces its acceptance listener; the factory's acceptance listener does not run.
 
+The factory is configured outside your components, so its listeners cannot use React state or context. Pass `mutationListeners` to the root itself, as `useNote({ canon, mutationListeners })` or a prop of `NoteRoot.Provider`, for listeners that need them, such as a toast service from context. They also observe the mutations the root restores after a reload; see [Keep the queue across a reload](#keep-the-queue-across-a-reload).
+
+Each stage comes from the most specific source that supplies it: the `mutate` call, then the mounted root, then the factory. A stage from the mounted root replaces the factory's stage; one from the `mutate` call replaces both for that call. The root reads its own listeners when a stage runs, not when the mutation is queued, so a receipt that settles after a re-render reports to the listener of the latest render. Listeners passed to a `mutate` call stay fixed for that call.
+
 If `onPrediction` throws, the exception comes out of `mutate` in your event handler. On a successful prediction, the mutation is already queued before that callback runs; the exception does not undo it. If `onAcceptance` or `onCanonization` throws, it produces an unhandled promise rejection: Headcanon attaches these callbacks with `.then(...)` and does not catch the returned promise. The original receipt promises still resolve with a `Result`. Handle errors inside listeners and in any asynchronous work they start.
 
 ## Read delivery and freshness separately
@@ -402,7 +406,7 @@ That ordering applies only within the unsent group. While mounted, the queue wai
 
 With `persistence`, the queue outlives its root. After unmount, the root's mutations keep being delivered in order, one at a time, including a mutation queued at unmount, such as an autosave flushed from an unmount cleanup, or by a `mutate` call that runs after unmount, such as a debounced save. Delivery stops at a mutation whose outcome is uncertain, so a later mutation never commits before an earlier one that did not reach the server. A mutation that is still being sent finishes, and its answer still updates storage.
 
-A root of the same factory that later mounts with the same key continues that queue instead of restoring it from storage. It shows every mutation still in the queue, including one accepted after unmount until the new root's canon includes it, and reports their outcomes to the factory's `mutationListeners` with `restored: true`. It delivers an uncertain mutation again, as a reload does. When a root replaces another in one commit, such as after a change of React `key`, the old root's receipts settle with `"root-unmounted"` and the new root continues the queue. See [Keep the queue across a reload](#keep-the-queue-across-a-reload).
+A root of the same factory that later mounts with the same key continues that queue instead of restoring it from storage. It shows every mutation still in the queue, including one accepted after unmount until the new root's canon includes it, and reports their outcomes to its `mutationListeners` with `restored: true`. It delivers an uncertain mutation again, as a reload does. When a root replaces another in one commit, such as after a change of React `key`, the old root's receipts settle with `"root-unmounted"` and the new root continues the queue. See [Keep the queue across a reload](#keep-the-queue-across-a-reload).
 
 Background delivery still calls `send`. With the Next binding, a Server Action that redirects can still navigate the page after the root has unmounted; the root itself passes no control flow to React.
 
@@ -442,6 +446,22 @@ export const useNote = createNextPredictedRoot({
 
 `showNotice` is an application-owned helper.
 
+To show the notice through React state or context, pass the listener to the mounted root instead. `useToast` is an application-owned hook:
+
+```ts
+const toast = useToast()
+const root = useNote({
+  canon,
+  mutationListeners: {
+    onAcceptance(result, mutation) {
+      if (mutation.restored && !result.ok) {
+        toast("A change made before the page reloaded was not saved.")
+      }
+    },
+  },
+})
+```
+
 Each root calls the function once, when it mounts, with its first canon. Key the root by the record's identity (see [Share one root across components](#share-one-root-across-components)), so the record's ID does not change while the root is mounted. Return `undefined` to keep a root's queue in memory only. A single `QueuePersistence` object, instead of a function, gives every root of the factory the same key; use it only when the factory mounts one root at a time.
 
 The key also names the queue in memory. While a queue still has mutations to deliver after its root unmounts, a root of the same factory that mounts with the same key continues it. Use each key with one factory only.
@@ -450,7 +470,7 @@ The root stores each envelope (mutation ID, protocol, `scope`, `createdAt`, and 
 
 When a root mounts, it restores the stored mutations once, ahead of any new mutation, and delivers them again in order under their original mutation IDs. A `mutate` call that comes first, such as one from a child's mount effect, restores the queue itself and is predicted over the restored mutations. This is safe: the server keeps one receipt per mutation ID, so a mutation that already committed gets its stored outcome and is not applied twice. The restored predictions are replayed over the new page's canon, like any pending mutation. A restored mutation may already have been sent by the earlier page, so a replay refusal hides its prediction but does not withdraw it; the root waits for the server's answer.
 
-Restored mutations count in `status.pending` and `status.delivery`. No `mutate` call holds their receipts, so the factory's `mutationListeners` report them. `onAcceptance` and `onCanonization` receive a second argument, `{ id, restored }`; `restored` is `true` for a restored mutation. `onPrediction` does not run for it.
+Restored mutations count in `status.pending` and `status.delivery`. No `mutate` call holds their receipts, so the root's `mutationListeners` report them: the mounted root's stages, and the factory's for the stages the root does not supply. `onAcceptance` and `onCanonization` receive a second argument, `{ id, restored }`; `restored` is `true` for a restored mutation. `onPrediction` does not run for it.
 
 The root checks every stored envelope before it restores it. It drops an envelope for a different protocol ID, an unknown mutation name, an envelope with missing or extra fields (including a missing `scope` or `createdAt`), arguments that the mutation's schema refuses or changes (the server admits only arguments in parsed form), and a repeated mutation ID. A stored value that is not valid JSON is dropped completely. A schema that validates asynchronously cannot be checked in time, so its mutations are dropped too. Dropped mutations are not reported.
 
